@@ -30,9 +30,106 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
     return ThinkspaceView(context)
   }
 
-  @ReactProp(name = "color")
-  override fun setColor(view: ThinkspaceView?, color: Int?) {
-    view?.setBackgroundColor(color ?: Color.TRANSPARENT)
+  @ReactProp(name = "documentJson")
+  override fun setDocumentJson(view: ThinkspaceView?, value: String?) {
+    view?.setDocumentFromJson(value)
+  }
+
+  @ReactProp(name = "annotationsJson")
+  override fun setAnnotationsJson(view: ThinkspaceView?, value: String?) {
+    view?.setAnnotationsFromJson(value)
+  }
+
+  @ReactProp(name = "isSqueezed")
+  override fun setIsSqueezed(view: ThinkspaceView?, value: Boolean) {
+    view?.isSqueezed = value
+    view?.invalidate()
+  }
+
+  @ReactProp(name = "splitRatio")
+  override fun setSplitRatio(view: ThinkspaceView?, value: Float) {
+    if (view == null || value <= 0f) return
+    view.splitRatio = value
+    view.invalidate()
+  }
+
+  @ReactProp(name = "activeTool")
+  override fun setActiveTool(view: ThinkspaceView?, value: String?) {
+    view?.activeTool = value ?: "select"
+  }
+
+  @ReactProp(name = "selectedColor")
+  override fun setSelectedColor(view: ThinkspaceView?, value: String?) {
+    if (view == null || value.isNullOrEmpty()) return
+    try {
+      view.selectedColor = Color.parseColor(value)
+    } catch (e: Exception) {
+      // Ignored
+    }
+  }
+
+  @ReactProp(name = "pattern")
+  override fun setPattern(view: ThinkspaceView?, value: String?) {
+    view?.pattern = value ?: "looseleaf"
+    view?.invalidate()
+  }
+
+  @ReactProp(name = "strokesJson")
+  override fun setStrokesJson(view: ThinkspaceView?, value: String?) {
+    view?.setStrokesFromJson(value)
+  }
+
+  @ReactProp(name = "excerptsJson")
+  override fun setExcerptsJson(view: ThinkspaceView?, value: String?) {
+    view?.setCardsFromJson(value)
+  }
+
+  @ReactProp(name = "inkLinksJson")
+  override fun setInkLinksJson(view: ThinkspaceView?, value: String?) {
+    view?.setLinksFromJson(value)
+  }
+
+  @ReactProp(name = "panX")
+  override fun setPanX(view: ThinkspaceView?, value: Float) {
+    if (view == null) return
+    view.panX = value
+    view.invalidate()
+  }
+
+  @ReactProp(name = "panY")
+  override fun setPanY(view: ThinkspaceView?, value: Float) {
+    if (view == null) return
+    view.panY = value
+    view.invalidate()
+  }
+
+  @ReactProp(name = "scale")
+  override fun setScale(view: ThinkspaceView?, value: Float) {
+    if (view == null || value <= 0f) return
+    view.scaleFactor = value
+    view.invalidate()
+  }
+
+  override fun getExportedCustomDirectEventTypeConstants(): MutableMap<String, Any> {
+    val map = super.getExportedCustomDirectEventTypeConstants() ?: mutableMapOf()
+    val events = listOf(
+      "topAddStroke" to "onAddStroke",
+      "topEraseStroke" to "onEraseStroke",
+      "topExcerptMoveEnd" to "onExcerptMoveEnd",
+      "topExcerptPress" to "onExcerptPress",
+      "topCardDelete" to "onCardDelete",
+      "topChangeCardColor" to "onChangeCardColor",
+      "topUpdateCardComment" to "onUpdateCardComment",
+      "topHoldCard" to "onHoldCard",
+      "topTransformChange" to "onTransformChange",
+      "topSplitRatioChange" to "onSplitRatioChange",
+      "topExtractExcerpt" to "onExtractExcerpt",
+      "topToggleSqueeze" to "onToggleSqueeze"
+    )
+    for ((top, on) in events) {
+      map[top] = mapOf("registrationName" to on)
+    }
+    return map
   }
 
   companion object {

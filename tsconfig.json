@@ -2,7 +2,8 @@
   "compilerOptions": {
     "rootDir": ".",
     "paths": {
-      "thinkspace": ["./src/index"]
+      "thinkspace": ["./src/index"],
+      "react-native/Libraries/Types/CodegenTypes": ["./node_modules/react-native/Libraries/Types/CodegenTypesNamespace.d.ts"]
     },
     "allowUnreachableCode": false,
     "allowUnusedLabels": false,
@@ -13,7 +14,7 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "jsx": "react-jsx",
-    "lib": ["ESNext"],
+    "lib": ["ESNext", "DOM"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "noEmit": true,
