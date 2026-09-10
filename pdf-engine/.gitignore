@@ -1,0 +1,18 @@
+# Gradle & Build artifacts
+.gradle/
+build/
+*.aar
+*.apk
+
+# Local configuration & keys
+local.properties
+debug.keystore
+
+# Kotlin & IDE
+.kotlin/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db

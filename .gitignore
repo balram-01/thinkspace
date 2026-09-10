@@ -40,6 +40,9 @@ project.xcworkspace
 .settings
 local.properties
 android.iml
+.kotlin/
+*.aar
+*.apk
 
 # Cocoapods
 #
