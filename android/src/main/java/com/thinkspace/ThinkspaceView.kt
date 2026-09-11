@@ -212,6 +212,7 @@ class ThinkspaceView : View {
   var activeTool: String = "select" // "select", "pan", "pen", "highlighter", "eraser"
   var selectedColor: Int = Color.parseColor("#00ADB5")
   var pattern: String = "looseleaf"
+  var showCanvasToolbar: Boolean = false
   val camera = CameraState()
   var panX: Float
     get() = camera.panX
@@ -352,6 +353,7 @@ class ThinkspaceView : View {
   private val headerModeTextRect = RectF()
   private val headerModeCropRect = RectF()
   private val headerSqueezeRect = RectF()
+  private val rightSqueezeTabRect = RectF()
   private val headerSearchRect = RectF()
   private val headerZoomOutRect = RectF()
   private val headerZoomResetRect = RectF()
@@ -1054,13 +1056,6 @@ class ThinkspaceView : View {
         )
       }
 
-      // Preserve any locally dropped cards not yet present in React Native state
-      for (localCard in cards) {
-        if (updatedList.none { it.id == localCard.id || (it.isImage && localCard.isImage && it.pageNumber == localCard.pageNumber) }) {
-          updatedList.add(localCard)
-        }
-      }
-
       cards.clear()
       cards.addAll(updatedList)
     } catch (e: Exception) {
@@ -1155,80 +1150,104 @@ class ThinkspaceView : View {
         ?: "PDF Document"
       val pageTotal = activePdfDoc?.pageCount ?: activeDocument?.pageCount ?: 1
 
-      // 1. Document Pill
-      val displayTitle = if (titleStr.length > 18) titleStr.substring(0, 16) + "... ▾" else "$titleStr ▾"
-      val pillW = badgeTextPaint.measureText(displayTitle) + 24f * density
-      val btnTop = (subheaderH - 34f * density) / 2f
-      val btnBottom = btnTop + 34f * density
+      // 1. Document Pill matching Screenshot [Kshitija_Resume (34) ▾]
+      val displayTitle = if (titleStr.length > 22) titleStr.substring(0, 20) + "... ▾" else "$titleStr ▾"
+      val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00ADB5")
+        textSize = 13f * density
+        isFakeBoldText = true
+      }
+      val pillW = titlePaint.measureText(displayTitle) + 20f * density
+      val btnTop = (subheaderH - 30f * density) / 2f
+      val btnBottom = btnTop + 30f * density
 
       headerDocPillRect.set(12f * density, btnTop, 12f * density + pillW, btnBottom)
-      canvas.drawRoundRect(headerDocPillRect, 14f * density, 14f * density, dividerHandlePaint)
-      canvas.drawRoundRect(headerDocPillRect, 14f * density, 14f * density, dividerBorderPaint)
-      canvas.drawText(displayTitle, 20f * density, btnTop + 22f * density, badgeTextPaint)
+      val docPillBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#0A2430")
+        style = Paint.Style.FILL
+      }
+      val docPillBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00ADB5")
+        alpha = 150
+        strokeWidth = 1f * density
+        style = Paint.Style.STROKE
+      }
+      canvas.drawRoundRect(headerDocPillRect, 8f * density, 8f * density, docPillBg)
+      canvas.drawRoundRect(headerDocPillRect, 8f * density, 8f * density, docPillBorder)
+      titlePaint.textAlign = Paint.Align.CENTER
+      canvas.drawText(displayTitle, headerDocPillRect.centerX(), btnTop + 19.5f * density, titlePaint)
 
-      // Page Pill
+      // Page Pill: p. 1/1
       val curPageNum = (pageLayouts.firstOrNull { it.boundsOnScreen.bottom > subheaderH + 20f }?.pageNumber ?: 1).coerceIn(1, pageTotal)
-      val pageInd = "p. $curPageNum / $pageTotal"
-      canvas.drawText(pageInd, 12f * density + pillW + 12f * density, btnTop + 22f * density, docTitlePaint)
+      val pageInd = "p. $curPageNum/$pageTotal"
+      val pageIndPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#94A3B8")
+        textSize = 12f * density
+        isFakeBoldText = true
+      }
+      canvas.drawText(pageInd, headerDocPillRect.right + 12f * density, btnTop + 19.5f * density, pageIndPaint)
 
-      // Right Side Controls matching Video: Crop toggle [X Crop], Zoom Pill [- 1:1 +], and Accordion Squeeze [🪗]
-      val cropBtnW = 82f * density
-      val cropBtnLeft = viewW - 12f * density - cropBtnW
-
+      // Right Side Controls matching Screenshot: [✂ Crop] then [- 1:1 +] on far right
       val zoomPillW = 86f * density
-      val zoomPillLeft = cropBtnLeft - 8f * density - zoomPillW
+      val zoomPillLeft = viewW - 12f * density - zoomPillW
 
-      val squeezeBtnW = 38f * density
-      val squeezeBtnLeft = zoomPillLeft - 8f * density - squeezeBtnW
+      val cropBtnW = 76f * density
+      val cropBtnLeft = zoomPillLeft - 8f * density - cropBtnW
 
-      // Squeeze Button [🪗]
-      headerSqueezeRect.set(squeezeBtnLeft, btnTop, squeezeBtnLeft + squeezeBtnW, btnBottom)
-      val sqBg = if (isSqueezed) Color.parseColor("#00ADB5") else Color.parseColor("#1E293B")
-      canvas.drawRoundRect(headerSqueezeRect, 10f * density, 10f * density, Paint().apply { color = sqBg })
-      canvas.drawText("🪗", squeezeBtnLeft + 10f * density, btnTop + 23f * density, TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 16f * density })
+      // Crop Mode Toggle [✂ Crop]
+      headerModeCropRect.set(cropBtnLeft, btnTop, cropBtnLeft + cropBtnW, btnBottom)
+      val cropBg = if (docMode == "crop") Color.parseColor("#00ADB5") else Color.parseColor("#0F172A")
+      val cropBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00ADB5")
+        strokeWidth = 1.2f * density
+        style = Paint.Style.STROKE
+      }
+      canvas.drawRoundRect(headerModeCropRect, 8f * density, 8f * density, Paint().apply { color = cropBg })
+      canvas.drawRoundRect(headerModeCropRect, 8f * density, 8f * density, cropBorderPaint)
+      val cropTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = if (docMode == "crop") Color.WHITE else Color.parseColor("#00ADB5")
+        textSize = 12.5f * density
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = true
+      }
+      canvas.drawText("✂ Crop", headerModeCropRect.centerX(), btnTop + 19.5f * density, cropTextPaint)
 
-      // Zoom Pill [- 1:1 +]
-      val zoomBgPaint = Paint().apply { color = Color.parseColor("#1E293B") }
+      // Segmented Zoom Pill [- 1:1 +] on far right
+      val zoomBgPaint = Paint().apply { color = Color.parseColor("#0F172A") }
       val zoomBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#334155")
         strokeWidth = 1f * density
         style = Paint.Style.STROKE
       }
       val zoomFullRect = RectF(zoomPillLeft, btnTop, zoomPillLeft + zoomPillW, btnBottom)
-      canvas.drawRoundRect(zoomFullRect, 10f * density, 10f * density, zoomBgPaint)
-      canvas.drawRoundRect(zoomFullRect, 10f * density, 10f * density, zoomBorderPaint)
+      canvas.drawRoundRect(zoomFullRect, 8f * density, 8f * density, zoomBgPaint)
+      canvas.drawRoundRect(zoomFullRect, 8f * density, 8f * density, zoomBorderPaint)
 
       val zoomSegW = zoomPillW / 3f
       headerZoomOutRect.set(zoomPillLeft, btnTop, zoomPillLeft + zoomSegW, btnBottom)
       headerZoomResetRect.set(zoomPillLeft + zoomSegW, btnTop, zoomPillLeft + zoomSegW * 2f, btnBottom)
       headerZoomInRect.set(zoomPillLeft + zoomSegW * 2f, btnTop, zoomPillLeft + zoomPillW, btnBottom)
 
+      // Segment dividing lines
+      canvas.drawLine(zoomPillLeft + zoomSegW, btnTop + 4f * density, zoomPillLeft + zoomSegW, btnBottom - 4f * density, zoomBorderPaint)
+      canvas.drawLine(zoomPillLeft + zoomSegW * 2f, btnTop + 4f * density, zoomPillLeft + zoomSegW * 2f, btnBottom - 4f * density, zoomBorderPaint)
+
       val zoomTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
+        color = Color.parseColor("#00ADB5")
         textSize = 12f * density
+        textAlign = Paint.Align.CENTER
         isFakeBoldText = true
       }
-      canvas.drawText("-", headerZoomOutRect.centerX() - 3f * density, btnTop + 21f * density, zoomTextPaint)
-      canvas.drawText("1:1", headerZoomResetRect.centerX() - 9f * density, btnTop + 21f * density, zoomTextPaint)
-      canvas.drawText("+", headerZoomInRect.centerX() - 4f * density, btnTop + 21f * density, zoomTextPaint)
-
-      // Crop Mode Toggle [✕ Crop] or [✂️ Crop]
-      headerModeCropRect.set(cropBtnLeft, btnTop, cropBtnLeft + cropBtnW, btnBottom)
-      val cropBg = if (docMode == "crop") Color.parseColor("#00ADB5") else Color.parseColor("#1E293B")
-      val cropText = if (docMode == "crop") "✕ Crop" else "✂️ Crop"
-      canvas.drawRoundRect(headerModeCropRect, 10f * density, 10f * density, Paint().apply { color = cropBg })
-      canvas.drawText(cropText, cropBtnLeft + 14f * density, btnTop + 22f * density, TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = 13f * density
-        isFakeBoldText = true
-      })
+      canvas.drawText("-", headerZoomOutRect.centerX(), btnTop + 19.5f * density, zoomTextPaint)
+      canvas.drawText("1:1", headerZoomResetRect.centerX(), btnTop + 19.5f * density, zoomTextPaint)
+      canvas.drawText("+", headerZoomInRect.centerX(), btnTop + 19.5f * density, zoomTextPaint)
 
       // -----------------------------------------------------------------------
       // Render Document Pages (Real PDF Document or Fallback Structured Sections)
       // -----------------------------------------------------------------------
-      val paperMargin = 16f
-      val paperW = min(viewW - paperMargin * 2f, 680f)
-      val paperX = (viewW - paperW) / 2f
+      val paperMargin = 10f * density
+      val paperW = viewW - paperMargin * 2f
+      val paperX = paperMargin
 
       pageLayouts.clear()
 
@@ -1390,84 +1409,137 @@ class ThinkspaceView : View {
           }
         }
       } else if (activeDocument != null) {
-        // Fallback Structured Text Sections
+        // Fallback Structured Text Sections rendered as a clean resume sheet matching screenshot
         val doc = activeDocument!!
         paragraphLayouts.clear()
-        var curY = subheaderH + 16f - docScrollY
+
+        val paperTopY = subheaderH + 10f * density - docScrollY
+        val contentPadding = 18f * density
+        val textW = max(20, (paperW - contentPadding * 2f).toInt())
+
+        val headerNamePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#0F172A")
+          textSize = 18f * density
+          typeface = Typeface.SERIF
+          isFakeBoldText = true
+        }
+        val headerContactPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#334155")
+          textSize = 8.5f * density
+          typeface = Typeface.SERIF
+        }
+        val sectionTitlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#0F172A")
+          textSize = 10.5f * density
+          typeface = Typeface.SERIF
+          isFakeBoldText = true
+        }
+        val sectionRulePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#1E293B")
+          strokeWidth = 0.8f * density
+        }
+        val resumeParaPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#1E293B")
+          textSize = 9.5f * density
+          typeface = Typeface.SERIF
+        }
+
+        // Draw unified white paper sheet
+        val sheetH = max((docBottomY - subheaderH) * 1.5f, 900f * density)
+        val paperRect = RectF(paperX, paperTopY, paperX + paperW, paperTopY + sheetH)
+        canvas.drawRect(paperRect, docPageBgPaint)
+        canvas.drawRect(paperRect, docPageBorderPaint)
+
+        pageLayouts.add(
+          PdfPageLayout(
+            pageIndex = 0,
+            pageNumber = 1,
+            pageSize = PageSize.LETTER,
+            topY = paperTopY,
+            height = sheetH,
+            isFolded = isSqueezed,
+            boundsOnScreen = paperRect
+          )
+        )
+
+        var curY = paperTopY + 22f * density
 
         for (sec in doc.sections) {
           val secAnns = annotations.filter { it.sectionId == sec.id }
           val hasAnn = secAnns.isNotEmpty()
 
-          if (isSqueezed && !hasAnn) {
-            val foldRect = RectF(paperX, curY, paperX + paperW, curY + 28f)
-            canvas.drawRoundRect(foldRect, 6f, 6f, dividerHandlePaint)
-            canvas.drawText("── Page ${sec.pageNumber}: ${sec.heading} (Folded) ──", paperX + 16f, curY + 18f, commentPaint)
-            curY += 34f
+          if (isSqueezed && !hasAnn && sec.id != "sec-header") {
+            val foldRect = RectF(paperX + contentPadding, curY, paperX + paperW - contentPadding, curY + 24f * density)
+            canvas.drawRoundRect(foldRect, 6f * density, 6f * density, dividerHandlePaint)
+            canvas.drawText("── ${sec.heading} (Folded) ──", paperX + contentPadding + 10f * density, curY + 16f * density, commentPaint)
+            curY += 30f * density
             continue
           }
 
-          var sectionContentH = 60f
-          for (para in sec.paragraphs) {
-            val textW = max(20, (paperW - 56f).toInt())
-            val layout = StaticLayout.Builder
-              .obtain(para, 0, para.length, docParagraphPaint, textW)
-              .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-              .setLineSpacing(0f, 1.25f)
-              .build()
-            sectionContentH += layout.height + 24f
-          }
+          if (sec.id == "sec-header") {
+            val nameText = sec.heading
+            val nameW = headerNamePaint.measureText(nameText)
+            canvas.drawText(nameText, paperX + (paperW - nameW) / 2f, curY + 16f * density, headerNamePaint)
+            curY += 22f * density
 
-          val pageCardRect = RectF(paperX, curY, paperX + paperW, curY + sectionContentH)
-          canvas.drawRoundRect(pageCardRect, 8f, 8f, docPageBgPaint)
-          canvas.drawRoundRect(pageCardRect, 8f, 8f, docPageBorderPaint)
-
-          val headingText = sec.heading.uppercase()
-          val headingW = docHeadingPaint.measureText(headingText)
-          val headingX = paperX + (paperW - headingW) / 2f
-          canvas.drawText(headingText, headingX, curY + 36f, docHeadingPaint)
-          curY += 56f
-
-          for ((pIdx, para) in sec.paragraphs.withIndex()) {
-            val ann = secAnns.find { it.paragraphIndex == pIdx }
-            val isHighlighted = ann != null
-
-            val textW = max(20, (paperW - 56f).toInt())
-            val staticLayout = StaticLayout.Builder
-              .obtain(para, 0, para.length, docParagraphPaint, textW)
-              .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-              .setLineSpacing(0f, 1.25f)
-              .build()
-
-            paragraphLayouts.add(
-              ParagraphLayoutInfo(
-                secId = sec.id,
-                pIdx = pIdx,
-                pageNumber = sec.pageNumber,
-                text = para,
-                paperX = paperX,
-                topY = curY,
-                width = (paperW - 56f),
-                layout = staticLayout
-              )
-            )
-
-            val paraH = staticLayout.height.toFloat() + 16f
-            if (isHighlighted) {
-              val hlRect = RectF(paperX + 16f, curY - 4f, paperX + paperW - 16f, curY + paraH)
-              highlightBgPaint.color = ann.color
-              highlightBgPaint.alpha = 40
-              canvas.drawRoundRect(hlRect, 6f, 6f, highlightBgPaint)
+            for (para in sec.paragraphs) {
+              val contactW = headerContactPaint.measureText(para)
+              canvas.drawText(para, paperX + (paperW - contactW) / 2f, curY + 10f * density, headerContactPaint)
+              curY += 16f * density
             }
+            curY += 10f * density
+          } else {
+            val headingText = sec.heading.uppercase()
+            canvas.drawText(headingText, paperX + contentPadding, curY + 12f * density, sectionTitlePaint)
+            canvas.drawLine(
+              paperX + contentPadding,
+              curY + 16f * density,
+              paperX + paperW - contentPadding,
+              curY + 16f * density,
+              sectionRulePaint
+            )
+            curY += 22f * density
 
-            canvas.save()
-            canvas.translate(paperX + 28f, curY)
-            staticLayout.draw(canvas)
-            canvas.restore()
+            for ((pIdx, para) in sec.paragraphs.withIndex()) {
+              val ann = secAnns.find { it.paragraphIndex == pIdx }
+              val isHighlighted = ann != null
 
-            curY += paraH + 12f
+              val staticLayout = StaticLayout.Builder
+                .obtain(para, 0, para.length, resumeParaPaint, textW)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setLineSpacing(0f, 1.25f)
+                .build()
+
+              paragraphLayouts.add(
+                ParagraphLayoutInfo(
+                  secId = sec.id,
+                  pIdx = pIdx,
+                  pageNumber = sec.pageNumber,
+                  text = para,
+                  paperX = paperX + contentPadding,
+                  topY = curY,
+                  width = textW.toFloat(),
+                  layout = staticLayout
+                )
+              )
+
+              val paraH = staticLayout.height.toFloat()
+              if (isHighlighted) {
+                val hlRect = RectF(paperX + contentPadding - 4f * density, curY - 2f * density, paperX + paperW - contentPadding + 4f * density, curY + paraH + 2f * density)
+                highlightBgPaint.color = ann.color
+                highlightBgPaint.alpha = 40
+                canvas.drawRoundRect(hlRect, 4f * density, 4f * density, highlightBgPaint)
+              }
+
+              canvas.save()
+              canvas.translate(paperX + contentPadding, curY)
+              staticLayout.draw(canvas)
+              canvas.restore()
+
+              curY += paraH + 10f * density
+            }
+            curY += 8f * density
           }
-          curY += 24f
         }
         maxDocScrollY = max(0f, curY + docScrollY - docBottomY + 40f)
       }
@@ -1598,29 +1670,77 @@ class ThinkspaceView : View {
         canvas.drawText("✕", cropSel.calloutCloseBtn.left + 8f * density, cropSel.calloutCloseBtn.centerY() + 5f * density, closeBtnTextPaint)
       }
 
+      // Floating Squeeze Tab on the right edge of the PDF document (§10 of spec / screenshot)
+      val rightTabW = 22f * density
+      val rightTabH = 34f * density
+      val rightTabX = viewW - rightTabW - 6f * density
+      val rightTabY = (subheaderH + docBottomY) / 2f - rightTabH / 2f
+      rightSqueezeTabRect.set(rightTabX, rightTabY, rightTabX + rightTabW, rightTabY + rightTabH)
+
+      val sqTabBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#0F172A")
+        style = Paint.Style.FILL
+      }
+      val sqTabBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = if (isSqueezed) Color.parseColor("#00ADB5") else Color.parseColor("#334155")
+        strokeWidth = 1.2f * density
+        style = Paint.Style.STROKE
+      }
+      canvas.drawRoundRect(rightSqueezeTabRect, 11f * density, 11f * density, sqTabBg)
+      canvas.drawRoundRect(rightSqueezeTabRect, 11f * density, 11f * density, sqTabBorder)
+
+      val sqTabText = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = if (isSqueezed) Color.parseColor("#00ADB5") else Color.parseColor("#94A3B8")
+        textSize = 15f * density
+        textAlign = Paint.Align.CENTER
+      }
+      canvas.drawText("≈", rightSqueezeTabRect.centerX(), rightSqueezeTabRect.centerY() + 5.5f * density, sqTabText)
+
       canvas.restore()
     }
 
     // =========================================================================
-    // 2. RESIZABLE SPLIT DIVIDER
+    // 2. RESIZABLE SPLIT DIVIDER matching Screenshot
     // =========================================================================
     if (hasDoc && docBottomY > 10f) {
+      dividerLinePaint.color = Color.parseColor("#1E293B")
+      dividerLinePaint.strokeWidth = 1f * density
       canvas.drawLine(0f, splitY, viewW, splitY, dividerLinePaint)
 
-      val pillW = 160f
-      val pillH = 26f
+      // Center pill handle with cyan border and 3 horizontal grip lines (≡)
+      val pillW = 56f * density
+      val pillH = 18f * density
       val pillX = (viewW - pillW) / 2f
       val pillY = splitY - pillH / 2f
       val handleRect = RectF(pillX, pillY, pillX + pillW, pillY + pillH)
-      canvas.drawRoundRect(handleRect, 13f, 13f, dividerHandlePaint)
-      canvas.drawRoundRect(handleRect, 13f, 13f, dividerBorderPaint)
 
-      // Live Split Ratio Percentage Badge
-      val pctDoc = (splitRatio * 100).toInt()
-      val pctCanvas = 100 - pctDoc
-      val ratioText = "↕ $pctDoc% Doc | $pctCanvas% Canvas"
-      val textX = pillX + (pillW - badgeTextPaint.measureText(ratioText)) / 2f
-      canvas.drawText(ratioText, textX, pillY + 18f, badgeTextPaint)
+      val pillBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#0F172A")
+        style = Paint.Style.FILL
+      }
+      val pillBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00ADB5")
+        strokeWidth = 1.5f * density
+        style = Paint.Style.STROKE
+      }
+      canvas.drawRoundRect(handleRect, pillH / 2f, pillH / 2f, pillBg)
+      canvas.drawRoundRect(handleRect, pillH / 2f, pillH / 2f, pillBorder)
+
+      // 3 horizontal cyan lines (≡)
+      val gripPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00ADB5")
+        strokeWidth = 1.6f * density
+        strokeCap = Paint.Cap.ROUND
+      }
+      val lineW = 20f * density
+      val lineLeft = pillX + (pillW - lineW) / 2f
+      val lineRight = lineLeft + lineW
+      val lineCenterY = pillY + pillH / 2f
+      val lineSpacing = 3.6f * density
+
+      canvas.drawLine(lineLeft, lineCenterY - lineSpacing, lineRight, lineCenterY - lineSpacing, gripPaint)
+      canvas.drawLine(lineLeft, lineCenterY, lineRight, lineCenterY, gripPaint)
+      canvas.drawLine(lineLeft, lineCenterY + lineSpacing, lineRight, lineCenterY + lineSpacing, gripPaint)
     }
 
     // =========================================================================
@@ -1907,69 +2027,71 @@ class ThinkspaceView : View {
       canvas.restore() // Undo world transform
 
       // -------------------------------------------------------------------------
-      // 4. FLOATING NATIVE CANVAS TOOLBAR (Bottom of Canvas Zone)
+      // 4. FLOATING NATIVE CANVAS TOOLBAR (Only shown when drawing tool active)
       // -------------------------------------------------------------------------
-      val tbH = 48f
-      val tbW = min(viewW - 32f, 440f)
-      val tbX = (viewW - tbW) / 2f
-      val tbY = viewH - tbH - 16f
-      canvasToolbarRect.set(tbX, tbY, tbX + tbW, tbY + tbH)
+      if (showCanvasToolbar && activeTool != "select") {
+        val tbH = 48f
+        val tbW = min(viewW - 32f, 440f)
+        val tbX = (viewW - tbW) / 2f
+        val tbY = viewH - tbH - 16f
+        canvasToolbarRect.set(tbX, tbY, tbX + tbW, tbY + tbH)
 
-      canvas.drawRoundRect(canvasToolbarRect, 16f, 16f, toolbarBgPaint)
-      canvas.drawRoundRect(canvasToolbarRect, 16f, 16f, toolbarBorderPaint)
+        canvas.drawRoundRect(canvasToolbarRect, 16f, 16f, toolbarBgPaint)
+        canvas.drawRoundRect(canvasToolbarRect, 16f, 16f, toolbarBorderPaint)
 
-      toolBtnRects.clear()
-      colorBtnRects.clear()
+        toolBtnRects.clear()
+        colorBtnRects.clear()
 
-      val tools = listOf("select", "pen", "highlighter", "eraser")
-      val toolIcons = listOf("👆", "✏️", "🖍️", "🧹")
-      var curBtnX = tbX + 12f
+        val tools = listOf("select", "pen", "highlighter", "eraser")
+        val toolIcons = listOf("👆", "✏️", "🖍️", "🧹")
+        var curBtnX = tbX + 12f
 
-      for (i in tools.indices) {
-        val tId = tools[i]
-        val btnR = RectF(curBtnX, tbY + 6f, curBtnX + 36f, tbY + tbH - 6f)
-        toolBtnRects[tId] = btnR
+        for (i in tools.indices) {
+          val tId = tools[i]
+          val btnR = RectF(curBtnX, tbY + 6f, curBtnX + 36f, tbY + tbH - 6f)
+          toolBtnRects[tId] = btnR
 
-        if (activeTool == tId) {
-          val activeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#334155")
-            style = Paint.Style.FILL
+          if (activeTool == tId) {
+            val activeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#334155")
+              style = Paint.Style.FILL
+            }
+            canvas.drawRoundRect(btnR, 8f, 8f, activeBg)
           }
-          canvas.drawRoundRect(btnR, 8f, 8f, activeBg)
+
+          val iconPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 18f }
+          canvas.drawText(toolIcons[i], btnR.left + 8f, btnR.centerY() + 6f, iconPaint)
+          curBtnX += 42f
         }
 
-        val iconPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 18f }
-        canvas.drawText(toolIcons[i], btnR.left + 8f, btnR.centerY() + 6f, iconPaint)
-        curBtnX += 42f
-      }
+        // Divider in toolbar
+        canvas.drawLine(curBtnX + 2f, tbY + 10f, curBtnX + 2f, tbY + tbH - 10f, dividerBorderPaint)
+        curBtnX += 12f
 
-      // Divider in toolbar
-      canvas.drawLine(curBtnX + 2f, tbY + 10f, curBtnX + 2f, tbY + tbH - 10f, dividerBorderPaint)
-      curBtnX += 12f
+        // Color Swatches
+        for (col in contextColors) {
+          val cRect = RectF(curBtnX, tbY + 12f, curBtnX + 24f, tbY + tbH - 12f)
+          colorBtnRects[col] = cRect
 
-      // Color Swatches
-      for (col in contextColors) {
-        val cRect = RectF(curBtnX, tbY + 12f, curBtnX + 24f, tbY + tbH - 12f)
-        colorBtnRects[col] = cRect
+          val cPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = col; style = Paint.Style.FILL }
+          canvas.drawCircle(cRect.centerX(), cRect.centerY(), 11f, cPaint)
 
-        val cPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = col; style = Paint.Style.FILL }
-        canvas.drawCircle(cRect.centerX(), cRect.centerY(), 11f, cPaint)
-
-        if (selectedColor == col) {
-          val selRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            strokeWidth = 2.5f
-            style = Paint.Style.STROKE
+          if (selectedColor == col) {
+            val selRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.WHITE
+              strokeWidth = 2.5f
+              style = Paint.Style.STROKE
+            }
+            canvas.drawCircle(cRect.centerX(), cRect.centerY(), 13.5f, selRing)
           }
-          canvas.drawCircle(cRect.centerX(), cRect.centerY(), 13.5f, selRing)
+          curBtnX += 30f
         }
-        curBtnX += 30f
-      }
 
-      // Reset Canvas view button on far right
-      resetCanvasBtnRect.set(tbX + tbW - 40f, tbY + 6f, tbX + tbW - 8f, tbY + tbH - 6f)
-      val resetPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 16f }
-      canvas.drawText("🎯", resetCanvasBtnRect.left + 8f, resetCanvasBtnRect.centerY() + 6f, resetPaint)
+        // Reset Canvas view button on far right
+        resetCanvasBtnRect.set(tbX + tbW - 40f, tbY + 6f, tbX + tbW - 8f, tbY + tbH - 6f)
+        val resetPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 16f }
+        canvas.drawText("🎯", resetCanvasBtnRect.left + 8f, resetCanvasBtnRect.centerY() + 6f, resetPaint)
+      }
 
       canvas.restore() // Clip canvas rect
 
@@ -2200,10 +2322,10 @@ class ThinkspaceView : View {
             invalidate()
             return true
           }
-          if (headerSqueezeRect.contains(sx, sy)) {
+          if (rightSqueezeTabRect.contains(sx, sy) || headerSqueezeRect.contains(sx, sy)) {
             isSqueezed = !isSqueezed
             dispatchToggleSqueezeEvent(isSqueezed)
-            hudToast.show(if (isSqueezed) "🪗 Document Squeezed" else "Document Expanded")
+            hudToast.show(if (isSqueezed) "Document Squeezed" else "Document Expanded")
             invalidate()
             return true
           }

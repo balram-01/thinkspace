@@ -24,26 +24,69 @@ const INITIAL_ANNOTATIONS: DocumentAnnotation[] = [];
 const INITIAL_EXCERPTS: ExcerptModel[] = [];
 const INITIAL_LINKS: InkLink[] = [];
 
+const RESUME_DOCUMENT: WorkspaceDocument = {
+  id: 'kshitija-resume',
+  title: 'Kshitija_Resume (34)',
+  pageCount: 1,
+  sections: [
+    {
+      id: 'sec-header',
+      pageNumber: 1,
+      heading: 'Kshitija Sanjay Shejal',
+      paragraphs: [
+        '8830484483 | kshitija.shejal22@vit.edu | LinkedIn | GitHub',
+      ],
+    },
+    {
+      id: 'sec-summary',
+      pageNumber: 1,
+      heading: 'PROFESSIONAL SUMMARY',
+      paragraphs: [
+        'Computer Science undergraduate specializing in Artificial Intelligence with practical experience in Data Science, Data Analysis, and Machine Learning. Proficient in building machine learning, deep learning, and Retrieval-Augmented Generation (RAG) systems, supported by a strong foundation in statistical analysis, exploratory data analysis (EDA), and Python/SQL data engineering. Published research applying data-driven and generative AI methods to real-world problems.',
+      ],
+    },
+    {
+      id: 'sec-skills',
+      pageNumber: 1,
+      heading: 'TECHNICAL SKILLS',
+      paragraphs: [
+        'Machine Learning & AI: Machine Learning, Deep Learning (DL), Natural Language Processing (NLP), Retrieval-Augmented Generation (RAG), Predictive Modeling\n\nGenAI / LLM Tools: FastAPI, ChromaDB, Gemini API, Streamlit, Semantic Search, Prompt-based Retrieval\n\nProgramming Languages: Python, SQL, MySQL\n\nData Analysis Libraries: Pandas, NumPy, Matplotlib, Seaborn, Scikit-learn\n\nData Analytics: Data Cleaning, Data Transformation, Data Wrangling, ETL, Exploratory Data Analysis (EDA), A/B Testing, Statistical Analysis\n\nVisualization & BI Tools: Excel, Power BI, Dashboards, Data Storytelling\n\nOther: Database Management Systems (DBMS), Git, Google Cloud Platform (GCP), Quality Assurance (QA)',
+      ],
+    },
+    {
+      id: 'sec-experience',
+      pageNumber: 1,
+      heading: 'PROFESSIONAL EXPERIENCE',
+      paragraphs: [
+        'Data Analysis Intern                                                   Oct 2024 - Nov 2024\nAICTE & VOIS                                                   Pune, Maharashtra, India\n- Executed comprehensive data cleaning, preprocessing, and Exploratory Data Analysis (EDA) on real-world datasets utilizing Python and SQL.\n- Analyzed complex business datasets to identify key trends and generate actionable insights, directly supporting stakeholder decision-making.',
+      ],
+    },
+  ],
+};
+
+type NavTabMode = 'drawing' | 'document' | 'workspace';
+
 export default function App() {
   const [appScreen, setAppScreen] = useState<'workspace' | 'pdftest'>(
     'workspace'
   );
-  const [tool] = useState<WorkspaceTool>('select');
+  const [tool, setTool] = useState<WorkspaceTool>('select');
   const [color] = useState('#00ADB5');
-  const [pattern] = useState<WorkspacePattern>('looseleaf');
+  const [pattern, setPattern] = useState<WorkspacePattern>('looseleaf');
   const [isSqueezed, setIsSqueezed] = useState(false);
-  const [splitRatio, setSplitRatio] = useState(0.5);
+  const [splitRatio, setSplitRatio] = useState(0.48);
   const [strokes, setStrokes] = useState<InkStroke[]>([]);
   const [excerpts, setExcerpts] = useState<ExcerptModel[]>(INITIAL_EXCERPTS);
   const [inkLinks, setInkLinks] = useState<InkLink[]>(INITIAL_LINKS);
   const [annotations] = useState<DocumentAnnotation[]>(INITIAL_ANNOTATIONS);
+  const [activeNav, setActiveNav] = useState<NavTabMode>('workspace');
 
   // PDF Engine Document State
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentInfo | null>(null);
   const [pdfUri, setPdfUri] = useState<string | null>(null);
 
   // Active document object for ThinkspaceView
-  const activeDocument: WorkspaceDocument | undefined = useMemo(() => {
+  const activeDocument: WorkspaceDocument = useMemo(() => {
     if (pdfDoc) {
       return {
         id: pdfDoc.documentId,
@@ -52,7 +95,7 @@ export default function App() {
         uri: pdfUri || undefined,
       };
     }
-    return undefined;
+    return RESUME_DOCUMENT;
   }, [pdfDoc, pdfUri]);
 
   // ── Import PDF via system file picker ─────────────────────────────────────
@@ -72,8 +115,82 @@ export default function App() {
     }
   }, [pdfDoc]);
 
+  // ── Undo Action ───────────────────────────────────────────────────────────
+  const handleUndo = useCallback(() => {
+    if (strokes.length > 0) {
+      setStrokes((prev) => prev.slice(0, prev.length - 1));
+    } else if (excerpts.length > 0) {
+      const last = excerpts[excerpts.length - 1];
+      setExcerpts((prev) => prev.slice(0, prev.length - 1));
+      if (last) {
+        setInkLinks((prev) =>
+          prev.filter((l) => l.sourceExcerptId !== last.id)
+        );
+      }
+    }
+  }, [strokes.length, excerpts]);
+
+  // ── Toggle Accordion Squeeze ───────────────────────────────────────────────
   const handleToggleSqueeze = useCallback(() => {
     setIsSqueezed((prev) => !prev);
+  }, []);
+
+  // ── Add Text Box Excerpt ──────────────────────────────────────────────────
+  const handleAddTextBox = useCallback(() => {
+    const newId = `card-${Date.now()}`;
+    const newCard: ExcerptModel = {
+      id: newId,
+      documentId: pdfDoc?.documentId ?? 'doc-active',
+      pageNumber: 1,
+      text: 'New thought or synthesis note...',
+      color: '#00ADB5',
+      x: 80 + Math.random() * 80,
+      y: 60 + Math.random() * 60,
+      width: 220,
+    };
+    setExcerpts((prev) => [...prev, newCard]);
+  }, [pdfDoc]);
+
+  // ── Tidy Workspace Cards into Masonry Columns ─────────────────────────────
+  const handleTidy = useCallback(() => {
+    if (excerpts.length === 0) return;
+    const startX = 30;
+    const startY = 60;
+    const colW = 220;
+    const gap = 18;
+    const updated = excerpts.map((card, idx) => {
+      const col = idx % 4;
+      const row = Math.floor(idx / 4);
+      return {
+        ...card,
+        x: startX + col * (colW + gap),
+        y: startY + row * (120 + gap),
+      };
+    });
+    setExcerpts(updated);
+  }, [excerpts]);
+
+  // ── Cycle Canvas Pattern ──────────────────────────────────────────────────
+  const handleCyclePattern = useCallback(() => {
+    setPattern((prev) => {
+      if (prev === 'looseleaf') return 'grid';
+      if (prev === 'grid') return 'plain';
+      return 'looseleaf';
+    });
+  }, []);
+
+  // ── Navigation Mode Switching ─────────────────────────────────────────────
+  const handleSelectNav = useCallback((mode: NavTabMode) => {
+    setActiveNav(mode);
+    if (mode === 'drawing') {
+      setTool('pen');
+    } else if (mode === 'document') {
+      setSplitRatio(0.8);
+      setTool('select');
+    } else {
+      setSplitRatio(0.48);
+      setTool('select');
+    }
   }, []);
 
   if (appScreen === 'pdftest') {
@@ -91,9 +208,6 @@ export default function App() {
     );
   }
 
-  const docTitle =
-    pdfDoc?.title || (pdfDoc ? 'PDF Document' : 'No Document Opened');
-
   return (
     <View style={styles.container}>
       <StatusBar
@@ -102,51 +216,58 @@ export default function App() {
         translucent={false}
       />
 
-      {/* Sleek, Minimalist LiquidText Top Bar */}
+      {/* ── Top System Header matching Screenshot ─────────────────────────── */}
       <View style={styles.topBar}>
         <View style={styles.topBarLeft}>
-          <Text style={styles.logoText}>LiquidText</Text>
-          <Text style={styles.docTitleText} numberOfLines={1}>
-            {docTitle}
-          </Text>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            activeOpacity={0.7}
+            onPress={() => handleSelectNav('workspace')}
+          >
+            <Text style={styles.headerIcon}>⌂</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            activeOpacity={0.7}
+            onPress={handleImportPdf}
+          >
+            <Text style={styles.headerIcon}>📄</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            activeOpacity={0.7}
+            onPress={handleUndo}
+          >
+            <Text style={styles.headerIcon}>↶</Text>
+          </TouchableOpacity>
         </View>
 
         <View style={styles.topBarRight}>
-          {/* Accordion Squeeze Button */}
           <TouchableOpacity
-            style={[
-              styles.btn,
-              isSqueezed ? styles.btnActive : styles.btnSecondary,
-            ]}
-            activeOpacity={0.8}
-            onPress={handleToggleSqueeze}
+            style={styles.iconBtn}
+            activeOpacity={0.7}
+            onPress={() => {}}
           >
-            <Text style={[styles.btnText, isSqueezed && styles.btnTextActive]}>
-              🪗 Squeeze
-            </Text>
+            <Text style={styles.headerIcon}>↑</Text>
           </TouchableOpacity>
-
-          {/* Import / Open PDF Button */}
           <TouchableOpacity
-            style={[styles.btn, styles.btnPrimary]}
-            activeOpacity={0.8}
+            style={styles.iconBtn}
+            activeOpacity={0.7}
             onPress={handleImportPdf}
           >
-            <Text style={styles.btnPrimaryText}>📂 Open PDF</Text>
+            <Text style={styles.headerIcon}>🔍</Text>
           </TouchableOpacity>
-
-          {/* Diagnostic Test Button */}
           <TouchableOpacity
-            style={styles.testIconBtn}
-            activeOpacity={0.8}
+            style={styles.iconBtn}
+            activeOpacity={0.7}
             onPress={() => setAppScreen('pdftest')}
           >
-            <Text style={styles.testIconText}>🔬</Text>
+            <Text style={styles.headerIcon}>•••</Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* 100% Native Kotlin Fabric Workspace Engine */}
+      {/* ── 100% Native Kotlin Fabric Workspace Engine ────────────────────── */}
       <View style={styles.workspaceWrapper}>
         <ThinkspaceView
           style={styles.nativeWorkspace}
@@ -208,6 +329,137 @@ export default function App() {
           }}
         />
       </View>
+
+      {/* ── Secondary Action Toolbar matching Screenshot ──────────────────── */}
+      <View style={styles.secondaryToolbar}>
+        <TouchableOpacity
+          style={styles.toolItem}
+          activeOpacity={0.7}
+          onPress={() => {}}
+        >
+          <Text style={styles.toolIcon}>⊞</Text>
+          <Text style={styles.toolLabel}>Workspaces</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.toolItem}
+          activeOpacity={0.7}
+          onPress={handleAddTextBox}
+        >
+          <Text style={[styles.toolIcon, styles.boldA]}>A</Text>
+          <Text style={styles.toolLabel}>Text Box</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.toolItem}
+          activeOpacity={0.7}
+          onPress={handleTidy}
+        >
+          <Text style={[styles.toolIcon, styles.goldSparkle]}>✨</Text>
+          <Text style={styles.toolLabel}>Tidy</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.toolItem}
+          activeOpacity={0.7}
+          onPress={handleToggleSqueeze}
+        >
+          <Text style={[styles.toolIcon, isSqueezed && styles.cyanText]}>
+            ≈
+          </Text>
+          <Text style={[styles.toolLabel, isSqueezed && styles.cyanText]}>
+            Squeeze
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.toolItem}
+          activeOpacity={0.7}
+          onPress={handleCyclePattern}
+        >
+          <Text style={styles.toolIcon}>⠿</Text>
+          <Text style={styles.toolLabel}>Pattern</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.toolItem}
+          activeOpacity={0.7}
+          onPress={() => {
+            // Zoom out canvas view
+            setTool('select');
+          }}
+        >
+          <Text style={styles.toolIcon}>⊝</Text>
+          <Text style={styles.toolLabel}>Zoom Out</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* ── Bottom Navigation Bar matching Screenshot ─────────────────────── */}
+      <View style={styles.bottomNav}>
+        <TouchableOpacity
+          style={[
+            styles.navTab,
+            activeNav === 'drawing' && styles.navTabActive,
+          ]}
+          activeOpacity={0.8}
+          onPress={() => handleSelectNav('drawing')}
+        >
+          <Text style={styles.navIcon}>✏️</Text>
+          <Text
+            style={[
+              styles.navLabel,
+              activeNav === 'drawing' && styles.navLabelActive,
+            ]}
+          >
+            Drawing
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[
+            styles.navTab,
+            activeNav === 'document' && styles.navTabActive,
+          ]}
+          activeOpacity={0.8}
+          onPress={() => handleSelectNav('document')}
+        >
+          <Text style={styles.navIcon}>📄</Text>
+          <Text
+            style={[
+              styles.navLabel,
+              activeNav === 'document' && styles.navLabelActive,
+            ]}
+          >
+            Document
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[
+            styles.navTab,
+            activeNav === 'workspace' && styles.navTabActive,
+          ]}
+          activeOpacity={0.8}
+          onPress={() => handleSelectNav('workspace')}
+        >
+          <Text
+            style={[
+              styles.navIconHex,
+              activeNav === 'workspace' && styles.navIconActive,
+            ]}
+          >
+            ⬡
+          </Text>
+          <Text
+            style={[
+              styles.navLabel,
+              activeNav === 'workspace' && styles.navLabelActive,
+            ]}
+          >
+            Workspace
+          </Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
@@ -215,7 +467,7 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0B1120',
+    backgroundColor: '#0A101D',
   },
   topBar: {
     paddingTop: StatusBar.currentHeight ?? 24,
@@ -224,84 +476,118 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#1E293B',
   },
   topBarLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    flex: 1,
-  },
-  logoText: {
-    color: '#00ADB5',
-    fontSize: 16,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  docTitleText: {
-    color: '#94A3B8',
-    fontSize: 13,
-    fontWeight: '500',
-    maxWidth: 160,
+    gap: 22,
   },
   topBarRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 22,
   },
-  btn: {
-    paddingHorizontal: 11,
-    paddingVertical: 6,
-    borderRadius: 7,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  btnSecondary: {
-    backgroundColor: '#1E293B',
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  btnActive: {
-    backgroundColor: '#00ADB5',
-  },
-  btnText: {
-    color: '#94A3B8',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  btnTextActive: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-  },
-  btnPrimary: {
-    backgroundColor: '#00ADB5',
-  },
-  btnPrimaryText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  testIconBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 6,
-    backgroundColor: '#1E293B',
+  iconBtn: {
+    padding: 6,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#334155',
   },
-  testIconText: {
-    fontSize: 14,
+  headerIcon: {
+    color: '#E2E8F0',
+    fontSize: 22,
+    fontWeight: '500',
   },
   workspaceWrapper: {
     flex: 1,
-    backgroundColor: '#0B1120',
+    backgroundColor: '#0A101D',
   },
   nativeWorkspace: {
     flex: 1,
+  },
+  secondaryToolbar: {
+    height: 58,
+    backgroundColor: '#0B132B',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    paddingHorizontal: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#1E293B',
+  },
+  toolItem: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    minWidth: 54,
+  },
+  toolIcon: {
+    color: '#94A3B8',
+    fontSize: 18,
+    marginBottom: 4,
+  },
+  boldA: {
+    fontWeight: '900',
+    fontSize: 17,
+    color: '#CBD5E1',
+  },
+  goldSparkle: {
+    color: '#F59E0B',
+    fontSize: 17,
+  },
+  cyanText: {
+    color: '#00ADB5',
+    fontWeight: '700',
+  },
+  toolLabel: {
+    color: '#94A3B8',
+    fontSize: 10.5,
+    fontWeight: '500',
+  },
+  bottomNav: {
+    height: 54,
+    backgroundColor: '#080E1A',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    paddingHorizontal: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#161F30',
+  },
+  navTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 22,
+  },
+  navTabActive: {
+    backgroundColor: '#00ADB5',
+    paddingHorizontal: 18,
+  },
+  navIcon: {
+    fontSize: 15,
+  },
+  navIconHex: {
+    fontSize: 16,
+    color: '#94A3B8',
+  },
+  navIconActive: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  navLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#94A3B8',
+  },
+  navLabelActive: {
+    color: '#FFFFFF',
+    fontWeight: '700',
   },
   backBtn: {
     position: 'absolute',
