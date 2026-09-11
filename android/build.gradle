@@ -52,4 +52,8 @@ android {
 
 dependencies {
   implementation "com.facebook.react:react-android"
+  implementation project(':pdf-engine')
+
+  // Coroutines (needed for PdfEngineModule bridge)
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 }

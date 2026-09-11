@@ -147,14 +147,22 @@ export const ThinkspaceView: React.FC<ThinkspaceViewProps> = ({
                 color: c,
                 isTable,
                 isImage,
+                imageUrl,
+                id,
+                x,
+                y,
               } = e.nativeEvent;
               onExtractExcerpt({
+                id,
                 text,
                 pageNumber,
                 color: c,
                 isTable,
                 isImage,
-              });
+                imageUrl,
+                x,
+                y,
+              } as any);
             }
           : undefined
       }

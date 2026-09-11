@@ -492,7 +492,7 @@ export const ThinkspaceView: React.FC<ThinkspaceViewProps> = ({
       var curY = subheaderH + 16 - docScrollY;
       const newMeasuredParas: MeasuredParagraph[] = [];
 
-      document.sections.forEach((sec) => {
+      (document.sections ?? []).forEach((sec) => {
         const secAnns = annotations.filter((a) => a.sectionId === sec.id);
         const hasAnn = secAnns.length > 0;
 

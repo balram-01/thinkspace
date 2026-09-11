@@ -66,7 +66,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={true}
       >
-        {document.sections.map((sec) => {
+        {(document.sections ?? []).map((sec) => {
           const sectionAnnotations = annotations.filter(
             (a) => a.sectionId === sec.id
           );

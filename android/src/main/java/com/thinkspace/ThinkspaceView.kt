@@ -6,20 +6,40 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.*
+import android.os.Handler
+import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.util.AttributeSet
+import android.util.LruCache
+import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.VelocityTracker
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
+import android.widget.OverScroller
+import kotlin.math.abs
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.uimanager.UIManagerHelper
 import com.facebook.react.uimanager.events.Event
+import com.thinkspace.pdfengine.api.PdfDocument
+import com.thinkspace.pdfengine.api.RenderOptions
+import com.thinkspace.pdfengine.model.BoundingBox
+import com.thinkspace.pdfengine.model.PageSize
+import com.thinkspace.pdfengine.model.TextElement
+import com.thinkspace.pdfengine.model.TextWord
+import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -47,23 +67,14 @@ data class ParagraphLayoutInfo(
   val layout: StaticLayout
 )
 
-data class NativeDocumentSelection(
-  val text: String,
+data class PdfPageLayout(
+  val pageIndex: Int,
   val pageNumber: Int,
-  val sectionId: String,
-  val pIdx: Int,
-  val startCharIdx: Int,
-  val endCharIdx: Int,
-  val highlightRects: List<RectF>,
-  val startHandle: RectF,
-  val endHandle: RectF,
-  val calloutRect: RectF,
-  val calloutExcerptBtn: RectF,
-  val calloutCopyBtn: RectF,
-  val calloutHighlightBtn: RectF,
-  val calloutPrevWordBtn: RectF,
-  val calloutNextWordBtn: RectF,
-  val calloutCloseBtn: RectF
+  val pageSize: PageSize,
+  val topY: Float,
+  val height: Float,
+  val isFolded: Boolean,
+  val boundsOnScreen: RectF
 )
 
 data class NativeStroke(
@@ -75,7 +86,6 @@ data class NativeStroke(
 )
 
 data class NativeTableRow(val cells: List<String>)
-
 data class NativeTable(val rows: List<NativeTableRow>)
 
 data class NativeSection(
@@ -134,6 +144,45 @@ data class NativeLink(
   val color: Int
 )
 
+data class NativeDocumentSelection(
+  val text: String,
+  val pageNumber: Int,
+  val sectionId: String,
+  val pIdx: Int,
+  val startCharIdx: Int,
+  val endCharIdx: Int,
+  val highlightRects: List<RectF>,
+  val startHandle: RectF,
+  val endHandle: RectF,
+  val calloutRect: RectF,
+  val calloutExcerptBtn: RectF,
+  val calloutCopyBtn: RectF,
+  val calloutHighlightBtn: RectF,
+  val calloutCloseBtn: RectF
+)
+
+data class NativePdfSelection(
+  val pageIndex: Int,
+  val text: String,
+  val highlightRects: List<RectF>,
+  val startHandle: RectF,
+  val endHandle: RectF,
+  val calloutRect: RectF,
+  val calloutExcerptBtn: RectF,
+  val calloutCopyBtn: RectF,
+  val calloutHighlightBtn: RectF,
+  val calloutCloseBtn: RectF
+)
+
+data class NativeCropSelection(
+  val pageIndex: Int,
+  val pageBounds: BoundingBox,
+  val screenRect: RectF,
+  val calloutRect: RectF,
+  val calloutExcerptBtn: RectF,
+  val calloutCloseBtn: RectF
+)
+
 class ThinkspaceView : View {
   constructor(context: Context?) : super(context)
   constructor(context: Context?, attrs: AttributeSet?) : super(context, attrs)
@@ -146,23 +195,105 @@ class ThinkspaceView : View {
   // LiquidText Workspace State Props
   var splitRatio: Float = 0.44f
   var isSqueezed: Boolean = false
-  var activeTool: String = "select"
+  var activeTool: String = "select" // "select", "pan", "pen", "highlighter", "eraser"
   var selectedColor: Int = Color.parseColor("#00ADB5")
   var pattern: String = "looseleaf"
   var panX: Float = 0f
   var panY: Float = 0f
   var scaleFactor: Float = 1f
 
-  // Document & Annotation Models
+  // Real PDF Engine State
+  private var activePdfDoc: PdfDocument? = null
+  private val pageLayouts = mutableListOf<PdfPageLayout>()
+  // Cache up to 32 rendered pages in memory
+  private val pageBitmaps = LruCache<Int, Bitmap>(32)
+  private val renderingPages = ConcurrentHashMap.newKeySet<Int>()
+  private val pageWordsCache = ConcurrentHashMap<Int, List<TextWord>>()
+  private val extractingWords = ConcurrentHashMap.newKeySet<Int>()
+  private val renderScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+  // Document & Annotation Models (Fallback/Demo Doc)
   private var activeDocument: NativeDoc? = null
   private val annotations = mutableListOf<NativeAnnotation>()
   private var docScrollY: Float = 0f
   private var maxDocScrollY: Float = 1000f
 
+  // Document interaction mode: "text" or "crop"
+  private var docMode: String = "text"
+
+  // Display density & subheader metrics
+  private val density: Float get() = context.resources.displayMetrics.density
+  private val subheaderH: Float get() = 48f * density
+
+  // Dedicated LiquidText Long-Press Lift Engine
+  private val longPressHandler = Handler(Looper.getMainLooper())
+  private var pendingLongPressRunnable: Runnable? = null
+  private var longPressStartX = 0f
+  private var longPressStartY = 0f
+
   // Canvas Collections
   private val strokes = mutableListOf<NativeStroke>()
-  private val cards = mutableListOf<NativeCard>()
-  private val links = mutableListOf<NativeLink>()
+  private val cards = mutableListOf<NativeCard>().apply {
+    add(
+      NativeCard(
+        id = "card-1",
+        x = 60f,
+        y = 35f,
+        width = 225f,
+        text = "that essay. What was my philosophy of life? I did not know. Some years earlier I would not have been so hesitant. There was a definite-ness...",
+        color = Color.parseColor("#3B82F6"),
+        pageNumber = 23,
+        comment = null,
+        clusterId = null,
+        stackCount = 1,
+        isImage = false,
+        imageUrl = null,
+        isTable = false,
+        tableRows = null
+      )
+    )
+    add(
+      NativeCard(
+        id = "card-2",
+        x = 320f,
+        y = 55f,
+        width = 235f,
+        text = "successively different ages and periods and had for companions men and women who had lived long ago. I had leisure in jail there was no sens...",
+        color = Color.parseColor("#00ADB5"),
+        pageNumber = 22,
+        comment = null,
+        clusterId = null,
+        stackCount = 1,
+        isImage = false,
+        imageUrl = null,
+        isTable = false,
+        tableRows = null
+      )
+    )
+    add(
+      NativeCard(
+        id = "card-3",
+        x = 75f,
+        y = 195f,
+        width = 225f,
+        text = "of life have always a way out of it, if they so choose. That is always in our power to achieve...",
+        color = Color.parseColor("#F59E0B"),
+        pageNumber = 22,
+        comment = null,
+        clusterId = null,
+        stackCount = 1,
+        isImage = false,
+        imageUrl = null,
+        isTable = false,
+        tableRows = null
+      )
+    )
+  }
+  private val links = mutableListOf<NativeLink>().apply {
+    add(NativeLink("link-1", "card-1", Color.parseColor("#3B82F6")))
+    add(NativeLink("link-2", "card-2", Color.parseColor("#00ADB5")))
+    add(NativeLink("link-3", "card-3", Color.parseColor("#F59E0B")))
+  }
 
   // Active inking state
   private val activePoints = mutableListOf<NativePoint>()
@@ -176,30 +307,60 @@ class ThinkspaceView : View {
   private var totalDragDistance: Float = 0f
   private var heldCardId: String? = null
 
-  // 1-finger canvas panning
+  // Gesture flags
   private var isPanningCanvas = false
   private var isDraggingDivider = false
   private var isScrollingDoc = false
   private var lastTouchScreenX = 0f
   private var lastTouchScreenY = 0f
 
-  // LiquidText Cross-Zone Lift-and-Drag state
+  // Real PDF Selection state
+  private var activePdfSelection: NativePdfSelection? = null
+  private var isSelectingPdfText = false
+  private var pdfSelectStartWord: TextWord? = null
+  private var pdfSelectPageIndex = 0
+
+  // Figure Crop state
+  private var activeCropSelection: NativeCropSelection? = null
+  private var isDraggingCrop = false
+  private var cropStartX = 0f
+  private var cropStartY = 0f
+  private var cropPageIndex = 0
+
+  // Fallback Text Selection state
+  private val paragraphLayouts = mutableListOf<ParagraphLayoutInfo>()
+  private var activeSelection: NativeDocumentSelection? = null
+
+  // Cross-Zone Lift-and-Drag state
   private var isLiftingExcerpt = false
   private var liftCandidateText: String? = null
   private var liftCandidatePage: Int = 1
   private var liftCandidateColor: Int = Color.parseColor("#00ADB5")
-  private var liftGhostX: Float = 0f
-  private var liftGhostY: Float = 0f
-  private var liftAnchorScreenX: Float = 0f
-  private var liftAnchorScreenY: Float = 0f
+  private var liftCandidateIsImage = false
+  private var liftCandidateImagePath: String? = null
+  private var liftCandidateBitmap: Bitmap? = null
+  private var liftGhostX = 0f
+  private var liftGhostY = 0f
+  private var liftAnchorScreenX = 0f
+  private var liftAnchorScreenY = 0f
 
-  // Document Text Selection Engine state
-  private val paragraphLayouts = mutableListOf<ParagraphLayoutInfo>()
-  private var activeSelection: NativeDocumentSelection? = null
-  private var isDraggingStartHandle = false
-  private var isDraggingEndHandle = false
-  private var isDirectDraggingSelection = false
-  private var copiedToastText: String? = null
+  // Physics-based Scroll Inertia (Smooth multi-page glide)
+  private val docScroller = OverScroller(context).apply {
+    setFriction(0.0032f)
+  }
+  private var velocityTracker: VelocityTracker? = null
+  private val minFlingVelocity: Int
+  private val maxFlingVelocity: Int
+  private val touchSlop: Int
+  private var downDocX = 0f
+  private var downDocY = 0f
+
+  // Image bitmap cache for cards & instant cropping
+  private val cardBitmapCache = LruCache<String, Bitmap>(32)
+
+  // Bidirectional Navigation Pulse
+  private var pulsePageNumber: Int? = null
+  private var pulseAlpha: Int = 0
 
   // Drop shockwave ripple animation
   private var rippleOriginX = 0f
@@ -207,6 +368,9 @@ class ThinkspaceView : View {
   private var rippleColor = Color.parseColor("#00ADB5")
   private var rippleProgress = 1f
   private var rippleAnimator: ValueAnimator? = null
+
+  // Toast feedback
+  private var copiedToastText: String? = null
 
   // Context colors
   private val contextColors = intArrayOf(
@@ -217,21 +381,34 @@ class ThinkspaceView : View {
     Color.parseColor("#8B5CF6")
   )
 
+  // Top/Bottom Native UI Hit Rects
+  private val headerRect = RectF()
+  private val headerDocPillRect = RectF()
+  private val headerModeTextRect = RectF()
+  private val headerModeCropRect = RectF()
+  private val headerSqueezeRect = RectF()
+  private val headerSearchRect = RectF()
+
+  private val canvasToolbarRect = RectF()
+  private val toolBtnRects = mutableMapOf<String, RectF>()
+  private val colorBtnRects = mutableMapOf<Int, RectF>()
+  private val resetCanvasBtnRect = RectF()
+
   // Paints
-  private val docBgPaint = Paint().apply { color = Color.parseColor("#0F172A") }
+  private val docBgPaint = Paint().apply { color = Color.parseColor("#0B1120") }
   private val docPageBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
   private val docPageBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#CBD5E1")
-    strokeWidth = 1f
+    color = Color.parseColor("#334155")
+    strokeWidth = 1.2f
     style = Paint.Style.STROKE
   }
-  private val canvasBgPaint = Paint().apply { color = Color.parseColor("#131922") }
+  private val canvasBgPaint = Paint().apply { color = Color.parseColor("#0F172A") }
   private val dividerLinePaint = Paint().apply {
-    color = Color.parseColor("#334155")
-    strokeWidth = 2f
+    color = Color.parseColor("#1E293B")
+    strokeWidth = 3f
   }
   private val dividerHandlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#1A202C")
+    color = Color.parseColor("#1E293B")
     style = Paint.Style.FILL
   }
   private val dividerBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -240,62 +417,37 @@ class ThinkspaceView : View {
     style = Paint.Style.STROKE
   }
   private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#2D3748")
+    color = Color.parseColor("#334155")
     style = Paint.Style.FILL
   }
   private val gridPaint = Paint().apply {
     color = Color.parseColor("#1E293B")
-    strokeWidth = 1.5f
+    strokeWidth = 1.2f
     style = Paint.Style.STROKE
-  }
-  private val looseleafBluePaint = Paint().apply {
-    color = Color.parseColor("#1E293B")
-    strokeWidth = 1.5f
-    style = Paint.Style.STROKE
-  }
-  private val looseleafRedPaint = Paint().apply {
-    color = Color.parseColor("#4B1D24")
-    strokeWidth = 2.5f
-    style = Paint.Style.STROKE
-  }
-  private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.STROKE
-    strokeCap = Paint.Cap.ROUND
-    strokeJoin = Paint.Join.ROUND
-  }
-  private val highlighterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.STROKE
-    strokeCap = Paint.Cap.ROUND
-    strokeJoin = Paint.Join.ROUND
-    xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
   }
   private val cardBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.WHITE
     style = Paint.Style.FILL
   }
   private val cardBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#E2E8F0")
-    strokeWidth = 1.5f
+    strokeWidth = 2f
     style = Paint.Style.STROKE
   }
-  private val cardActiveRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#00ADB5")
-    strokeWidth = 2.5f
+  private val cardSelectedGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     style = Paint.Style.STROKE
+    strokeWidth = 5f
+    color = Color.parseColor("#00ADB5")
+    alpha = 180
   }
   private val cardAccentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     style = Paint.Style.FILL
   }
-  private val stackUnderlayPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.FILL
-    alpha = 60
-  }
   private val badgeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#E0F7FA")
+    color = Color.parseColor("#E0F2FE")
     style = Paint.Style.FILL
   }
   private val badgeBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#80DEEA")
+    color = Color.parseColor("#00ADB5")
     strokeWidth = 1f
     style = Paint.Style.STROKE
   }
@@ -305,12 +457,12 @@ class ThinkspaceView : View {
     isFakeBoldText = true
   }
   private val docSubheaderBgPaint = Paint().apply {
-    color = Color.parseColor("#131922")
+    color = Color.parseColor("#0F172A")
     style = Paint.Style.FILL
   }
   private val docTitlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#F8FAFC")
-    textSize = 22f
+    textSize = 21f
     isFakeBoldText = true
   }
   private val docHeadingPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -324,32 +476,17 @@ class ThinkspaceView : View {
     textSize = 21f
     typeface = Typeface.SERIF
   }
-  private val squeezeBtnBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#1E293B")
-    style = Paint.Style.FILL
-  }
-  private val squeezeBtnBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#334155")
-    strokeWidth = 1.5f
-    style = Paint.Style.STROKE
-  }
-  private val squeezeBtnTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#00ADB5")
-    textSize = 24f
-    isFakeBoldText = true
-  }
   private val highlightBgPaint = Paint().apply {
     style = Paint.Style.FILL
   }
   private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#1E293B")
-    textSize = 23f
+    textSize = 22f
     textSkewX = -0.15f
   }
   private val commentPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#64748B")
-    textSize = 20f
-    textSkewX = -0.2f
+    textSize = 18f
   }
   private val closeBtnTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#94A3B8")
@@ -357,7 +494,7 @@ class ThinkspaceView : View {
     isFakeBoldText = true
   }
   private val toolbarBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#0F172A")
+    color = Color.parseColor("#1E293B")
     style = Paint.Style.FILL
   }
   private val toolbarBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -382,10 +519,8 @@ class ThinkspaceView : View {
     style = Paint.Style.STROKE
     strokeWidth = 3f
   }
-
-  // Selection & Floating Callout Menu Paints
   private val selectionFillPaint = Paint().apply {
-    color = Color.parseColor("#5900ADB5") // rgba(0, 173, 181, 0.35)
+    color = Color.parseColor("#5900ADB5")
     style = Paint.Style.FILL
   }
   private val selectionBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -402,8 +537,18 @@ class ThinkspaceView : View {
     color = Color.parseColor("#00ADB5")
     style = Paint.Style.FILL
   }
+  private val cropDashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#00ADB5")
+    style = Paint.Style.STROKE
+    strokeWidth = 2.5f
+    pathEffect = DashPathEffect(floatArrayOf(12f, 8f), 0f)
+  }
+  private val cropFillPaint = Paint().apply {
+    color = Color.parseColor("#2600ADB5")
+    style = Paint.Style.FILL
+  }
   private val calloutBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#1E293B")
+    color = Color.parseColor("#0F172A")
     style = Paint.Style.FILL
   }
   private val calloutBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -416,7 +561,7 @@ class ThinkspaceView : View {
     style = Paint.Style.FILL
   }
   private val calloutSecondaryBtnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#0F172A")
+    color = Color.parseColor("#1E293B")
     style = Paint.Style.FILL
   }
   private val calloutHighlightBtnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -433,254 +578,380 @@ class ThinkspaceView : View {
     textSize = 17f
     isFakeBoldText = true
   }
-  private val calloutBadgeTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-    color = Color.parseColor("#94A3B8")
-    textSize = 15f
-    isFakeBoldText = true
-  }
 
-  // Word and Selection Helpers
-  private fun expandToWord(text: String, charIdx: Int): Pair<Int, Int> {
-    if (text.isEmpty()) return Pair(0, 0)
-    var s = charIdx.coerceIn(0, text.length)
-    var e = s
-    while (s > 0 && !Character.isWhitespace(text[s - 1])) {
-      s--
-    }
-    while (e < text.length && !Character.isWhitespace(text[e])) {
-      e++
-    }
-    if (s == e && s < text.length) e = min(text.length, s + 1)
-    return Pair(s, e)
-  }
+  // Scale gesture detector for 2-finger zoom and pinch accordion squeeze
+  private val scaleGestureListener = object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+    override fun onScale(detector: ScaleGestureDetector): Boolean {
+      val fy = detector.focusY
+      val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
+      if (fy < splitY) {
+        // Pinching inside document zone -> LiquidText accordion squeeze
+        if (detector.scaleFactor < 0.88f && !isSqueezed) {
+          isSqueezed = true
+          performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+          dispatchToggleSqueezeEvent(true)
+          invalidate()
+        } else if (detector.scaleFactor > 1.12f && isSqueezed) {
+          isSqueezed = false
+          performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+          dispatchToggleSqueezeEvent(false)
+          invalidate()
+        }
+        return true
+      }
 
-  private fun expandStartWord(text: String, startIdx: Int): Int {
-    var s = startIdx
-    while (s > 0 && Character.isWhitespace(text[s - 1])) s--
-    while (s > 0 && !Character.isWhitespace(text[s - 1])) s--
-    return s
-  }
-
-  private fun expandEndWord(text: String, endIdx: Int): Int {
-    var e = endIdx
-    while (e < text.length && Character.isWhitespace(text[e])) e++
-    while (e < text.length && !Character.isWhitespace(text[e])) e++
-    return e
-  }
-
-  private fun buildSelection(
-    info: ParagraphLayoutInfo,
-    rawStart: Int,
-    rawEnd: Int
-  ): NativeDocumentSelection {
-    val startChar = min(rawStart, rawEnd).coerceIn(0, info.text.length)
-    val endChar = max(rawStart, rawEnd).coerceIn(0, info.text.length)
-    val selectedText = if (startChar < endChar) info.text.substring(startChar, endChar) else ""
-    val layout = info.layout
-
-    val startLine = layout.getLineForOffset(startChar)
-    val endLine = layout.getLineForOffset(max(startChar, endChar))
-
-    val rects = mutableListOf<RectF>()
-    for (line in startLine..endLine) {
-      val lineStart = if (line == startLine) startChar else layout.getLineStart(line)
-      val lineEnd = if (line == endLine) endChar else layout.getLineEnd(line)
-      if (lineEnd <= lineStart) continue
-
-      val x1 = layout.getPrimaryHorizontal(lineStart)
-      val x2 = layout.getPrimaryHorizontal(lineEnd)
-      val left = info.paperX + 28f + min(x1, x2)
-      val right = info.paperX + 28f + max(x1, x2)
-      val top = info.topY + layout.getLineTop(line).toFloat()
-      val bottom = info.topY + layout.getLineBottom(line).toFloat()
-      rects.add(RectF(left, top, right, bottom))
-    }
-
-    if (rects.isEmpty()) {
-      val top = info.topY + layout.getLineTop(startLine).toFloat()
-      val bottom = info.topY + layout.getLineBottom(startLine).toFloat()
-      val left = info.paperX + 28f + layout.getPrimaryHorizontal(startChar)
-      rects.add(RectF(left, top, left + 20f, bottom))
-    }
-
-    val first = rects.first()
-    val last = rects.last()
-    val startHandle = RectF(first.left - 24f, first.top - 24f, first.left + 24f, first.bottom + 12f)
-    val endHandle = RectF(last.right - 24f, last.top - 12f, last.right + 24f, last.bottom + 24f)
-
-    val calloutW = 390f
-    val calloutH = 38f
-    var calloutTop = first.top - calloutH - 14f
-    if (calloutTop < 44f) {
-      calloutTop = last.bottom + 14f
-    }
-    val midX = (first.left + last.right) / 2f
-    val calloutLeft = (midX - calloutW / 2f).coerceIn(10f, max(10f, width.toFloat() - calloutW - 10f))
-    val calloutRect = RectF(calloutLeft, calloutTop, calloutLeft + calloutW, calloutTop + calloutH)
-
-    val excerptBtn = RectF(calloutLeft + 8f, calloutTop + 4f, calloutLeft + 106f, calloutTop + calloutH - 4f)
-    val copyBtn = RectF(calloutLeft + 112f, calloutTop + 4f, calloutLeft + 188f, calloutTop + calloutH - 4f)
-    val hlBtn = RectF(calloutLeft + 194f, calloutTop + 4f, calloutLeft + 282f, calloutTop + calloutH - 4f)
-    val prevWBtn = RectF(calloutLeft + 288f, calloutTop + 4f, calloutLeft + 318f, calloutTop + calloutH - 4f)
-    val nextWBtn = RectF(calloutLeft + 322f, calloutTop + 4f, calloutLeft + 352f, calloutTop + calloutH - 4f)
-    val closeBtn = RectF(calloutLeft + 356f, calloutTop + 4f, calloutLeft + 384f, calloutTop + calloutH - 4f)
-
-    return NativeDocumentSelection(
-      text = selectedText,
-      pageNumber = info.pageNumber,
-      sectionId = info.secId,
-      pIdx = info.pIdx,
-      startCharIdx = startChar,
-      endCharIdx = endChar,
-      highlightRects = rects,
-      startHandle = startHandle,
-      endHandle = endHandle,
-      calloutRect = calloutRect,
-      calloutExcerptBtn = excerptBtn,
-      calloutCopyBtn = copyBtn,
-      calloutHighlightBtn = hlBtn,
-      calloutPrevWordBtn = prevWBtn,
-      calloutNextWordBtn = nextWBtn,
-      calloutCloseBtn = closeBtn
-    )
-  }
-
-  private fun copyToClipboard(text: String) {
-    try {
-      val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-      val clip = ClipData.newPlainText("ThinkSpace Excerpt", text)
-      clipboard?.setPrimaryClip(clip)
-      copiedToastText = "✓ Copied!"
-      postDelayed({
-        copiedToastText = null
-        invalidate()
-      }, 1500)
+      val oldScale = scaleFactor
+      scaleFactor = (scaleFactor * detector.scaleFactor).coerceIn(0.4f, 3.5f)
+      val fx = detector.focusX
+      panX = fx - (fx - panX) * (scaleFactor / oldScale)
+      panY = fy - (fy - panY) * (scaleFactor / oldScale)
+      dispatchTransformEvent()
       invalidate()
+      return true
+    }
+  }
+  private val scaleGestureDetector = ScaleGestureDetector(context ?: throw IllegalStateException("Context required"), scaleGestureListener)
+
+  // Long-press gesture detector for instant LiquidText-style Figure / Excerpt lifting
+  private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+    override fun onLongPress(e: MotionEvent) {
+      triggerLongPressLift(e.x, e.y)
+    }
+  })
+
+  private fun triggerLongPressLift(x: Float, y: Float) {
+    val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
+    if (y < splitY - 14f && y >= subheaderH) {
+      performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+      isScrollingDoc = false
+
+      // 1. Check if there is a real PDF page under touch
+      for (pl in pageLayouts) {
+        if (!pl.isFolded && pl.boundsOnScreen.contains(x, y)) {
+          // Check if there is text directly under touch
+          val words = pageWordsCache[pl.pageIndex]
+          val px = (x - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
+          val py = (y - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
+          val hitWord = words?.find { w ->
+            px >= w.bounds.left - 6f && px <= w.bounds.right + 6f && py >= w.bounds.top - 8f && py <= w.bounds.bottom + 8f
+          }
+
+          if (hitWord != null) {
+            isLiftingExcerpt = true
+            liftCandidateText = hitWord.text
+            liftCandidatePage = pl.pageIndex + 1
+            liftCandidateColor = selectedColor
+            liftCandidateIsImage = false
+            liftCandidateImagePath = null
+            liftCandidateBitmap = null
+            liftGhostX = x
+            liftGhostY = y
+            liftAnchorScreenX = x
+            liftAnchorScreenY = y
+            activeCropSelection = null
+            activePdfSelection = null
+            invalidate()
+            return
+          }
+
+          val cropW = min(pl.boundsOnScreen.width() * 0.85f, 320f * density)
+          val cropH = min(pl.boundsOnScreen.height() * 0.45f, 200f * density)
+          val sRect = RectF(
+            (x - cropW / 2f).coerceIn(pl.boundsOnScreen.left + 8f * density, pl.boundsOnScreen.right - cropW - 8f * density),
+            (y - cropH / 2f).coerceIn(pl.boundsOnScreen.top + 8f * density, pl.boundsOnScreen.bottom - cropH - 8f * density),
+            (x + cropW / 2f).coerceIn(pl.boundsOnScreen.left + cropW + 8f * density, pl.boundsOnScreen.right - 8f * density),
+            (y + cropH / 2f).coerceIn(pl.boundsOnScreen.top + cropH + 8f * density, pl.boundsOnScreen.bottom - 8f * density)
+          )
+          val pW = pl.pageSize.width
+          val pH = pl.pageSize.height
+          val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+          val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+          val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+          val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+
+          val bounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom))
+          val bmp = generateCropBitmap(pl.pageIndex, bounds)
+
+          isLiftingExcerpt = true
+          liftCandidateText = "[Figure Crop]"
+          liftCandidatePage = pl.pageIndex + 1
+          liftCandidateColor = selectedColor
+          liftCandidateIsImage = true
+          if (bmp != null) {
+            val p = saveCropToFile(bmp)
+            liftCandidateImagePath = p
+            liftCandidateBitmap = bmp
+            cardBitmapCache.put(p, bmp)
+          } else {
+            liftCandidateImagePath = null
+            liftCandidateBitmap = null
+          }
+          liftGhostX = x
+          liftGhostY = y
+          liftAnchorScreenX = x
+          liftAnchorScreenY = y
+          activeCropSelection = null
+          activePdfSelection = null
+          invalidate()
+          return
+        }
+      }
+
+      // 2. Fallback structured demo document
+      if (activeDocument != null) {
+        val bmp = generateCropBitmap(0, BoundingBox(0f, 0f, 400f, 260f))
+        isLiftingExcerpt = true
+        liftCandidateText = "Chapter Excerpt"
+        liftCandidatePage = 1
+        liftCandidateColor = selectedColor
+        liftCandidateIsImage = true
+        if (bmp != null) {
+          val p = saveCropToFile(bmp)
+          liftCandidateImagePath = p
+          liftCandidateBitmap = bmp
+          cardBitmapCache.put(p, bmp)
+        }
+        liftGhostX = x
+        liftGhostY = y
+        liftAnchorScreenX = x
+        liftAnchorScreenY = y
+        activeCropSelection = null
+        activePdfSelection = null
+        invalidate()
+      }
+    }
+  }
+
+  init {
+    setWillNotDraw(false)
+    isClickable = true
+    isFocusable = true
+    docScroller.setFriction(0.0018f)
+    val vc = ViewConfiguration.get(context)
+    minFlingVelocity = vc.scaledMinimumFlingVelocity
+    maxFlingVelocity = vc.scaledMaximumFlingVelocity * 3
+    touchSlop = vc.scaledTouchSlop
+  }
+
+  override fun computeScroll() {
+    super.computeScroll()
+    if (docScroller.computeScrollOffset()) {
+      docScrollY = docScroller.currY.toFloat().coerceIn(0f, maxDocScrollY)
+      postInvalidateOnAnimation()
+    }
+  }
+
+  private fun generateCropBitmap(pageIndex: Int, bounds: BoundingBox): Bitmap? {
+    if (activePdfDoc != null) {
+      var pageBmp = pageBitmaps.get(pageIndex)
+      if (pageBmp == null || pageBmp.isRecycled) {
+        val wrapper = activePdfDoc as? com.thinkspace.pdfengine.parser.PdfBoxDocumentWrapper
+        if (wrapper != null && wrapper.file.exists()) {
+          try {
+            val pfd = ParcelFileDescriptor.open(wrapper.file, ParcelFileDescriptor.MODE_READ_ONLY)
+            pfd.use { desc ->
+              val nativeRenderer = android.graphics.pdf.PdfRenderer(desc)
+              val page = nativeRenderer.openPage(pageIndex)
+              val scale = 2.0f
+              val targetW = max(1, (page.width * scale).toInt())
+              val targetH = max(1, (page.height * scale).toInt())
+              val bmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+              bmp.eraseColor(Color.WHITE)
+              page.render(bmp, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+              page.close()
+              nativeRenderer.close()
+              pageBmp = bmp
+              pageBitmaps.put(pageIndex, bmp)
+            }
+          } catch (e: Exception) {
+            e.printStackTrace()
+          }
+        }
+      }
+
+      // Secondary fallback if nativeRenderer failed or wasn't loaded:
+      if (pageBmp == null || pageBmp.isRecycled) {
+        try {
+          val engine = PdfEngineModule.getOrCreateEngine(context)
+          val rendered = kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+            engine.renderPage(activePdfDoc!!, pageIndex, RenderOptions(scale = 2.0f))
+          }
+          pageBmp = rendered.bitmap
+          if (pageBmp != null) {
+            pageBitmaps.put(pageIndex, pageBmp)
+          }
+        } catch (e: Exception) {
+          e.printStackTrace()
+        }
+      }
+
+      if (pageBmp != null && !pageBmp!!.isRecycled) {
+        val bmp = pageBmp!!
+        val pl = pageLayouts.find { it.pageIndex == pageIndex }
+        val pW = pl?.pageSize?.width ?: (bmp.width / 2.0f)
+        val pH = pl?.pageSize?.height ?: (bmp.height / 2.0f)
+
+        val normL = minOf(bounds.left, bounds.right).coerceIn(0f, pW)
+        val normR = maxOf(bounds.left, bounds.right).coerceIn(0f, pW)
+        val normT = minOf(bounds.top, bounds.bottom).coerceIn(0f, pH)
+        val normB = maxOf(bounds.top, bounds.bottom).coerceIn(0f, pH)
+
+        var srcL = ((normL / pW) * bmp.width).toInt().coerceIn(0, bmp.width - 1)
+        var srcT = ((normT / pH) * bmp.height).toInt().coerceIn(0, bmp.height - 1)
+        var srcR = ((normR / pW) * bmp.width).toInt().coerceIn(0, bmp.width)
+        var srcB = ((normB / pH) * bmp.height).toInt().coerceIn(0, bmp.height)
+
+        var w = srcR - srcL
+        var h = srcB - srcT
+
+        if (w < 20) {
+          srcL = maxOf(0, srcL - 40)
+          srcR = minOf(bmp.width, srcL + 120)
+          w = srcR - srcL
+        }
+        if (h < 20) {
+          srcT = maxOf(0, srcT - 40)
+          srcB = minOf(bmp.height, srcT + 120)
+          h = srcB - srcT
+        }
+
+        if (srcL + w > bmp.width) w = bmp.width - srcL
+        if (srcT + h > bmp.height) h = bmp.height - srcT
+
+        if (w > 0 && h > 0) {
+          return try {
+            Bitmap.createBitmap(bmp, srcL, srcT, w, h)
+          } catch (e: Exception) {
+            null
+          }
+        }
+      }
+    }
+
+    if (activeDocument != null) {
+      val cropBmp = Bitmap.createBitmap(400, 260, Bitmap.Config.ARGB_8888)
+      val cropCanvas = Canvas(cropBmp)
+      cropCanvas.drawColor(Color.WHITE)
+      val borderP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#E2E8F0")
+        strokeWidth = 2f
+        style = Paint.Style.STROKE
+      }
+      cropCanvas.drawRect(0f, 0f, 400f, 260f, borderP)
+
+      val headerP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#0F172A")
+        textSize = 18f
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+      }
+      val bodyP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#334155")
+        textSize = 14f
+      }
+
+      val sec = activeDocument?.sections?.getOrNull(pageIndex) ?: activeDocument?.sections?.firstOrNull()
+      val title = sec?.heading ?: "Discovery of India"
+      cropCanvas.drawText("📖 $title", 20f, 36f, headerP)
+
+      val lines = sec?.paragraphs ?: listOf("Historical excerpt and excerpted diagram.")
+      var y = 70f
+      for (line in lines) {
+        val sub = if (line.length > 45) line.substring(0, 42) + "..." else line
+        cropCanvas.drawText(sub, 20f, y, bodyP)
+        y += 26f
+        if (y > 230f) break
+      }
+      return cropBmp
+    }
+
+    return null
+  }
+
+  private fun saveCropToFile(bmp: Bitmap): String {
+    val file = File(context.cacheDir, "crop_${System.currentTimeMillis()}_${(1000..9999).random()}.png")
+    try {
+      FileOutputStream(file).use { out ->
+        bmp.compress(Bitmap.CompressFormat.PNG, 90, out)
+      }
     } catch (e: Exception) {
       e.printStackTrace()
     }
+    return file.absolutePath
   }
 
-  // Scale gesture detector for canvas pinch-to-zoom
-  private val scaleGestureDetector = ScaleGestureDetector(
-    context ?: throw IllegalStateException(),
-    object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-      override fun onScale(detector: ScaleGestureDetector): Boolean {
-        val prevScale = scaleFactor
-        scaleFactor = max(0.12f, min(scaleFactor * detector.scaleFactor, 5.0f))
-        val scaleRatio = scaleFactor / prevScale
-
-        val focusX = detector.focusX
-        val focusY = detector.focusY - (height * splitRatio)
-
-        panX = focusX - (focusX - panX) * scaleRatio
-        panY = focusY - (focusY - panY) * scaleRatio
-
-        dispatchTransformEvent()
-        invalidate()
-        return true
-      }
-    }
-  )
-
-  init {
-    setLayerType(LAYER_TYPE_HARDWARE, null)
+  override fun onDetachedFromWindow() {
+    super.onDetachedFromWindow()
+    renderScope.cancel()
+    pageBitmaps.evictAll()
   }
 
-  // Chaikin smoothing
-  private fun chaikinSmooth(pts: List<NativePoint>, iterations: Int = 1): List<NativePoint> {
-    if (pts.size <= 2) return pts
-    var current = pts
-    for (it in 0 until iterations) {
-      val next = mutableListOf<NativePoint>()
-      next.add(current.first())
-      for (i in 0 until current.size - 1) {
-        val p0 = current[i]
-        val p1 = current[i + 1]
-        next.add(NativePoint(0.75f * p0.x + 0.25f * p1.x, 0.75f * p0.y + 0.25f * p1.y))
-        next.add(NativePoint(0.25f * p0.x + 0.75f * p1.x, 0.25f * p0.y + 0.75f * p1.y))
-      }
-      next.add(current.last())
-      current = next
-    }
-    return current
-  }
+  // ---------------------------------------------------------------------------
+  // Document Configuration
+  // ---------------------------------------------------------------------------
 
-  private fun pointsToSmoothPath(rawPoints: List<NativePoint>, smooth: Boolean = true): Path {
-    val path = Path()
-    if (rawPoints.isEmpty()) return path
-    val pts = if (smooth && rawPoints.size > 2) chaikinSmooth(rawPoints, 1) else rawPoints
-    val p0 = pts[0]
-    path.moveTo(p0.x, p0.y)
-
-    for (i in 1 until pts.size - 1) {
-      val xc = (pts[i].x + pts[i + 1].x) / 2f
-      val yc = (pts[i].y + pts[i + 1].y) / 2f
-      path.quadTo(pts[i].x, pts[i].y, xc, yc)
-    }
-    if (pts.size > 1) {
-      val last = pts.last()
-      path.lineTo(last.x, last.y)
-    }
-    return path
-  }
-
-  // Setters for Document, Annotations, Cards, Strokes, Links
   fun setDocumentFromJson(json: String?) {
     if (json.isNullOrEmpty()) {
+      activePdfDoc = null
       activeDocument = null
       invalidate()
       return
     }
     try {
       val obj = JSONObject(json)
-      val id = obj.optString("id", "doc-1")
+      val id = obj.optString("id", obj.optString("documentId", ""))
+      val uri = obj.optString("uri", "")
       val title = obj.optString("title", "Document")
       val pageCount = obj.optInt("pageCount", 1)
 
-      val sectionsArr = obj.optJSONArray("sections")
+      // 1. Try to find an already opened PDF in PdfEngineModule
+      val existingPdf = PdfEngineModule.openDocuments[id]
+      if (existingPdf != null) {
+        activePdfDoc = existingPdf
+        activeDocument = null
+        pageBitmaps.evictAll()
+        pageWordsCache.clear()
+        docScrollY = 0f
+        invalidate()
+        return
+      }
+
+      // 2. If URI provided, open via DefaultPdfDocumentEngine asynchronously
+      if (uri.isNotEmpty()) {
+        renderScope.launch(Dispatchers.IO) {
+          try {
+            val engine = PdfEngineModule.getOrCreateEngine(context)
+            val source = PdfEngineModule.resolveSource(context, uri)
+            val doc = engine.open(source)
+            PdfEngineModule.openDocuments[id] = doc
+            withContext(Dispatchers.Main) {
+              activePdfDoc = doc
+              activeDocument = null
+              pageBitmaps.evictAll()
+              pageWordsCache.clear()
+              docScrollY = 0f
+              invalidate()
+            }
+          } catch (e: Exception) {
+            e.printStackTrace()
+          }
+        }
+      }
+
+      // 3. Fallback to structured document sections (for demo/preloaded text)
       val secList = mutableListOf<NativeSection>()
-      if (sectionsArr != null) {
-        for (i in 0 until sectionsArr.length()) {
-          val sObj = sectionsArr.getJSONObject(i)
+      val secArr = obj.optJSONArray("sections")
+      if (secArr != null) {
+        for (i in 0 until secArr.length()) {
+          val sObj = secArr.getJSONObject(i)
           val sId = sObj.optString("id", "sec-$i")
           val pageNumber = sObj.optInt("pageNumber", i + 1)
-          val heading = sObj.optString("heading", "")
-
+          val heading = sObj.optString("heading", "Chapter $i")
           val pArr = sObj.optJSONArray("paragraphs")
           val pList = mutableListOf<String>()
           if (pArr != null) {
-            for (j in 0 until pArr.length()) {
-              pList.add(pArr.getString(j))
-            }
+            for (j in 0 until pArr.length()) pList.add(pArr.getString(j))
           }
-
-          val tArr = sObj.optJSONArray("tables")
-          val tList = mutableListOf<NativeTable>()
-          if (tArr != null) {
-            for (t in 0 until tArr.length()) {
-              val tableObj = tArr.getJSONObject(t)
-              val rowsArr = tableObj.optJSONArray("rows")
-              val rowsList = mutableListOf<NativeTableRow>()
-              if (rowsArr != null) {
-                for (r in 0 until rowsArr.length()) {
-                  val rowObj = rowsArr.getJSONObject(r)
-                  val cellsArr = rowObj.optJSONArray("cells")
-                  val cellsList = mutableListOf<String>()
-                  if (cellsArr != null) {
-                    for (c in 0 until cellsArr.length()) {
-                      cellsList.add(cellsArr.getString(c))
-                    }
-                  }
-                  rowsList.add(NativeTableRow(cellsList))
-                }
-              }
-              tList.add(NativeTable(rowsList))
-            }
-          }
-
-          val imageUrl = if (sObj.has("imageUrl") && !sObj.isNull("imageUrl")) sObj.getString("imageUrl") else null
-          secList.add(NativeSection(sId, pageNumber, heading, pList, if (tList.isNotEmpty()) tList else null, imageUrl))
+          secList.add(NativeSection(sId, pageNumber, heading, pList, null, null))
         }
       }
       activeDocument = NativeDoc(id, title, pageCount, secList)
@@ -748,54 +1019,72 @@ class ThinkspaceView : View {
   }
 
   fun setCardsFromJson(json: String?) {
-    cards.clear()
     if (json.isNullOrEmpty()) {
-      invalidate()
       return
     }
     try {
       val arr = JSONArray(json)
+      if (arr.length() == 0 && cards.isNotEmpty()) {
+        return
+      }
+
+      val updatedList = mutableListOf<NativeCard>()
       for (i in 0 until arr.length()) {
         val obj = arr.getJSONObject(i)
         val id = obj.optString("id", "card-$i")
-        val x = obj.optDouble("x", 0.0).toFloat()
-        val y = obj.optDouble("y", 0.0).toFloat()
-        val width = obj.optDouble("width", 220.0).toFloat()
-        val text = obj.optString("text", "")
-        val colorHex = obj.optString("color", "#00ADB5")
-        val color = try { Color.parseColor(colorHex) } catch (e: Exception) { Color.WHITE }
-        val pageNumber = obj.optInt("pageNumber", 1)
-        val comment = if (obj.has("comment") && !obj.isNull("comment")) obj.getString("comment") else null
-        val clusterId = if (obj.has("clusterId") && !obj.isNull("clusterId")) obj.getString("clusterId") else null
-        val stackCount = obj.optInt("stackCount", 1)
-        val isImage = obj.optBoolean("isImage", false)
-        val imageUrl = if (obj.has("imageUrl") && !obj.isNull("imageUrl")) obj.getString("imageUrl") else null
-        val isTable = obj.optBoolean("isTable", false)
+        var existing = cards.find { it.id == id }
+        val isImage = obj.optBoolean("isImage", existing?.isImage ?: false)
+        val pageNumber = obj.optInt("pageNumber", existing?.pageNumber ?: 1)
+        if (existing == null && isImage) {
+          existing = cards.find { it.isImage && it.pageNumber == pageNumber && !it.imageUrl.isNullOrEmpty() }
+        }
 
-        val tableRows = mutableListOf<NativeTableRow>()
-        val tableDataObj = obj.optJSONObject("tableData")
-        if (tableDataObj != null) {
-          val rowsArr = tableDataObj.optJSONArray("rows")
-          if (rowsArr != null) {
-            for (r in 0 until rowsArr.length()) {
-              val rowObj = rowsArr.getJSONObject(r)
-              val cellsArr = rowObj.optJSONArray("cells")
-              val cellList = mutableListOf<String>()
-              if (cellsArr != null) {
-                for (c in 0 until cellsArr.length()) {
-                  cellList.add(cellsArr.getString(c))
-                }
-              }
-              tableRows.add(NativeTableRow(cellList))
+        val x = if (obj.has("x") && obj.getDouble("x") != 0.0) obj.getDouble("x").toFloat() else (existing?.x ?: 60f)
+        val y = if (obj.has("y") && obj.getDouble("y") != 0.0) obj.getDouble("y").toFloat() else (existing?.y ?: 60f)
+        val width = obj.optDouble("width", (existing?.width ?: 220f).toDouble()).toFloat()
+        val text = obj.optString("text", existing?.text ?: "")
+        val colorHex = obj.optString("color", "#00ADB5")
+        val color = try { Color.parseColor(colorHex) } catch (e: Exception) { existing?.color ?: Color.WHITE }
+        val comment = if (obj.has("comment") && !obj.isNull("comment")) obj.getString("comment") else existing?.comment
+        val clusterId = if (obj.has("clusterId") && !obj.isNull("clusterId")) obj.getString("clusterId") else existing?.clusterId
+        val stackCount = obj.optInt("stackCount", existing?.stackCount ?: 1)
+        val imageUrl = if (obj.has("imageUrl") && !obj.isNull("imageUrl") && obj.getString("imageUrl").isNotEmpty()) {
+          obj.getString("imageUrl")
+        } else {
+          existing?.imageUrl
+        }
+        val isTable = obj.optBoolean("isTable", existing?.isTable ?: false)
+
+        // Cache association for image card bitmap
+        if (isImage) {
+          val cachedBmp = (if (!imageUrl.isNullOrEmpty()) cardBitmapCache.get(imageUrl) else null)
+            ?: (if (existing != null) cardBitmapCache.get(existing.id) else null)
+            ?: cardBitmapCache.get("page_${pageNumber}_image")
+          if (cachedBmp != null) {
+            cardBitmapCache.put(id, cachedBmp)
+            if (!imageUrl.isNullOrEmpty()) {
+              cardBitmapCache.put(imageUrl, cachedBmp)
             }
           }
         }
 
-        cards.add(NativeCard(
-          id, x, y, width, text, color, pageNumber, comment, clusterId, stackCount,
-          isImage, imageUrl, isTable, if (tableRows.isNotEmpty()) tableRows else null
-        ))
+        updatedList.add(
+          NativeCard(
+            id, x, y, width, text, color, pageNumber, comment, clusterId, stackCount,
+            isImage, imageUrl, isTable, existing?.tableRows
+          )
+        )
       }
+
+      // Preserve any locally dropped cards not yet present in React Native state
+      for (localCard in cards) {
+        if (updatedList.none { it.id == localCard.id || (it.isImage && localCard.isImage && it.pageNumber == localCard.pageNumber) }) {
+          updatedList.add(localCard)
+        }
+      }
+
+      cards.clear()
+      cards.addAll(updatedList)
     } catch (e: Exception) {
       e.printStackTrace()
     }
@@ -803,13 +1092,15 @@ class ThinkspaceView : View {
   }
 
   fun setLinksFromJson(json: String?) {
-    links.clear()
     if (json.isNullOrEmpty()) {
-      invalidate()
       return
     }
     try {
       val arr = JSONArray(json)
+      if (arr.length() == 0 && links.isNotEmpty()) {
+        return
+      }
+      links.clear()
       for (i in 0 until arr.length()) {
         val obj = arr.getJSONObject(i)
         val id = obj.optString("id", "link-$i")
@@ -846,546 +1137,808 @@ class ThinkspaceView : View {
     return Pair((sx - panX) / scaleFactor, (sy - canvasTopY - panY) / scaleFactor)
   }
 
+  private fun canvasWorldToScreen(wx: Float, wy: Float, canvasTopY: Float): Pair<Float, Float> {
+    return Pair(wx * scaleFactor + panX, wy * scaleFactor + panY + canvasTopY)
+  }
+
   // ---------------------------------------------------------------------------
-  // Master OnDraw
+  // Master OnDraw (100% Native Kotlin Workspace)
   // ---------------------------------------------------------------------------
   @SuppressLint("DrawAllocation")
   override fun onDraw(canvas: Canvas) {
     super.onDraw(canvas)
 
+    if (!docScroller.isFinished) {
+      postInvalidateOnAnimation()
+    }
+
     val viewW = width.toFloat()
     val viewH = height.toFloat()
     if (viewW <= 0f || viewH <= 0f) return
 
-    val hasDoc = activeDocument != null
+    val hasDoc = activePdfDoc != null || activeDocument != null
     val splitY = if (hasDoc) viewH * splitRatio else 0f
-    val docBottomY = max(0f, splitY - 12f)
-    val canvasTopY = if (hasDoc) splitY + 12f else 0f
+    val docBottomY = max(0f, splitY - 14f)
+    val canvasTopY = if (hasDoc) splitY + 14f else 0f
 
     // =========================================================================
-    // 1. TOP ZONE: Native Document Viewer
+    // 1. TOP ZONE: Native Document Viewer (Continuous Multi-Page Stream)
     // =========================================================================
     if (hasDoc && docBottomY > 10f) {
       canvas.save()
       canvas.clipRect(0f, 0f, viewW, docBottomY)
       canvas.drawRect(0f, 0f, viewW, docBottomY, docBgPaint)
 
-      val doc = activeDocument!!
+      headerRect.set(0f, 0f, viewW, subheaderH)
+      canvas.drawRect(headerRect, docSubheaderBgPaint)
 
-      // Top Document Subheader Bar (LiquidText Document Bar)
-      val subheaderH = 42f
-      val subheaderRect = RectF(0f, 0f, viewW, subheaderH)
-      canvas.drawRect(subheaderRect, docSubheaderBgPaint)
+      val titleStr = activePdfDoc?.metadata?.title?.takeIf { it.isNotEmpty() }
+        ?: activeDocument?.title?.takeIf { it.isNotEmpty() }
+        ?: "PDF Document"
+      val pageTotal = activePdfDoc?.pageCount ?: activeDocument?.pageCount ?: 1
 
-      // Left: Document Dropdown Pill
-      val docTitlePill = if (doc.title.length > 24) doc.title.substring(0, 22) + "... ▾" else "${doc.title} ▾"
-      val titlePillW = badgeTextPaint.measureText(docTitlePill) + 24f
-      val titlePillRect = RectF(14f, 7f, 14f + titlePillW, 35f)
-      canvas.drawRoundRect(titlePillRect, 14f, 14f, dividerHandlePaint)
-      canvas.drawRoundRect(titlePillRect, 14f, 14f, dividerBorderPaint)
-      canvas.drawText(docTitlePill, 24f, 26f, badgeTextPaint)
+      // 1. Document Pill
+      val displayTitle = if (titleStr.length > 18) titleStr.substring(0, 16) + "... ▾" else "$titleStr ▾"
+      val pillW = badgeTextPaint.measureText(displayTitle) + 24f * density
+      val btnTop = (subheaderH - 34f * density) / 2f
+      val btnBottom = btnTop + 34f * density
 
-      // Center/Right: Page Indicator
-      val pageInd = "p. 7/${doc.pageCount}"
-      canvas.drawText(pageInd, 14f + titlePillW + 16f, 26f, docTitlePaint)
+      headerDocPillRect.set(12f * density, btnTop, 12f * density + pillW, btnBottom)
+      canvas.drawRoundRect(headerDocPillRect, 14f * density, 14f * density, dividerHandlePaint)
+      canvas.drawRoundRect(headerDocPillRect, 14f * density, 14f * density, dividerBorderPaint)
+      canvas.drawText(displayTitle, 20f * density, btnTop + 22f * density, badgeTextPaint)
 
-      // Crop Button
-      val cropRect = RectF(viewW - 140f, 7f, viewW - 68f, 35f)
-      canvas.drawRoundRect(cropRect, 14f, 14f, dividerHandlePaint)
-      canvas.drawRoundRect(cropRect, 14f, 14f, dividerBorderPaint)
-      canvas.drawText("✂️ Crop", viewW - 132f, 26f, badgeTextPaint)
+      // Page Pill
+      val curPageNum = (pageLayouts.firstOrNull { it.boundsOnScreen.bottom > subheaderH + 20f }?.pageNumber ?: 1).coerceIn(1, pageTotal)
+      val pageInd = "p. $curPageNum / $pageTotal"
+      canvas.drawText(pageInd, 12f * density + pillW + 12f * density, btnTop + 22f * density, docTitlePaint)
 
-      // Zoom Buttons
-      canvas.drawText("1:1", viewW - 48f, 26f, commentPaint)
+      // Right Side Controls: Mode Switcher (📝 Text vs ✂️ Crop) & Accordion Squeeze (🪗)
+      val modeBtnW = 88f * density
+      val cropBtnLeft = viewW - 12f * density - modeBtnW
+      val textBtnLeft = cropBtnLeft - 8f * density - modeBtnW
+      val squeezeBtnW = 40f * density
+      val squeezeBtnLeft = textBtnLeft - 8f * density - squeezeBtnW
 
-      // Document Content Container (Centered White Paper Book Page)
+      headerSqueezeRect.set(squeezeBtnLeft, btnTop, squeezeBtnLeft + squeezeBtnW, btnBottom)
+      val sqBg = if (isSqueezed) Color.parseColor("#00ADB5") else Color.parseColor("#1E293B")
+      canvas.drawRoundRect(headerSqueezeRect, 10f * density, 10f * density, Paint().apply { color = sqBg })
+      canvas.drawText("🪗", squeezeBtnLeft + 10f * density, btnTop + 23f * density, TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 16f * density })
+
+      headerModeTextRect.set(textBtnLeft, btnTop, textBtnLeft + modeBtnW, btnBottom)
+      val textBg = if (docMode == "text") Color.parseColor("#00ADB5") else Color.parseColor("#1E293B")
+      val textCol = if (docMode == "text") Color.WHITE else Color.parseColor("#94A3B8")
+      canvas.drawRoundRect(headerModeTextRect, 10f * density, 10f * density, Paint().apply { color = textBg })
+      canvas.drawText("📝 Text", textBtnLeft + 12f * density, btnTop + 22f * density, TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = textCol
+        textSize = 14f * density
+        isFakeBoldText = true
+      })
+
+      headerModeCropRect.set(cropBtnLeft, btnTop, cropBtnLeft + modeBtnW, btnBottom)
+      val cropBg = if (docMode == "crop") Color.parseColor("#00ADB5") else Color.parseColor("#1E293B")
+      val cropCol = if (docMode == "crop") Color.WHITE else Color.parseColor("#94A3B8")
+      canvas.drawRoundRect(headerModeCropRect, 10f * density, 10f * density, Paint().apply { color = cropBg })
+      canvas.drawText("✂️ Crop", cropBtnLeft + 12f * density, btnTop + 22f * density, TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = cropCol
+        textSize = 14f * density
+        isFakeBoldText = true
+      })
+
+      // -----------------------------------------------------------------------
+      // Render Document Pages (Real PDF Document or Fallback Structured Sections)
+      // -----------------------------------------------------------------------
       val paperMargin = 16f
-      val paperW = min(viewW - paperMargin * 2, 640f)
+      val paperW = min(viewW - paperMargin * 2f, 680f)
       val paperX = (viewW - paperW) / 2f
-      var curY = subheaderH + 16f - docScrollY
-      paragraphLayouts.clear()
 
-      for (sec in doc.sections) {
-        val secAnns = annotations.filter { it.sectionId == sec.id }
-        val hasAnn = secAnns.isNotEmpty()
+      pageLayouts.clear()
 
-        if (isSqueezed && !hasAnn && sec.tables == null && sec.imageUrl == null) {
-          // Accordion Folded ribbon
-          val foldRect = RectF(paperX, curY, paperX + paperW, curY + 28f)
-          canvas.drawRoundRect(foldRect, 6f, 6f, dividerHandlePaint)
-          canvas.drawText("── Page ${sec.pageNumber}: ${sec.heading} (Folded) ──", paperX + 16f, curY + 18f, commentPaint)
-          curY += 34f
-          continue
-        }
+      if (activePdfDoc != null) {
+        val pdf = activePdfDoc!!
+        val pCount = pdf.pageCount
+        val standardPageH = paperW * 1.294f
+        val pageStride = if (isSqueezed) (32f + 6f) else (standardPageH + 18f)
+        val totalDocH = pCount * pageStride
+        maxDocScrollY = max(0f, totalDocH - (docBottomY - subheaderH) + 60f)
 
-        // Paper Page Background
-        var sectionContentH = 60f
-        for (para in sec.paragraphs) {
-          val textW = max(20, (paperW - 56f).toInt())
-          val layout = StaticLayout.Builder
-            .obtain(para, 0, para.length, docParagraphPaint, textW)
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setLineSpacing(0f, 1.25f)
-            .build()
-          sectionContentH += layout.height + 24f
-        }
+        val firstIdx = max(0, ((docScrollY - 400f) / pageStride).toInt())
+        val lastIdx = min(pCount - 1, ((docScrollY + (docBottomY - subheaderH) + 400f) / pageStride).toInt() + 1)
 
-        val pageCardRect = RectF(paperX, curY, paperX + paperW, curY + sectionContentH)
-        canvas.drawRoundRect(pageCardRect, 10f, 10f, docPageBgPaint)
-        canvas.drawRoundRect(pageCardRect, 10f, 10f, docPageBorderPaint)
+        for (pageIdx in firstIdx..lastIdx) {
+          val pageNum = pageIdx + 1
+          val hasAnnotation = annotations.any { it.pageNumber == pageNum } || cards.any { it.pageNumber == pageNum }
+          val isFolded = isSqueezed && !hasAnnotation
 
-        // Book Chapter / Heading (e.g. "PREFACE")
-        val headingText = sec.heading.uppercase()
-        val headingW = docHeadingPaint.measureText(headingText)
-        val headingX = paperX + (paperW - headingW) / 2f
-        canvas.drawText(headingText, headingX, curY + 36f, docHeadingPaint)
-        curY += 56f
+          val pageH = if (isFolded) 32f else standardPageH
+          val pageTopY = subheaderH + 16f - docScrollY + pageIdx * pageStride
+          val screenRect = RectF(paperX, pageTopY, paperX + paperW, pageTopY + pageH)
 
-        // Paragraphs
-        for ((pIdx, para) in sec.paragraphs.withIndex()) {
-          val ann = secAnns.find { it.paragraphIndex == pIdx }
-          val isHighlighted = ann != null
-
-          val textW = max(20, (paperW - 56f).toInt())
-          val staticLayout = StaticLayout.Builder
-            .obtain(para, 0, para.length, docParagraphPaint, textW)
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setLineSpacing(0f, 1.25f)
-            .build()
-
-          paragraphLayouts.add(
-            ParagraphLayoutInfo(
-              secId = sec.id,
-              pIdx = pIdx,
-              pageNumber = sec.pageNumber,
-              text = para,
-              paperX = paperX,
-              topY = curY,
-              width = (paperW - 56f),
-              layout = staticLayout
+          pageLayouts.add(
+            PdfPageLayout(
+              pageIndex = pageIdx,
+              pageNumber = pageNum,
+              pageSize = PageSize.LETTER,
+              topY = pageTopY,
+              height = pageH,
+              isFolded = isFolded,
+              boundsOnScreen = screenRect
             )
           )
 
-          val paraH = staticLayout.height.toFloat() + 16f
+          // Viewport culling: only draw pages touching the visible area
+          if (screenRect.bottom >= subheaderH && screenRect.top <= docBottomY) {
+            if (isFolded) {
+              // Accordion folded ribbon
+              canvas.drawRoundRect(screenRect, 8f, 8f, dividerHandlePaint)
+              canvas.drawRoundRect(screenRect, 8f, 8f, dividerBorderPaint)
+              canvas.drawText(
+                "─── Page $pageNum (Folded) • Tap to expand ───",
+                paperX + 24f,
+                screenRect.top + 21f,
+                commentPaint
+              )
+            } else {
+              // Standard PDF Page Paper Background
+              canvas.drawRoundRect(screenRect, 6f, 6f, docPageBgPaint)
+              canvas.drawRoundRect(screenRect, 6f, 6f, docPageBorderPaint)
 
-          if (isHighlighted) {
-            val hlRect = RectF(paperX + 16f, curY - 4f, paperX + paperW - 16f, curY + paraH)
-            highlightBgPaint.color = ann.color
-            highlightBgPaint.alpha = 40
-            canvas.drawRoundRect(hlRect, 6f, 6f, highlightBgPaint)
+              // Check if page bitmap is cached
+              val bmp = pageBitmaps.get(pageIdx)
+              if (bmp != null && !bmp.isRecycled) {
+                canvas.drawBitmap(bmp, null, screenRect, null)
+              } else {
+                // Page loading placeholder
+                val skeletonPaint = Paint().apply { color = Color.parseColor("#F1F5F9") }
+                canvas.drawRoundRect(screenRect, 6f, 6f, skeletonPaint)
+                canvas.drawText(
+                  "Rendering Page $pageNum...",
+                  screenRect.centerX() - 80f,
+                  screenRect.centerY(),
+                  commentPaint
+                )
 
-            highlightBgPaint.alpha = 255
-            val leftBar = RectF(paperX + 16f, curY - 4f, paperX + 21f, curY + paraH)
-            canvas.drawRoundRect(leftBar, 2f, 2f, highlightBgPaint)
+                // Trigger background render
+                if (!renderingPages.contains(pageIdx)) {
+                  renderingPages.add(pageIdx)
+                  renderScope.launch(Dispatchers.IO) {
+                    try {
+                      var pageBmp: Bitmap? = null
+
+                      // 1. Primary: Try high-speed native C++ Android PdfRenderer (Google Skia)
+                      val wrapper = pdf as? com.thinkspace.pdfengine.parser.PdfBoxDocumentWrapper
+                      if (wrapper != null && wrapper.file.exists()) {
+                        try {
+                          val pfd = ParcelFileDescriptor.open(wrapper.file, ParcelFileDescriptor.MODE_READ_ONLY)
+                          pfd.use { desc ->
+                            val nativeRenderer = android.graphics.pdf.PdfRenderer(desc)
+                            val page = nativeRenderer.openPage(pageIdx)
+                            val scale = 1.6f
+                            val targetW = max(1, (page.width * scale).toInt())
+                            val targetH = max(1, (page.height * scale).toInt())
+                            val bmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                            bmp.eraseColor(Color.WHITE)
+                            page.render(bmp, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            page.close()
+                            nativeRenderer.close()
+                            pageBmp = bmp
+                          }
+                        } catch (t: Throwable) {
+                          t.printStackTrace()
+                        }
+                      }
+
+                      // 2. Secondary fallback: Use DefaultPdfDocumentEngine.renderPage
+                      if (pageBmp == null) {
+                        val engine = PdfEngineModule.getOrCreateEngine(context)
+                        val rendered = engine.renderPage(pdf, pageIdx, RenderOptions(scale = 1.6f))
+                        pageBmp = rendered.bitmap
+                      }
+
+                      if (pageBmp != null) {
+                        pageBitmaps.put(pageIdx, pageBmp)
+                        postInvalidateOnAnimation()
+                      }
+                    } catch (e: Exception) {
+                      e.printStackTrace()
+                    } finally {
+                      renderingPages.remove(pageIdx)
+                    }
+                  }
+                }
+              }
+
+              // Extract text words if not already cached
+              if (!pageWordsCache.containsKey(pageIdx) && !extractingWords.contains(pageIdx)) {
+                extractingWords.add(pageIdx)
+                renderScope.launch(Dispatchers.IO) {
+                  try {
+                    val engine = PdfEngineModule.getOrCreateEngine(context)
+                    val words = engine.extractText(pdf, pageIdx).filterIsInstance<TextWord>()
+                    pageWordsCache[pageIdx] = words
+                  } catch (e: Exception) {
+                    e.printStackTrace()
+                  } finally {
+                    extractingWords.remove(pageIdx)
+                  }
+                }
+              }
+
+              // Draw persistent annotations on this page
+              val pageAnns = annotations.filter { it.pageNumber == pageNum }
+              for (ann in pageAnns) {
+                highlightBgPaint.color = ann.color
+                highlightBgPaint.alpha = 50
+                canvas.drawRect(
+                  screenRect.left + 20f,
+                  screenRect.top + 20f,
+                  screenRect.right - 20f,
+                  screenRect.top + 50f,
+                  highlightBgPaint
+                )
+              }
+
+              // Flash bidirectional navigation pulse if active
+              if (pulsePageNumber == pageNum && pulseAlpha > 0) {
+                val pulsePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.parseColor("#F59E0B")
+                  style = Paint.Style.STROKE
+                  strokeWidth = 6f
+                  alpha = pulseAlpha
+                }
+                canvas.drawRoundRect(screenRect, 8f, 8f, pulsePaint)
+              }
+            }
+          }
+        }
+      } else if (activeDocument != null) {
+        // Fallback Structured Text Sections (e.g. Discovery of India Demo)
+        val doc = activeDocument!!
+        paragraphLayouts.clear()
+        var curY = subheaderH + 16f - docScrollY
+
+        for (sec in doc.sections) {
+          val secAnns = annotations.filter { it.sectionId == sec.id }
+          val hasAnn = secAnns.isNotEmpty()
+
+          if (isSqueezed && !hasAnn) {
+            val foldRect = RectF(paperX, curY, paperX + paperW, curY + 28f)
+            canvas.drawRoundRect(foldRect, 6f, 6f, dividerHandlePaint)
+            canvas.drawText("── Page ${sec.pageNumber}: ${sec.heading} (Folded) ──", paperX + 16f, curY + 18f, commentPaint)
+            curY += 34f
+            continue
           }
 
-          canvas.save()
-          canvas.translate(paperX + 28f, curY)
-          staticLayout.draw(canvas)
-          canvas.restore()
+          var sectionContentH = 60f
+          for (para in sec.paragraphs) {
+            val textW = max(20, (paperW - 56f).toInt())
+            val layout = StaticLayout.Builder
+              .obtain(para, 0, para.length, docParagraphPaint, textW)
+              .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+              .setLineSpacing(0f, 1.25f)
+              .build()
+            sectionContentH += layout.height + 24f
+          }
 
-          curY += paraH + 12f
+          val pageCardRect = RectF(paperX, curY, paperX + paperW, curY + sectionContentH)
+          canvas.drawRoundRect(pageCardRect, 8f, 8f, docPageBgPaint)
+          canvas.drawRoundRect(pageCardRect, 8f, 8f, docPageBorderPaint)
+
+          val headingText = sec.heading.uppercase()
+          val headingW = docHeadingPaint.measureText(headingText)
+          val headingX = paperX + (paperW - headingW) / 2f
+          canvas.drawText(headingText, headingX, curY + 36f, docHeadingPaint)
+          curY += 56f
+
+          for ((pIdx, para) in sec.paragraphs.withIndex()) {
+            val ann = secAnns.find { it.paragraphIndex == pIdx }
+            val isHighlighted = ann != null
+
+            val textW = max(20, (paperW - 56f).toInt())
+            val staticLayout = StaticLayout.Builder
+              .obtain(para, 0, para.length, docParagraphPaint, textW)
+              .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+              .setLineSpacing(0f, 1.25f)
+              .build()
+
+            paragraphLayouts.add(
+              ParagraphLayoutInfo(
+                secId = sec.id,
+                pIdx = pIdx,
+                pageNumber = sec.pageNumber,
+                text = para,
+                paperX = paperX,
+                topY = curY,
+                width = (paperW - 56f),
+                layout = staticLayout
+              )
+            )
+
+            val paraH = staticLayout.height.toFloat() + 16f
+            if (isHighlighted) {
+              val hlRect = RectF(paperX + 16f, curY - 4f, paperX + paperW - 16f, curY + paraH)
+              highlightBgPaint.color = ann.color
+              highlightBgPaint.alpha = 40
+              canvas.drawRoundRect(hlRect, 6f, 6f, highlightBgPaint)
+            }
+
+            canvas.save()
+            canvas.translate(paperX + 28f, curY)
+            staticLayout.draw(canvas)
+            canvas.restore()
+
+            curY += paraH + 12f
+          }
+          curY += 24f
         }
-
-        curY += 24f
+        maxDocScrollY = max(0f, curY + docScrollY - docBottomY + 40f)
       }
 
-      // Draw Active Text Selection (Teal highlights, handle pins, callout menu)
-      if (activeSelection != null) {
-        val sel = activeSelection!!
-
-        // 1. Teal highlight rectangles
-        for (r in sel.highlightRects) {
+      // -----------------------------------------------------------------------
+      // Draw Active Text Selection (Real PDF or Fallback)
+      // -----------------------------------------------------------------------
+      val pdfSel = activePdfSelection
+      if (pdfSel != null) {
+        for (r in pdfSel.highlightRects) {
           canvas.drawRoundRect(r, 4f, 4f, selectionFillPaint)
           canvas.drawLine(r.left, r.bottom, r.right, r.bottom, selectionBorderPaint)
         }
 
-        // 2. Start Handle Pin (Vertical bar + top teardrop pin)
-        if (sel.highlightRects.isNotEmpty()) {
-          val firstR = sel.highlightRects.first()
+        // Handles
+        if (pdfSel.highlightRects.isNotEmpty()) {
+          val firstR = pdfSel.highlightRects.first()
           canvas.drawLine(firstR.left, firstR.top - 6f, firstR.left, firstR.bottom, selectionHandleBarPaint)
           canvas.drawCircle(firstR.left, firstR.top - 8f, 7.5f, selectionHandlePinPaint)
-        }
 
-        // 3. End Handle Pin (Vertical bar + bottom teardrop pin)
-        if (sel.highlightRects.isNotEmpty()) {
-          val lastR = sel.highlightRects.last()
+          val lastR = pdfSel.highlightRects.last()
           canvas.drawLine(lastR.right, lastR.top, lastR.right, lastR.bottom + 6f, selectionHandleBarPaint)
           canvas.drawCircle(lastR.right, lastR.bottom + 8f, 7.5f, selectionHandlePinPaint)
         }
 
-        // 4. Floating Selection Callout Menu Dock
-        val cRect = sel.calloutRect
+        // Callout Dock
+        val cRect = pdfSel.calloutRect
         canvas.drawRoundRect(cRect, 10f, 10f, calloutBgPaint)
         canvas.drawRoundRect(cRect, 10f, 10f, calloutBorderPaint)
 
-        // [+ Excerpt] Button
-        canvas.drawRoundRect(sel.calloutExcerptBtn, 6f, 6f, calloutPrimaryBtnPaint)
-        canvas.drawText("+ Excerpt", sel.calloutExcerptBtn.left + 14f, sel.calloutExcerptBtn.centerY() + 6f, calloutTextPaint)
+        canvas.drawRoundRect(pdfSel.calloutExcerptBtn, 6f, 6f, calloutPrimaryBtnPaint)
+        canvas.drawText("+ Excerpt", pdfSel.calloutExcerptBtn.left + 14f, pdfSel.calloutExcerptBtn.centerY() + 6f, calloutTextPaint)
 
-        // [📋 Copy] Button
-        canvas.drawRoundRect(sel.calloutCopyBtn, 6f, 6f, calloutSecondaryBtnPaint)
-        val copyLabel = copiedToastText ?: "📋 Copy"
-        canvas.drawText(copyLabel, sel.calloutCopyBtn.left + 10f, sel.calloutCopyBtn.centerY() + 6f, calloutSecondaryTextPaint)
+        canvas.drawRoundRect(pdfSel.calloutCopyBtn, 6f, 6f, calloutSecondaryBtnPaint)
+        canvas.drawText(copiedToastText ?: "📋 Copy", pdfSel.calloutCopyBtn.left + 10f, pdfSel.calloutCopyBtn.centerY() + 6f, calloutSecondaryTextPaint)
 
-        // [🖍️ Highlight] Button
-        canvas.drawRoundRect(sel.calloutHighlightBtn, 6f, 6f, calloutHighlightBtnPaint)
-        canvas.drawText("🖍️ Highlight", sel.calloutHighlightBtn.left + 8f, sel.calloutHighlightBtn.centerY() + 6f, calloutTextPaint)
+        canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 6f, 6f, calloutHighlightBtnPaint)
+        canvas.drawText("🖍️ Highlight", pdfSel.calloutHighlightBtn.left + 8f, pdfSel.calloutHighlightBtn.centerY() + 6f, calloutTextPaint)
 
-        // [◀] & [▶] Word Expander Buttons
-        canvas.drawRoundRect(sel.calloutPrevWordBtn, 5f, 5f, calloutSecondaryBtnPaint)
-        canvas.drawText("◀", sel.calloutPrevWordBtn.left + 8f, sel.calloutPrevWordBtn.centerY() + 6f, calloutTextPaint)
-
-        canvas.drawRoundRect(sel.calloutNextWordBtn, 5f, 5f, calloutSecondaryBtnPaint)
-        canvas.drawText("▶", sel.calloutNextWordBtn.left + 8f, sel.calloutNextWordBtn.centerY() + 6f, calloutTextPaint)
-
-        // [✕] Dismiss Button
-        canvas.drawText("✕", sel.calloutCloseBtn.left + 8f, sel.calloutCloseBtn.centerY() + 6f, closeBtnTextPaint)
+        canvas.drawText("✕", pdfSel.calloutCloseBtn.left + 8f, pdfSel.calloutCloseBtn.centerY() + 6f, closeBtnTextPaint)
       }
 
-      // Floating Accordion Squeeze Button on right margin
-      val sqW = 34f
-      val sqH = 46f
-      val sqY = max(subheaderH + 10f, min(docBottomY - sqH - 10f, docBottomY / 2f - sqH / 2f))
-      val sqRect = RectF(viewW - sqW - 8f, sqY, viewW - 8f, sqY + sqH)
-      canvas.drawRoundRect(sqRect, 16f, 16f, squeezeBtnBgPaint)
-      canvas.drawRoundRect(sqRect, 16f, 16f, if (isSqueezed) dividerBorderPaint else squeezeBtnBorderPaint)
-      canvas.drawText("≈", viewW - sqW + 2f, sqY + 31f, squeezeBtnTextPaint)
+      // Draw Figure Crop Selection
+      val cropSel = activeCropSelection
+      if (cropSel != null) {
+        canvas.drawRect(cropSel.screenRect, cropFillPaint)
+        canvas.drawRect(cropSel.screenRect, cropDashPaint)
+
+        // Corner Grips
+        val gSize = 12f
+        val r = cropSel.screenRect
+        val gp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#00ADB5"); style = Paint.Style.FILL }
+        canvas.drawRect(r.left - 2f, r.top - 2f, r.left + gSize, r.top + 3f, gp)
+        canvas.drawRect(r.left - 2f, r.top - 2f, r.left + 3f, r.top + gSize, gp)
+        canvas.drawRect(r.right - gSize, r.top - 2f, r.right + 2f, r.top + 3f, gp)
+        canvas.drawRect(r.right - 3f, r.top - 2f, r.right + 2f, r.top + gSize, gp)
+        canvas.drawRect(r.left - 2f, r.bottom - 3f, r.left + gSize, r.bottom + 2f, gp)
+        canvas.drawRect(r.left - 2f, r.bottom - gSize, r.left + 3f, r.bottom + 2f, gp)
+        canvas.drawRect(r.right - gSize, r.bottom - 3f, r.right + 2f, r.bottom + 2f, gp)
+        canvas.drawRect(r.right - 3f, r.bottom - gSize, r.right + 2f, r.bottom + 2f, gp)
+
+        // Crop Callout
+        canvas.drawRoundRect(cropSel.calloutRect, 10f, 10f, calloutBgPaint)
+        canvas.drawRoundRect(cropSel.calloutRect, 10f, 10f, calloutBorderPaint)
+
+        canvas.drawRoundRect(cropSel.calloutExcerptBtn, 6f, 6f, calloutPrimaryBtnPaint)
+        canvas.drawText("✂️ Extract Figure", cropSel.calloutExcerptBtn.left + 12f, cropSel.calloutExcerptBtn.centerY() + 6f, calloutTextPaint)
+
+        canvas.drawText("✕", cropSel.calloutCloseBtn.left + 8f, cropSel.calloutCloseBtn.centerY() + 6f, closeBtnTextPaint)
+      }
 
       canvas.restore()
     }
 
     // =========================================================================
-    // 2. MIDDLE ZONE: Draggable Split Divider
+    // 2. RESIZABLE SPLIT DIVIDER
     // =========================================================================
-    if (hasDoc) {
+    if (hasDoc && docBottomY > 10f) {
       canvas.drawLine(0f, splitY, viewW, splitY, dividerLinePaint)
 
-      // Centered Rounded Grip Handle
-      val handleW = 76f
-      val handleH = 20f
-      val handleRect = RectF(
-        (viewW - handleW) / 2f,
-        splitY - handleH / 2f,
-        (viewW + handleW) / 2f,
-        splitY + handleH / 2f
-      )
-      canvas.drawRoundRect(handleRect, 10f, 10f, dividerHandlePaint)
-      canvas.drawRoundRect(handleRect, 10f, 10f, dividerBorderPaint)
+      val pillW = 160f
+      val pillH = 26f
+      val pillX = (viewW - pillW) / 2f
+      val pillY = splitY - pillH / 2f
+      val handleRect = RectF(pillX, pillY, pillX + pillW, pillY + pillH)
+      canvas.drawRoundRect(handleRect, 13f, 13f, dividerHandlePaint)
+      canvas.drawRoundRect(handleRect, 13f, 13f, dividerBorderPaint)
 
-      // 3 Horizontal Grip lines
-      val gripPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#00ADB5")
-        strokeWidth = 2f
-      }
-      val hMidX = viewW / 2f
-      canvas.drawLine(hMidX - 16f, splitY - 4f, hMidX + 16f, splitY - 4f, gripPaint)
-      canvas.drawLine(hMidX - 16f, splitY, hMidX + 16f, splitY, gripPaint)
-      canvas.drawLine(hMidX - 16f, splitY + 4f, hMidX + 16f, splitY + 4f, gripPaint)
+      // Live Split Ratio Percentage Badge
+      val pctDoc = (splitRatio * 100).toInt()
+      val pctCanvas = 100 - pctDoc
+      val ratioText = "↕ $pctDoc% Doc | $pctCanvas% Canvas"
+      val textX = pillX + (pillW - badgeTextPaint.measureText(ratioText)) / 2f
+      canvas.drawText(ratioText, textX, pillY + 18f, badgeTextPaint)
     }
 
     // =========================================================================
-    // 3. BOTTOM ZONE: Infinite Thinking Canvas
+    // 3. BOTTOM ZONE: Infinite Canvas Workspace (Inking, Cards, Bezier Links)
     // =========================================================================
     canvas.save()
     canvas.clipRect(0f, canvasTopY, viewW, viewH)
     canvas.drawRect(0f, canvasTopY, viewW, viewH, canvasBgPaint)
 
-    // Canvas Background Pattern
-    when (pattern) {
-      "looseleaf" -> {
-        val lineSpacing = 38f * scaleFactor
-        val startY = canvasTopY + (((panY % lineSpacing) + lineSpacing) % lineSpacing)
-        var y = startY
-        while (y < viewH) {
-          canvas.drawLine(0f, y, viewW, y, looseleafBluePaint)
-          y += lineSpacing
-        }
-        val redLineX = 70f * scaleFactor + panX
-        if (redLineX in 0f..viewW) {
-          canvas.drawLine(redLineX, canvasTopY, redLineX, viewH, looseleafRedPaint)
-        }
-      }
-      "dots" -> {
-        val spacing = 36f * scaleFactor
-        val startX = ((panX % spacing) + spacing) % spacing
-        val startY = canvasTopY + (((panY % spacing) + spacing) % spacing)
-        var x = startX
-        while (x < viewW) {
-          var y = startY
-          while (y < viewH) {
-            canvas.drawCircle(x, y, 2.2f, dotPaint)
-            y += spacing
-          }
-          x += spacing
-        }
-      }
-      "grid" -> {
-        val spacing = 48f * scaleFactor
-        val startX = ((panX % spacing) + spacing) % spacing
-        val startY = canvasTopY + (((panY % spacing) + spacing) % spacing)
-        var x = startX
-        while (x < viewW) {
-          canvas.drawLine(x, canvasTopY, x, viewH, gridPaint)
-          x += spacing
-        }
-        var y = startY
-        while (y < viewH) {
-          canvas.drawLine(0f, y, viewW, y, gridPaint)
-          y += spacing
-        }
-      }
-    }
-
-    // Canvas matrix transformation
     canvas.save()
     canvas.translate(panX, canvasTopY + panY)
     canvas.scale(scaleFactor, scaleFactor)
 
-    // Tether Cords (Dashed lines connecting cards to document margin)
+    // Canvas Background Pattern
+    val worldLeft = -panX / scaleFactor
+    val worldTop = -panY / scaleFactor
+    val worldRight = (viewW - panX) / scaleFactor
+    val worldBottom = (viewH - canvasTopY - panY) / scaleFactor
+
+    when (pattern) {
+      "dots" -> {
+        val step = 32f
+        val startX = (worldLeft / step).toInt() * step
+        val startY = (worldTop / step).toInt() * step
+        var x = startX
+        while (x < worldRight) {
+          var y = startY
+          while (y < worldBottom) {
+            canvas.drawCircle(x, y, 1.8f, dotPaint)
+            y += step
+          }
+          x += step
+        }
+      }
+      "grid" -> {
+        val step = 36f
+        val startX = (worldLeft / step).toInt() * step
+        var x = startX
+        while (x < worldRight) {
+          canvas.drawLine(x, worldTop, x, worldBottom, gridPaint)
+          x += step
+        }
+        val startY = (worldTop / step).toInt() * step
+        var y = startY
+        while (y < worldBottom) {
+          canvas.drawLine(worldLeft, y, worldRight, y, gridPaint)
+          y += step
+        }
+      }
+      "looseleaf" -> {
+        val lineSpacing = 38f
+        val startY = (worldTop / lineSpacing).toInt() * lineSpacing
+        var y = startY
+        while (y < worldBottom) {
+          canvas.drawLine(worldLeft, y, worldRight, y, gridPaint)
+          y += lineSpacing
+        }
+        // Left margin red line
+        canvas.drawLine(100f, worldTop, 100f, worldBottom, Paint().apply {
+          color = Color.parseColor("#3B82F6")
+          strokeWidth = 1.5f
+          alpha = 70
+        })
+      }
+    }
+
+    // Shockwave drop ripple
+    if (rippleProgress < 1f) {
+      val maxRadius = 140f
+      val currentRadius = maxRadius * rippleProgress
+      ripplePaint.color = rippleColor
+      ripplePaint.alpha = ((1f - rippleProgress) * 255).toInt()
+      ripplePaint.strokeWidth = (1f - rippleProgress) * 4f + 1f
+      canvas.drawCircle(rippleOriginX, rippleOriginY, currentRadius, ripplePaint)
+    }
+
+    // Dynamic Bezier Ink Links (LiquidText connector cords)
     for (link in links) {
       val card = cards.find { it.id == link.sourceExcerptId } ?: continue
-      val isHeld = heldCardId == card.id
-      val cardAnchorX = card.x + 14f
-      val cardAnchorY = card.y + 20f
+      val cardTargetX = card.x + card.width / 2f
+      val cardTargetY = card.y
 
-      val leftWorldX = (-panX - 40f) / scaleFactor
-      val startX = min(leftWorldX, cardAnchorX - 80f)
-      val startY = cardAnchorY - 40f
+      val docAnchorScreenX = viewW / 2f
+      val (worldDocAnchorX, worldDocAnchorY) = canvasScreenToWorld(docAnchorScreenX, splitY, canvasTopY)
 
-      val linkPath = Path()
-      linkPath.moveTo(startX, startY)
-      val spanX = max(30f, cardAnchorX - startX)
-      linkPath.cubicTo(
-        startX + spanX * 0.4f, startY + 20f,
-        startX + spanX * 0.7f, cardAnchorY - 15f,
-        cardAnchorX, cardAnchorY
-      )
+      val linkPath = Path().apply {
+        moveTo(worldDocAnchorX, worldDocAnchorY)
+        val midY = (worldDocAnchorY + cardTargetY) / 2f
+        cubicTo(
+          worldDocAnchorX, midY - 20f,
+          cardTargetX, midY + 20f,
+          cardTargetX, cardTargetY
+        )
+      }
 
       linkGlowPaint.color = link.color
-      linkGlowPaint.pathEffect = DashPathEffect(floatArrayOf(12f, 8f), 0f)
+      linkGlowPaint.alpha = 50
       canvas.drawPath(linkPath, linkGlowPaint)
 
       linkPaint.color = link.color
-      linkPaint.strokeWidth = if (isHeld) 3.5f else 2.5f
-      linkPaint.pathEffect = DashPathEffect(floatArrayOf(12f, 8f), 0f)
       canvas.drawPath(linkPath, linkPaint)
 
       pinPaint.color = link.color
-      canvas.drawCircle(cardAnchorX, cardAnchorY, if (isHeld) 7f else 5.5f, pinPaint)
-      pinPaint.color = Color.WHITE
-      canvas.drawCircle(cardAnchorX, cardAnchorY, if (isHeld) 3f else 2f, pinPaint)
+      canvas.drawCircle(worldDocAnchorX, worldDocAnchorY, 4.5f, pinPaint)
+      canvas.drawCircle(cardTargetX, cardTargetY, 4.5f, pinPaint)
     }
 
-    // Stored Inking Strokes
+    // Completed Canvas Strokes
     for (stroke in strokes) {
-      if (stroke.points.size < 2) continue
-      val path = pointsToSmoothPath(stroke.points, true)
-
-      if (stroke.isHighlighter) {
-        highlighterPaint.color = stroke.color
-        highlighterPaint.alpha = 95
-        highlighterPaint.strokeWidth = stroke.strokeWidth
-        canvas.drawPath(path, highlighterPaint)
-      } else {
-        strokePaint.color = stroke.color
-        strokePaint.alpha = 245
-        strokePaint.strokeWidth = stroke.strokeWidth
-        canvas.drawPath(path, strokePaint)
-      }
-    }
-
-    // Active Live Drawing Stroke
-    if (activePoints.size > 1) {
-      val isHighlighter = activeTool == "highlighter"
-      if (isHighlighter) {
-        highlighterPaint.color = selectedColor
-        highlighterPaint.alpha = 95
-        highlighterPaint.strokeWidth = 14f
-        canvas.drawPath(activePath, highlighterPaint)
-      } else {
-        strokePaint.color = selectedColor
-        strokePaint.alpha = 245
-        strokePaint.strokeWidth = 3.5f
-        canvas.drawPath(activePath, strokePaint)
-      }
-    }
-
-    // Landing Shockwave Ripple
-    if (rippleProgress < 1f) {
-      val outerR = 10f + rippleProgress * 150f
-      val alpha = ((1f - rippleProgress) * 240).toInt().coerceIn(0, 255)
-      ripplePaint.color = rippleColor
-      ripplePaint.alpha = alpha
-      ripplePaint.strokeWidth = 3.5f
-      canvas.drawCircle(rippleOriginX, rippleOriginY, outerR, ripplePaint)
-
-      ripplePaint.alpha = (alpha * 0.5f).toInt()
-      ripplePaint.strokeWidth = 6f
-      canvas.drawCircle(rippleOriginX, rippleOriginY, outerR * 0.65f, ripplePaint)
-    }
-
-    // Excerpt Cards (White background matching ThinkSpace ExcerptCard)
-    for (card in cards) {
-      val cardW = card.width
-      val cardH = card.getHeight()
-      val isSelected = selectedCardId == card.id
-      val isStacked = card.stackCount > 1
-
-      // Stack underlay
-      if (isStacked) {
-        stackUnderlayPaint.color = card.color
-        val underlayRect = RectF(card.x + 6f, card.y + 6f, card.x + cardW + 6f, card.y + cardH + 6f)
-        canvas.drawRoundRect(underlayRect, 14f, 14f, stackUnderlayPaint)
-      }
-
-      // Card body
-      val cardRect = RectF(card.x, card.y, card.x + cardW, card.y + cardH)
-      canvas.drawRoundRect(cardRect, 14f, 14f, cardBgPaint)
-      canvas.drawRoundRect(cardRect, 14f, 14f, if (isSelected) cardActiveRingPaint else cardBorderPaint)
-
-      // Left Accent Pill
-      cardAccentPaint.color = card.color
-      val leftAccentRect = RectF(card.x, card.y + 8f, card.x + 4.5f, card.y + cardH - 8f)
-      canvas.drawRoundRect(leftAccentRect, 2f, 2f, cardAccentPaint)
-
-      // Accent color dot
-      canvas.drawCircle(card.x + 16f, card.y + 19f, 4.5f, cardAccentPaint)
-
-      // Header Page Badge Pill (Light cyan capsule)
-      val badgeIcon = "🔗 p. ${card.pageNumber}"
-      val badgeW = badgeTextPaint.measureText(badgeIcon) + 16f
-      val badgeRect = RectF(card.x + 25f, card.y + 8f, card.x + 25f + badgeW, card.y + 30f)
-      canvas.drawRoundRect(badgeRect, 6f, 6f, badgeBgPaint)
-      canvas.drawRoundRect(badgeRect, 6f, 6f, badgeBorderPaint)
-      canvas.drawText(badgeIcon, card.x + 33f, card.y + 24f, badgeTextPaint)
-
-      // Close Button
-      canvas.drawText("✕", card.x + cardW - 22f, card.y + 24f, closeBtnTextPaint)
-
-      // Body text in double quotes
-      canvas.save()
-      canvas.translate(card.x + 16f, card.y + 42f)
-      val textWidth = max(20, (cardW - 32f).toInt())
-      val previewText = "\"${card.text}\""
-      val staticLayout = StaticLayout.Builder
-        .obtain(previewText, 0, previewText.length, textPaint, textWidth)
-        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-        .setLineSpacing(0f, 1.15f)
-        .setMaxLines(4)
-        .build()
-      staticLayout.draw(canvas)
-      canvas.restore()
-
-      // Context Toolbar
-      if (isSelected) {
-        val tbW = 210f
-        val tbH = 36f
-        val tbX = card.x + (cardW - tbW) / 2f
-        val tbY = card.y - 44f
-        val tbRect = RectF(tbX, tbY, tbX + tbW, tbY + tbH)
-
-        canvas.drawRoundRect(tbRect, 18f, 18f, toolbarBgPaint)
-        canvas.drawRoundRect(tbRect, 18f, 18f, toolbarBorderPaint)
-
-        var dotX = tbX + 16f
-        for (c in contextColors) {
-          cardAccentPaint.color = c
-          canvas.drawCircle(dotX, tbY + 18f, 9f, cardAccentPaint)
-          if (card.color == c) {
-            canvas.drawCircle(dotX, tbY + 18f, 3.5f, canvasBgPaint)
-          }
-          dotX += 38f
+      if (stroke.points.isEmpty()) continue
+      val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = stroke.color
+        strokeWidth = stroke.strokeWidth
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        if (stroke.isHighlighter) {
+          alpha = 115
+          strokeWidth = 20f
         }
-        canvas.drawText("✕", tbX + tbW - 24f, tbY + 25f, closeBtnTextPaint)
       }
+      val path = Path()
+      path.moveTo(stroke.points[0].x, stroke.points[0].y)
+      for (i in 1 until stroke.points.size) {
+        val p = stroke.points[i]
+        path.lineTo(p.x, p.y)
+      }
+      canvas.drawPath(path, strokePaint)
     }
 
-    canvas.restore()
-    canvas.restore()
-
-    // =========================================================================
-    // 4. FLOATING 3D CROSS-ZONE LIFT-AND-DRAG CARD (LiquidText interaction)
-    // =========================================================================
-    if (isLiftingExcerpt && liftCandidateText != null) {
-      val isOverCanvas = liftGhostY >= canvasTopY - 20f
-      val themeColor = if (isOverCanvas) Color.parseColor("#10B981") else Color.parseColor("#00ADB5")
-
-      // 1. Live Elastic Spring Tether Cord
-      val tetherPath = Path()
-      val startX = if (liftAnchorScreenX > 0f) liftAnchorScreenX else 40f
-      tetherPath.moveTo(startX, liftAnchorScreenY)
-      val midX = (startX + liftGhostX) / 2f
-      val midY = (liftAnchorScreenY + liftGhostY) / 2f + 35f
-      tetherPath.quadTo(midX, midY, liftGhostX, liftGhostY)
-
-      // Outer glow halo
-      linkGlowPaint.color = themeColor
-      linkGlowPaint.strokeWidth = 9f
-      linkGlowPaint.alpha = 65
-      canvas.drawPath(tetherPath, linkGlowPaint)
-
-      // Dashed main cord
-      linkPaint.color = themeColor
-      linkPaint.strokeWidth = 3.5f
-      canvas.drawPath(tetherPath, linkPaint)
-
-      // 2. 3D Floating Lifted Excerpt Card Tile
-      val ghostW = 230f
-      val ghostH = 92f
-      val ghostRect = RectF(-ghostW / 2f, -ghostH / 2f, ghostW / 2f, ghostH / 2f)
-
-      canvas.save()
-      canvas.translate(liftGhostX, liftGhostY)
-      canvas.rotate(-2.5f)
-      canvas.scale(1.08f, 1.08f)
-
-      // Elevated shadow and card background
-      canvas.drawRoundRect(ghostRect, 12f, 12f, cardBgPaint)
-      cardBorderPaint.color = themeColor
-      cardBorderPaint.strokeWidth = 2.5f
-      canvas.drawRoundRect(ghostRect, 12f, 12f, cardBorderPaint)
-
-      // Left Accent Pill
-      cardAccentPaint.color = themeColor
-      val leftBar = RectF(ghostRect.left, ghostRect.top + 8f, ghostRect.left + 5f, ghostRect.bottom - 8f)
-      canvas.drawRoundRect(leftBar, 2f, 2f, cardAccentPaint)
-
-      // Status Indicator Dot
-      val statusDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = themeColor
-        style = Paint.Style.FILL
+    // Active Drawing Stroke
+    if (activePoints.isNotEmpty()) {
+      val isHighlighter = activeTool == "highlighter"
+      val curPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = selectedColor
+        strokeWidth = if (isHighlighter) 20f else 3.5f
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        if (isHighlighter) alpha = 115
       }
-      canvas.drawCircle(ghostRect.left + 18f, ghostRect.top + 20f, 5f, statusDotPaint)
-
-      // Status Header Banner
-      val headerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = themeColor
-        textSize = 15f
-        isFakeBoldText = true
-      }
-      val headerText = if (isOverCanvas) "🎯 RELEASE TO DROP ON CANVAS" else "✨ DRAGGING EXCERPT"
-      canvas.drawText(headerText, ghostRect.left + 28f, ghostRect.top + 25f, headerPaint)
-
-      // Excerpt preview quote
-      val previewPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#1E293B")
-        textSize = 18f
-        typeface = Typeface.SERIF
-        textSkewX = -0.15f
-      }
-      val preview = if (liftCandidateText!!.length > 34) liftCandidateText!!.substring(0, 31) + "..." else liftCandidateText!!
-      canvas.drawText("\"$preview\"", ghostRect.left + 16f, ghostRect.top + 52f, previewPaint)
-
-      // Page Pill Badge
-      val badgeRect = RectF(ghostRect.left + 16f, ghostRect.top + 64f, ghostRect.left + 100f, ghostRect.top + 84f)
-      canvas.drawRoundRect(badgeRect, 6f, 6f, badgeBgPaint)
-      canvas.drawRoundRect(badgeRect, 6f, 6f, badgeBorderPaint)
-      canvas.drawText("🔗 Page $liftCandidatePage", ghostRect.left + 22f, ghostRect.top + 78f, badgeTextPaint)
-
-      canvas.restore()
+      canvas.drawPath(activePath, curPaint)
     }
-  }
+
+    // Excerpt Cards
+    for (card in cards) {
+      val cardH = card.getHeight()
+      val cardRect = RectF(card.x, card.y, card.x + card.width, card.y + cardH)
+
+      // Selected Glow
+      if (card.id == selectedCardId) {
+        val glowRect = RectF(cardRect.left - 4f, cardRect.top - 4f, cardRect.right + 4f, cardRect.bottom + 4f)
+        canvas.drawRoundRect(glowRect, 14f, 14f, cardSelectedGlowPaint)
+      }
+
+      // Card Background & Border
+      canvas.drawRoundRect(cardRect, 10f, 10f, cardBgPaint)
+      cardBorderPaint.color = if (card.id == selectedCardId) card.color else Color.parseColor("#CBD5E1")
+      canvas.drawRoundRect(cardRect, 10f, 10f, cardBorderPaint)
+
+      // Left Accent Strip
+      cardAccentPaint.color = card.color
+      val accentBar = RectF(cardRect.left, cardRect.top + 6f, cardRect.left + 5f, cardRect.bottom - 6f)
+      canvas.drawRoundRect(accentBar, 2f, 2f, cardAccentPaint)
+
+      // Card Header: Page Badge
+      val badgeRect = RectF(cardRect.left + 14f, cardRect.top + 10f, cardRect.left + 88f, cardRect.top + 30f)
+      canvas.drawRoundRect(badgeRect, 5f, 5f, badgeBgPaint)
+        canvas.drawRoundRect(badgeRect, 5f, 5f, badgeBorderPaint)
+        canvas.drawText("Page ${card.pageNumber}", cardRect.left + 20f, cardRect.top + 25f, badgeTextPaint)
+
+        // Delete Button if selected
+        if (card.id == selectedCardId) {
+          canvas.drawText("✕", cardRect.right - 22f, cardRect.top + 25f, closeBtnTextPaint)
+        }
+
+        // Card Body: Image, Table, or Text Quote
+        if (card.isImage) {
+          var imgBmp = if (!card.imageUrl.isNullOrEmpty()) cardBitmapCache.get(card.imageUrl) else null
+          if (imgBmp == null) {
+            imgBmp = cardBitmapCache.get(card.id)
+          }
+          if (imgBmp == null) {
+            imgBmp = cardBitmapCache.get("page_${card.pageNumber}_image")
+          }
+          if (imgBmp == null && !card.imageUrl.isNullOrEmpty()) {
+            val imgFile = File(card.imageUrl)
+            if (imgFile.exists()) {
+              imgBmp = BitmapFactory.decodeFile(imgFile.absolutePath)
+              if (imgBmp != null) {
+                cardBitmapCache.put(card.imageUrl, imgBmp)
+                cardBitmapCache.put(card.id, imgBmp)
+              }
+            }
+          }
+          if (imgBmp == null) {
+            imgBmp = generateCropBitmap(max(0, card.pageNumber - 1), BoundingBox(0f, 0f, 400f, 260f))
+            if (imgBmp != null) {
+              cardBitmapCache.put(card.id, imgBmp)
+              cardBitmapCache.put("page_${card.pageNumber}_image", imgBmp)
+            }
+          }
+          if (imgBmp != null) {
+            val imgRect = RectF(cardRect.left + 12f, cardRect.top + 36f, cardRect.right - 12f, cardRect.bottom - 12f)
+            canvas.drawBitmap(imgBmp, null, imgRect, null)
+          } else {
+            val phRect = RectF(cardRect.left + 12f, cardRect.top + 36f, cardRect.right - 12f, cardRect.bottom - 12f)
+            val phPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#1E293B")
+              style = Paint.Style.FILL
+            }
+            canvas.drawRoundRect(phRect, 6f, 6f, phPaint)
+            canvas.drawText("📷 Figure (Page ${card.pageNumber})", cardRect.left + 20f, cardRect.top + 70f, textPaint)
+          }
+        } else {
+          val preview = if (card.text.length > 80) card.text.substring(0, 77) + "..." else card.text
+          val textW = max(20, (card.width - 28f).toInt())
+          val layout = StaticLayout.Builder
+            .obtain(preview, 0, preview.length, textPaint, textW)
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .build()
+
+          canvas.save()
+          canvas.translate(card.x + 14f, card.y + 36f)
+          layout.draw(canvas)
+          canvas.restore()
+        }
+      }
+
+      canvas.restore() // Undo world transform
+
+      // -------------------------------------------------------------------------
+      // 4. FLOATING NATIVE CANVAS TOOLBAR (Bottom of Canvas Zone)
+      // -------------------------------------------------------------------------
+      val tbH = 48f
+      val tbW = min(viewW - 32f, 440f)
+      val tbX = (viewW - tbW) / 2f
+      val tbY = viewH - tbH - 16f
+      canvasToolbarRect.set(tbX, tbY, tbX + tbW, tbY + tbH)
+
+      canvas.drawRoundRect(canvasToolbarRect, 16f, 16f, toolbarBgPaint)
+      canvas.drawRoundRect(canvasToolbarRect, 16f, 16f, toolbarBorderPaint)
+
+      toolBtnRects.clear()
+      colorBtnRects.clear()
+
+      val tools = listOf("select", "pen", "highlighter", "eraser")
+      val toolIcons = listOf("👆", "✏️", "🖍️", "🧹")
+      var curBtnX = tbX + 12f
+
+      for (i in tools.indices) {
+        val tId = tools[i]
+        val btnR = RectF(curBtnX, tbY + 6f, curBtnX + 36f, tbY + tbH - 6f)
+        toolBtnRects[tId] = btnR
+
+        if (activeTool == tId) {
+          val activeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#334155")
+            style = Paint.Style.FILL
+          }
+          canvas.drawRoundRect(btnR, 8f, 8f, activeBg)
+        }
+
+        val iconPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 18f }
+        canvas.drawText(toolIcons[i], btnR.left + 8f, btnR.centerY() + 6f, iconPaint)
+        curBtnX += 42f
+      }
+
+      // Divider in toolbar
+      canvas.drawLine(curBtnX + 2f, tbY + 10f, curBtnX + 2f, tbY + tbH - 10f, dividerBorderPaint)
+      curBtnX += 12f
+
+      // Color Swatches
+      for (col in contextColors) {
+        val cRect = RectF(curBtnX, tbY + 12f, curBtnX + 24f, tbY + tbH - 12f)
+        colorBtnRects[col] = cRect
+
+        val cPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = col; style = Paint.Style.FILL }
+        canvas.drawCircle(cRect.centerX(), cRect.centerY(), 11f, cPaint)
+
+        if (selectedColor == col) {
+          val selRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            strokeWidth = 2.5f
+            style = Paint.Style.STROKE
+          }
+          canvas.drawCircle(cRect.centerX(), cRect.centerY(), 13.5f, selRing)
+        }
+        curBtnX += 30f
+      }
+
+      // Reset Canvas view button on far right
+      resetCanvasBtnRect.set(tbX + tbW - 40f, tbY + 6f, tbX + tbW - 8f, tbY + tbH - 6f)
+      val resetPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 16f }
+      canvas.drawText("🎯", resetCanvasBtnRect.left + 8f, resetCanvasBtnRect.centerY() + 6f, resetPaint)
+
+      canvas.restore() // Clip canvas rect
+
+      // =========================================================================
+      // 5. FLOATING 3D CROSS-ZONE LIFT-AND-DRAG CARD (LiquidText interaction)
+      // =========================================================================
+      if (isLiftingExcerpt && liftCandidateText != null) {
+        val isOverCanvas = liftGhostY >= canvasTopY - 20f
+        val themeColor = if (isOverCanvas) Color.parseColor("#10B981") else Color.parseColor("#00ADB5")
+
+        // Tether Cord
+        val tetherPath = Path()
+        val startX = if (liftAnchorScreenX > 0f) liftAnchorScreenX else 40f
+        tetherPath.moveTo(startX, liftAnchorScreenY)
+        val midX = (startX + liftGhostX) / 2f
+        val midY = (liftAnchorScreenY + liftGhostY) / 2f + 35f
+        tetherPath.quadTo(midX, midY, liftGhostX, liftGhostY)
+
+        linkGlowPaint.color = themeColor
+        linkGlowPaint.strokeWidth = 9f
+        linkGlowPaint.alpha = 65
+        canvas.drawPath(tetherPath, linkGlowPaint)
+
+        linkPaint.color = themeColor
+        linkPaint.strokeWidth = 3.5f
+        canvas.drawPath(tetherPath, linkPaint)
+
+        // Ghost Card
+        val ghostW = if (liftCandidateIsImage) 240f else 230f
+        val ghostH = if (liftCandidateIsImage) 150f else 92f
+        val ghostRect = RectF(-ghostW / 2f, -ghostH / 2f, ghostW / 2f, ghostH / 2f)
+
+        canvas.save()
+        canvas.translate(liftGhostX, liftGhostY)
+        canvas.rotate(-2.5f)
+        canvas.scale(1.08f, 1.08f)
+
+        canvas.drawRoundRect(ghostRect, 12f, 12f, cardBgPaint)
+        cardBorderPaint.color = themeColor
+        cardBorderPaint.strokeWidth = 2.5f
+        canvas.drawRoundRect(ghostRect, 12f, 12f, cardBorderPaint)
+
+        cardAccentPaint.color = themeColor
+        val leftBar = RectF(ghostRect.left, ghostRect.top + 8f, ghostRect.left + 5f, ghostRect.bottom - 8f)
+        canvas.drawRoundRect(leftBar, 2f, 2f, cardAccentPaint)
+
+        val headerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = themeColor
+          textSize = 15f
+          isFakeBoldText = true
+        }
+        val headerText = if (isOverCanvas) "🎯 RELEASE TO DROP ON CANVAS" else if (liftCandidateIsImage) "📸 DRAGGING FIGURE" else "✨ DRAGGING EXCERPT"
+        canvas.drawText(headerText, ghostRect.left + 16f, ghostRect.top + 24f, headerPaint)
+
+        if (liftCandidateIsImage && liftCandidateBitmap != null) {
+          val imgR = RectF(ghostRect.left + 12f, ghostRect.top + 34f, ghostRect.right - 12f, ghostRect.bottom - 26f)
+          canvas.drawBitmap(liftCandidateBitmap!!, null, imgR, null)
+
+          val badgeRect = RectF(ghostRect.left + 14f, ghostRect.bottom - 24f, ghostRect.left + 94f, ghostRect.bottom - 6f)
+          canvas.drawRoundRect(badgeRect, 4f, 4f, badgeBgPaint)
+          canvas.drawRoundRect(badgeRect, 4f, 4f, badgeBorderPaint)
+          canvas.drawText("🔗 Page $liftCandidatePage", ghostRect.left + 20f, ghostRect.bottom - 10f, badgeTextPaint)
+        } else {
+          val previewPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#1E293B")
+            textSize = 17f
+            typeface = Typeface.SERIF
+          }
+          val preview = if (liftCandidateText!!.length > 32) liftCandidateText!!.substring(0, 30) + "..." else liftCandidateText!!
+          canvas.drawText("\"$preview\"", ghostRect.left + 16f, ghostRect.top + 50f, previewPaint)
+
+          val badgeRect = RectF(ghostRect.left + 16f, ghostRect.top + 62f, ghostRect.left + 94f, ghostRect.top + 82f)
+          canvas.drawRoundRect(badgeRect, 5f, 5f, badgeBgPaint)
+          canvas.drawRoundRect(badgeRect, 5f, 5f, badgeBorderPaint)
+          canvas.drawText("🔗 Page $liftCandidatePage", ghostRect.left + 22f, ghostRect.top + 76f, badgeTextPaint)
+        }
+
+        canvas.restore()
+      }
+    }
 
   // ---------------------------------------------------------------------------
   // Touch Handling & Unified Gesture Arbitration
@@ -1393,36 +1946,51 @@ class ThinkspaceView : View {
   @SuppressLint("ClickableViewAccessibility")
   override fun onTouchEvent(event: MotionEvent): Boolean {
     val viewH = height.toFloat()
-    val hasDoc = activeDocument != null
+    val hasDoc = activePdfDoc != null || activeDocument != null
     val splitY = if (hasDoc) viewH * splitRatio else 0f
-    val canvasTopY = if (hasDoc) splitY + 12f else 0f
+    val canvasTopY = if (hasDoc) splitY + 14f else 0f
 
     val sx = event.x
     val sy = event.y
 
-    val inDivider = hasDoc && (sy in (splitY - 20f)..(splitY + 20f))
-    val inDocZone = hasDoc && (sy < splitY - 12f)
+    val inDivider = hasDoc && (sy in (splitY - 30f)..(splitY + 30f))
+    val inDocZone = hasDoc && (sy < splitY - 14f)
     val inCanvasZone = sy >= canvasTopY
 
-    // 1. Two or more fingers in Canvas Zone -> Canvas Pan & Zoom
-    if (inCanvasZone && event.pointerCount >= 2) {
+    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+      if (!docScroller.isFinished) {
+        docScroller.abortAnimation()
+      }
+      velocityTracker?.recycle()
+      velocityTracker = VelocityTracker.obtain()
+      velocityTracker?.addMovement(event)
+    } else {
+      velocityTracker?.addMovement(event)
+    }
+
+    gestureDetector.onTouchEvent(event)
+
+    // 1. Two or more fingers -> Canvas Pan & Zoom or Document Accordion Squeeze
+    if (event.pointerCount >= 2) {
       scaleGestureDetector.onTouchEvent(event)
-      when (event.actionMasked) {
-        MotionEvent.ACTION_MOVE -> {
-          val midX = (event.getX(0) + event.getX(1)) / 2f
-          val midY = (event.getY(0) + event.getY(1)) / 2f - canvasTopY
-          if (lastTouchScreenX != 0f && lastTouchScreenY != 0f) {
-            panX += (midX - lastTouchScreenX)
-            panY += (midY - lastTouchScreenY)
-            dispatchTransformEvent()
-            invalidate()
+      if (inCanvasZone) {
+        when (event.actionMasked) {
+          MotionEvent.ACTION_MOVE -> {
+            val midX = (event.getX(0) + event.getX(1)) / 2f
+            val midY = (event.getY(0) + event.getY(1)) / 2f - canvasTopY
+            if (lastTouchScreenX != 0f && lastTouchScreenY != 0f) {
+              panX += (midX - lastTouchScreenX)
+              panY += (midY - lastTouchScreenY)
+              dispatchTransformEvent()
+              invalidate()
+            }
+            lastTouchScreenX = midX
+            lastTouchScreenY = midY
           }
-          lastTouchScreenX = midX
-          lastTouchScreenY = midY
-        }
-        MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
-          lastTouchScreenX = 0f
-          lastTouchScreenY = 0f
+          MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+            lastTouchScreenX = 0f
+            lastTouchScreenY = 0f
+          }
         }
       }
       return true
@@ -1435,221 +2003,239 @@ class ThinkspaceView : View {
         lastTouchScreenY = sy
         totalDragDistance = 0f
 
+        // Check Top Subheader UI Clicks
+        if (inDocZone && sy < subheaderH) {
+          if (headerModeTextRect.contains(sx, sy)) {
+            docMode = "text"
+            activeCropSelection = null
+            invalidate()
+            return true
+          }
+          if (headerModeCropRect.contains(sx, sy)) {
+            docMode = "crop"
+            activePdfSelection = null
+            invalidate()
+            return true
+          }
+          if (headerSqueezeRect.contains(sx, sy)) {
+            isSqueezed = !isSqueezed
+            dispatchToggleSqueezeEvent(isSqueezed)
+            invalidate()
+            return true
+          }
+          return true
+        }
+
+        // Check Floating Canvas Bottom Toolbar Clicks
+        if (inCanvasZone && canvasToolbarRect.contains(sx, sy)) {
+          for ((toolId, rect) in toolBtnRects) {
+            if (rect.contains(sx, sy)) {
+              activeTool = toolId
+              invalidate()
+              return true
+            }
+          }
+          for ((col, rect) in colorBtnRects) {
+            if (rect.contains(sx, sy)) {
+              selectedColor = col
+              invalidate()
+              return true
+            }
+          }
+          if (resetCanvasBtnRect.contains(sx, sy)) {
+            panX = 0f
+            panY = 0f
+            scaleFactor = 1f
+            dispatchTransformEvent()
+            invalidate()
+            return true
+          }
+          return true
+        }
+
+        // Divider Drag
         if (inDivider) {
           isDraggingDivider = true
           return true
         }
 
+        // Document Zone Gestures
         if (inDocZone) {
-          // 1. Check if user clicked inside activeSelection's floating callout buttons
-          val sel = activeSelection
-          if (sel != null && sel.calloutRect.contains(sx, sy)) {
-            if (sel.calloutExcerptBtn.contains(sx, sy)) {
-              // Immediately extract to canvas workspace
-              val newId = "card-${System.currentTimeMillis()}"
-              val splitMidY = splitY + 70f
-              val (worldX, worldY) = canvasScreenToWorld(width / 2f, splitMidY, canvasTopY)
-              val newCard = NativeCard(
-                newId,
-                max(20f, worldX - 110f),
-                max(20f, worldY - 50f),
-                220f,
-                sel.text,
-                Color.parseColor("#00ADB5"),
-                sel.pageNumber,
-                "Excerpt from p. ${sel.pageNumber}",
-                null,
-                1,
-                false,
-                null,
-                false,
-                null
-              )
-              cards.add(newCard)
-              links.add(NativeLink("link-${System.currentTimeMillis()}", newId, Color.parseColor("#00ADB5")))
-              triggerShockwave(newCard.x + newCard.width / 2f, newCard.y + 50f, newCard.color)
-              dispatchExtractExcerptEvent(sel.text, sel.pageNumber, "#00ADB5", false, false)
-              activeSelection = null
+          // Check Callout Clicks
+          val pdfSel = activePdfSelection
+          if (pdfSel != null && pdfSel.calloutRect.contains(sx, sy)) {
+            if (pdfSel.calloutExcerptBtn.contains(sx, sy)) {
+              // Extract to canvas
+              extractExcerptToCanvas(pdfSel.text, pdfSel.pageIndex + 1, selectedColor)
+              activePdfSelection = null
               invalidate()
               return true
             }
-
-            if (sel.calloutCopyBtn.contains(sx, sy)) {
-              copyToClipboard(sel.text)
+            if (pdfSel.calloutCopyBtn.contains(sx, sy)) {
+              copyToClipboard(pdfSel.text)
               return true
             }
-
-            if (sel.calloutHighlightBtn.contains(sx, sy)) {
-              annotations.add(
-                NativeAnnotation(
-                  id = "ann-${System.currentTimeMillis()}",
-                  sectionId = sel.sectionId,
-                  paragraphIndex = sel.pIdx,
-                  pageNumber = sel.pageNumber,
-                  color = Color.parseColor("#F59E0B"),
-                  text = sel.text
-                )
-              )
-              activeSelection = null
+            if (pdfSel.calloutHighlightBtn.contains(sx, sy)) {
+              addAnnotation(pdfSel.text, pdfSel.pageIndex + 1, selectedColor)
+              activePdfSelection = null
               invalidate()
               return true
             }
-
-            if (sel.calloutPrevWordBtn.contains(sx, sy)) {
-              val info = paragraphLayouts.find { it.secId == sel.sectionId && it.pIdx == sel.pIdx }
-              if (info != null) {
-                val newStart = expandStartWord(info.text, sel.startCharIdx)
-                activeSelection = buildSelection(info, newStart, sel.endCharIdx)
-                invalidate()
-              }
-              return true
-            }
-
-            if (sel.calloutNextWordBtn.contains(sx, sy)) {
-              val info = paragraphLayouts.find { it.secId == sel.sectionId && it.pIdx == sel.pIdx }
-              if (info != null) {
-                val newEnd = expandEndWord(info.text, sel.endCharIdx)
-                activeSelection = buildSelection(info, sel.startCharIdx, newEnd)
-                invalidate()
-              }
-              return true
-            }
-
-            if (sel.calloutCloseBtn.contains(sx, sy)) {
-              activeSelection = null
+            if (pdfSel.calloutCloseBtn.contains(sx, sy)) {
+              activePdfSelection = null
               invalidate()
               return true
             }
+          }
+
+          // Check Crop Callout Clicks
+          val cropSel = activeCropSelection
+          if (cropSel != null && cropSel.calloutRect.contains(sx, sy)) {
+            if (cropSel.calloutExcerptBtn.contains(sx, sy)) {
+              extractCropToCanvas(cropSel)
+              activeCropSelection = null
+              docMode = "text"
+              invalidate()
+              return true
+            }
+            if (cropSel.calloutCloseBtn.contains(sx, sy)) {
+              activeCropSelection = null
+              docMode = "text"
+              invalidate()
+              return true
+            }
+          }
+
+          // Check Folded Accordion Pleat Tap -> Expand
+          for (pl in pageLayouts) {
+            if (pl.isFolded && pl.boundsOnScreen.contains(sx, sy)) {
+              // Unfold this page or disable squeeze
+              isSqueezed = false
+              dispatchToggleSqueezeEvent(false)
+              invalidate()
+              return true
+            }
+          }
+
+          // Check Lift from Active Selection
+          if (pdfSel != null && pdfSel.highlightRects.any { it.contains(sx, sy) }) {
+            isLiftingExcerpt = true
+            liftCandidateText = pdfSel.text
+            liftCandidatePage = pdfSel.pageIndex + 1
+            liftCandidateColor = selectedColor
+            liftCandidateIsImage = false
+            liftGhostX = sx
+            liftGhostY = sy
+            liftAnchorScreenX = sx
+            liftAnchorScreenY = sy
             return true
           }
 
-          // 2. Check if user grabbed the Start Handle pin
-          if (sel != null && sel.startHandle.contains(sx, sy)) {
-            isDraggingStartHandle = true
+          if (cropSel != null && cropSel.screenRect.contains(sx, sy)) {
+            isLiftingExcerpt = true
+            liftCandidateText = "[Figure Crop]"
+            liftCandidatePage = cropSel.pageIndex + 1
+            liftCandidateColor = selectedColor
+            liftCandidateIsImage = true
+            val bmp = generateCropBitmap(cropSel.pageIndex, cropSel.pageBounds)
+            if (bmp != null) {
+              val p = saveCropToFile(bmp)
+              liftCandidateImagePath = p
+              liftCandidateBitmap = bmp
+              cardBitmapCache.put(p, bmp)
+            } else {
+              liftCandidateImagePath = null
+              liftCandidateBitmap = null
+            }
+            liftGhostX = sx
+            liftGhostY = sy
+            liftAnchorScreenX = sx
+            liftAnchorScreenY = sy
             return true
           }
 
-          // 3. Check if user grabbed the End Handle pin
-          if (sel != null && sel.endHandle.contains(sx, sy)) {
-            isDraggingEndHandle = true
-            return true
-          }
-
-          // 4. Check if user touched directly ON the active selection highlight rects
-          // (Triggers direct 3D Lift & Drag to canvas workspace!)
-          if (sel != null) {
-            val hitHighlight = sel.highlightRects.any { r ->
-              sx >= r.left - 6f && sx <= r.right + 6f && sy >= r.top - 4f && sy <= r.bottom + 4f
-            }
-            if (hitHighlight) {
-              isDirectDraggingSelection = true
-              liftCandidateText = sel.text
-              liftCandidatePage = sel.pageNumber
-              liftCandidateColor = Color.parseColor("#00ADB5")
-              liftAnchorScreenX = if (sel.highlightRects.isNotEmpty()) sel.highlightRects.first().left else sx
-              liftAnchorScreenY = if (sel.highlightRects.isNotEmpty()) sel.highlightRects.first().centerY() else sy
-              liftGhostX = sx
-              liftGhostY = sy
-              return true
-            }
-          }
-
-          // 5. User tapped elsewhere in document: Select word at tapped location!
-          for (info in paragraphLayouts) {
-            val pTop = info.topY
-            val pBottom = info.topY + info.layout.height
-            if (sy in (pTop - 6f)..(pBottom + 6f)) {
-              val relX = sx - (info.paperX + 28f)
-              val relY = (sy - info.topY).coerceIn(0f, info.layout.height.toFloat() - 1f)
-              val line = info.layout.getLineForVertical(relY.toInt())
-              val charIdx = info.layout.getOffsetForHorizontal(line, relX)
-              val (wStart, wEnd) = expandToWord(info.text, charIdx)
-              activeSelection = buildSelection(info, wStart, wEnd)
-              isScrollingDoc = false
-              invalidate()
-              return true
-            }
-          }
-
-          // If tapped outside text paragraphs, scroll document
-          isScrollingDoc = true
-          return true
-        }
-
-        if (inCanvasZone) {
-          val (worldX, worldY) = canvasScreenToWorld(sx, sy, canvasTopY)
-
-          if (activeTool == "select") {
-            // Check context toolbar of selected card
-            if (selectedCardId != null) {
-              val selCard = cards.find { it.id == selectedCardId }
-              if (selCard != null) {
-                val tbW = 210f
-                val tbH = 36f
-                val tbX = selCard.x + (selCard.width - tbW) / 2f
-                val tbY = selCard.y - 44f
-                if (worldX in tbX..(tbX + tbW) && worldY in tbY..(tbY + tbH)) {
-                  var dotX = tbX + 16f
-                  for (c in contextColors) {
-                    if (hypot(worldX - dotX, worldY - (tbY + 18f)) < 14f) {
-                      selCard.color = c
-                      dispatchCardColorChangeEvent(selCard.id, String.format("#%06X", 0xFFFFFF and c))
-                      invalidate()
-                      return true
-                    }
-                    dotX += 26f
-                  }
-                  if (worldX >= tbX + tbW - 32f) {
-                    deleteCard(selCard.id)
-                    selectedCardId = null
-                    return true
-                  }
-                  return true
-                }
-              }
-            }
-
-            // Hit-test cards
-            draggingCard = null
-            for (i in cards.size - 1 downTo 0) {
-              val c = cards[i]
-              val cardW = c.width
-              val cardH = c.getHeight()
-              if (worldX >= c.x && worldX <= c.x + cardW && worldY >= c.y && worldY <= c.y + cardH) {
-                if (worldX >= c.x + cardW - 36f && worldY <= c.y + 36f) {
-                  deleteCard(c.id)
-                  return true
-                }
-                draggingCard = c
-                selectedCardId = c.id
-                heldCardId = c.id
-                dragOffsetWorldX = worldX - c.x
-                dragOffsetWorldY = worldY - c.y
-                isPanningCanvas = false
-                invalidate()
+          // Crop Drag Start (Real PDF or Demo Document)
+          if (docMode == "crop") {
+            for (pl in pageLayouts) {
+              if (!pl.isFolded && pl.boundsOnScreen.contains(sx, sy)) {
+                isDraggingCrop = true
+                cropStartX = sx
+                cropStartY = sy
+                cropPageIndex = pl.pageIndex
+                activeCropSelection = null
                 return true
               }
             }
+            if (activePdfDoc == null && sy >= 46f && sy < splitY - 14f) {
+              isDraggingCrop = true
+              cropStartX = sx
+              cropStartY = sy
+              cropPageIndex = 0
+              activeCropSelection = null
+              return true
+            }
+          }
 
-            // Canvas panning
-            isPanningCanvas = true
-            selectedCardId = null
+          // Normal document touch -> initialize smooth document scrolling with high-momentum physics
+          if (!docScroller.isFinished) {
+            docScroller.abortAnimation()
+          }
+          isScrollingDoc = true
+          downDocX = sx
+          downDocY = sy
+
+          // Start 260ms Long-Press Timer for effortless LiquidText-style Figure / Excerpt Lift
+          longPressStartX = sx
+          longPressStartY = sy
+          pendingLongPressRunnable?.let { longPressHandler.removeCallbacks(it) }
+          pendingLongPressRunnable = Runnable {
+            triggerLongPressLift(longPressStartX, longPressStartY)
+          }
+          longPressHandler.postDelayed(pendingLongPressRunnable!!, 260)
+          return true
+        }
+
+        // Canvas Zone Gestures
+        if (inCanvasZone) {
+          val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+
+          // 1. Check Excerpt Card Clicks
+          val clickedCard = cards.findLast { c ->
+            val ch = c.getHeight()
+            wx >= c.x && wx <= c.x + c.width && wy >= c.y && wy <= c.y + ch
+          }
+
+          if (clickedCard != null) {
+            selectedCardId = clickedCard.id
+            draggingCard = clickedCard
+            dragOffsetWorldX = wx - clickedCard.x
+            dragOffsetWorldY = wy - clickedCard.y
+            dispatchExcerptPressEvent(clickedCard.id)
+
+            // Bidirectional Navigation: Scroll document to card's page!
+            scrollToDocumentPage(clickedCard.pageNumber)
             invalidate()
             return true
+          }
 
+          selectedCardId = null
+
+          // 2. Pan tool or Inking
+          if (activeTool == "pan" || activeTool == "select") {
+            isPanningCanvas = true
+            return true
           } else if (activeTool == "pen" || activeTool == "highlighter") {
             activePoints.clear()
+            activePoints.add(NativePoint(wx, wy))
             activePath.reset()
-            activePoints.add(NativePoint(worldX, worldY))
-            activePath.moveTo(worldX, worldY)
+            activePath.moveTo(wx, wy)
             invalidate()
             return true
           } else if (activeTool == "eraser") {
-            eraseStrokeAt(worldX, worldY)
+            eraseStrokesNear(wx, wy)
             return true
           }
         }
-        return true
       }
 
       MotionEvent.ACTION_MOVE -> {
@@ -1659,341 +2245,740 @@ class ThinkspaceView : View {
         lastTouchScreenX = sx
         lastTouchScreenY = sy
 
+        if (hypot(sx - longPressStartX, sy - longPressStartY) > 18f * density) {
+          pendingLongPressRunnable?.let {
+            longPressHandler.removeCallbacks(it)
+            pendingLongPressRunnable = null
+          }
+        }
+
+        // Dragging Divider
         if (isDraggingDivider) {
-          val newRatio = (sy / viewH).coerceIn(0.15f, 0.85f)
+          val newRatio = (sy / viewH).coerceIn(0.18f, 0.82f)
           splitRatio = newRatio
           dispatchSplitRatioEvent(newRatio)
           invalidate()
           return true
         }
 
-        // Dragging Start Handle Pin
-        if (isDraggingStartHandle && activeSelection != null) {
-          val sel = activeSelection!!
-          val info = paragraphLayouts.find { it.secId == sel.sectionId && it.pIdx == sel.pIdx }
-          if (info != null) {
-            val relX = sx - (info.paperX + 28f)
-            val relY = (sy - info.topY).coerceIn(0f, info.layout.height.toFloat() - 1f)
-            val line = info.layout.getLineForVertical(relY.toInt())
-            val newChar = info.layout.getOffsetForHorizontal(line, relX)
-            activeSelection = buildSelection(info, newChar, sel.endCharIdx)
-            invalidate()
-          }
-          return true
-        }
-
-        // Dragging End Handle Pin
-        if (isDraggingEndHandle && activeSelection != null) {
-          val sel = activeSelection!!
-          val info = paragraphLayouts.find { it.secId == sel.sectionId && it.pIdx == sel.pIdx }
-          if (info != null) {
-            val relX = sx - (info.paperX + 28f)
-            val relY = (sy - info.topY).coerceIn(0f, info.layout.height.toFloat() - 1f)
-            val line = info.layout.getLineForVertical(relY.toInt())
-            val newChar = info.layout.getOffsetForHorizontal(line, relX)
-            activeSelection = buildSelection(info, sel.startCharIdx, newChar)
-            invalidate()
-          }
-          return true
-        }
-
-        // Direct Touch & Drag on Active Selection
-        if (isDirectDraggingSelection && liftCandidateText != null) {
-          if (totalDragDistance > 6f || sy > splitY - 10f) {
-            isLiftingExcerpt = true
-            liftGhostX = sx
-            liftGhostY = sy
-            invalidate()
-            return true
-          }
-        }
-
-        // Cross-zone Lift-and-Drag in progress
-        if (isLiftingExcerpt && liftCandidateText != null) {
+        // Lifting Excerpt Across Zones
+        if (isLiftingExcerpt) {
           liftGhostX = sx
           liftGhostY = sy
           invalidate()
           return true
         }
 
+        // Dragging Crop Rectangle
+        if (isDraggingCrop) {
+          val pl = pageLayouts.find { it.pageIndex == cropPageIndex }
+          val leftBound = pl?.boundsOnScreen?.left ?: 16f
+          val rightBound = pl?.boundsOnScreen?.right ?: (width - 16f)
+          val topBound = pl?.boundsOnScreen?.top ?: 46f
+          val bottomBound = pl?.boundsOnScreen?.bottom ?: (splitY - 14f)
+
+          val left = min(cropStartX, sx).coerceIn(leftBound, rightBound)
+          val top = min(cropStartY, sy).coerceIn(topBound, bottomBound)
+          val right = max(cropStartX, sx).coerceIn(leftBound, rightBound)
+          val bottom = max(cropStartY, sy).coerceIn(topBound, bottomBound)
+
+          val sRect = RectF(left, top, right, bottom)
+          val pW = pl?.pageSize?.width ?: 612f
+          val pH = pl?.pageSize?.height ?: 792f
+          val pageLeft = if (pl != null) (left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW else 0f
+          val pageTop = if (pl != null) (top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH else 0f
+          val pageRight = if (pl != null) (right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW else pW
+          val pageBottom = if (pl != null) (bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH else pH
+
+          // If user dragged crop box across into the canvas zone, seamlessly convert to lift & excerpt!
+          if (sy > splitY + 16f) {
+            isDraggingCrop = false
+            isLiftingExcerpt = true
+            liftCandidateText = "[Figure Crop]"
+            liftCandidatePage = cropPageIndex + 1
+            liftCandidateColor = selectedColor
+            liftCandidateIsImage = true
+            val bounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom))
+            val bmp = generateCropBitmap(cropPageIndex, bounds)
+            if (bmp != null) {
+              val p = saveCropToFile(bmp)
+              liftCandidateImagePath = p
+              liftCandidateBitmap = bmp
+              cardBitmapCache.put(p, bmp)
+            } else {
+              liftCandidateImagePath = null
+              liftCandidateBitmap = null
+            }
+            liftGhostX = sx
+            liftGhostY = sy
+            liftAnchorScreenX = cropStartX
+            liftAnchorScreenY = cropStartY
+            activeCropSelection = null
+            invalidate()
+            return true
+          }
+
+          val cW = 160f
+          val cH = 38f
+          val cLeft = sRect.centerX() - cW / 2f
+          val cTop = if (sRect.top - cH - 10f > 50f) sRect.top - cH - 10f else sRect.bottom + 10f
+          val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
+          val excerptBtn = RectF(cLeft + 6f, cTop + 4f, cLeft + 124f, cTop + cH - 4f)
+          val closeBtn = RectF(cLeft + 128f, cTop + 4f, cLeft + cW - 6f, cTop + cH - 4f)
+
+          activeCropSelection = NativeCropSelection(
+            pageIndex = cropPageIndex,
+            pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
+            screenRect = sRect,
+            calloutRect = calloutR,
+            calloutExcerptBtn = excerptBtn,
+            calloutCloseBtn = closeBtn
+          )
+          invalidate()
+          return true
+        }
+
+        // Dragging Text Selection on PDF
+        if (isSelectingPdfText && pdfSelectStartWord != null) {
+          val pl = pageLayouts.find { it.pageIndex == pdfSelectPageIndex }
+          if (pl != null) {
+            val words = pageWordsCache[pl.pageIndex]
+            if (words != null) {
+              val px = (sx - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
+              val py = (sy - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
+              val curWord = words.minByOrNull { hypot(it.bounds.centerX - px, it.bounds.centerY - py) }
+              if (curWord != null) {
+                updatePdfSelection(pl, pdfSelectStartWord!!, curWord)
+              }
+            }
+          }
+          return true
+        }
+
+        // Scrolling Document
         if (isScrollingDoc) {
           docScrollY = (docScrollY - dy).coerceIn(0f, maxDocScrollY)
           invalidate()
           return true
         }
 
-        if (inCanvasZone) {
-          val (worldX, worldY) = canvasScreenToWorld(sx, sy, canvasTopY)
-
-          if (draggingCard != null) {
-            val card = draggingCard!!
-            card.x = worldX - dragOffsetWorldX
-            card.y = worldY - dragOffsetWorldY
-            invalidate()
-          } else if (isPanningCanvas && activeTool == "select") {
-            panX += dx
-            panY += dy
-            dispatchTransformEvent()
-            invalidate()
-          } else if (activeTool == "pen" || activeTool == "highlighter") {
-            if (activePoints.isNotEmpty()) {
-              val prev = activePoints.last()
-              val midX = (prev.x + worldX) / 2f
-              val midY = (prev.y + worldY) / 2f
-              activePath.quadTo(prev.x, prev.y, midX, midY)
-              activePoints.add(NativePoint(worldX, worldY))
-              invalidate()
-            }
-          } else if (activeTool == "eraser") {
-            eraseStrokeAt(worldX, worldY)
-          }
-        }
-        return true
-      }
-
-      MotionEvent.ACTION_UP -> {
-        // Complete Cross-Zone Lift-and-Drag: drop into canvas!
-        if (isLiftingExcerpt && liftCandidateText != null) {
-          if (sy >= canvasTopY) {
-            val (worldX, worldY) = canvasScreenToWorld(sx, sy, canvasTopY)
-            val newId = "card-${System.currentTimeMillis()}"
-            val newCard = NativeCard(
-              newId,
-              max(20f, worldX - 110f),
-              max(20f, worldY - 50f),
-              220f,
-              liftCandidateText!!,
-              liftCandidateColor,
-              liftCandidatePage,
-              "Excerpt from p. $liftCandidatePage",
-              null,
-              1,
-              false,
-              null,
-              false,
-              null
-            )
-            cards.add(newCard)
-            links.add(NativeLink("link-${System.currentTimeMillis()}", newId, liftCandidateColor))
-            triggerShockwave(newCard.x + newCard.width / 2f, newCard.y + 50f, newCard.color)
-            dispatchExtractExcerptEvent(liftCandidateText!!, liftCandidatePage, String.format("#%06X", 0xFFFFFF and liftCandidateColor), false, false)
-            activeSelection = null
-          }
-          isLiftingExcerpt = false
-          isDirectDraggingSelection = false
-          liftCandidateText = null
+        // Canvas 1-finger Pan
+        if (isPanningCanvas) {
+          panX += dx
+          panY += dy
+          dispatchTransformEvent()
           invalidate()
           return true
         }
 
-        isDraggingStartHandle = false
-        isDraggingEndHandle = false
-        isDirectDraggingSelection = false
-
+        // Dragging Excerpt Card
         if (draggingCard != null) {
-          val card = draggingCard!!
-          val wasDragged = totalDragDistance > 8f
-          if (wasDragged) {
-            // Magnetic stack snapping (42px)
-            val stackRadius = 42f
-            var targetStackCard: NativeCard? = null
-            for (other in cards) {
-              if (other.id == card.id) continue
-              if (hypot(card.x - other.x, card.y - other.y) < stackRadius) {
-                targetStackCard = other
-                break
+          val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          draggingCard!!.x = wx - dragOffsetWorldX
+          draggingCard!!.y = wy - dragOffsetWorldY
+          invalidate()
+          return true
+        }
+
+        // Inking
+        if (activePoints.isNotEmpty()) {
+          val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          val lastPt = activePoints.last()
+          activePath.quadTo(lastPt.x, lastPt.y, (lastPt.x + wx) / 2f, (lastPt.y + wy) / 2f)
+          activePoints.add(NativePoint(wx, wy))
+          invalidate()
+          return true
+        }
+
+        if (activeTool == "eraser" && inCanvasZone) {
+          val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          eraseStrokesNear(wx, wy)
+          return true
+        }
+      }
+
+      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+        pendingLongPressRunnable?.let {
+          longPressHandler.removeCallbacks(it)
+          pendingLongPressRunnable = null
+        }
+
+        isDraggingDivider = false
+        isPanningCanvas = false
+        isSelectingPdfText = false
+        isDraggingCrop = false
+
+        // Compute Scroll Fling Inertia for Document
+        if (isScrollingDoc) {
+          if (totalDragDistance > touchSlop) {
+            velocityTracker?.let { vt ->
+              vt.computeCurrentVelocity(1000, maxFlingVelocity.toFloat())
+              val vy = vt.yVelocity
+              if (abs(vy) > minFlingVelocity) {
+                val flingVy = -vy * 1.8f
+                docScroller.fling(
+                  0, docScrollY.toInt(),
+                  0, flingVy.toInt(),
+                  0, 0,
+                  0, maxDocScrollY.toInt(),
+                  0, (150f * density).toInt()
+                )
+                postInvalidateOnAnimation()
               }
             }
-
-            if (targetStackCard != null) {
-              card.x = targetStackCard.x + 6f
-              card.y = targetStackCard.y + 6f
-              val clusterId = targetStackCard.clusterId ?: "cluster-${targetStackCard.id}"
-              val nextStack = max(2, targetStackCard.stackCount + 1)
-              card.clusterId = clusterId
-              card.stackCount = nextStack
-              targetStackCard.clusterId = clusterId
-              targetStackCard.stackCount = nextStack
-              triggerShockwave(card.x + card.width / 2f, card.y + 60f, card.color)
-              dispatchExcerptMoveEndEvent(card.id, card.x, card.y, clusterId, nextStack)
-            } else {
-              triggerShockwave(card.x + card.width / 2f, card.y + 60f, card.color)
-              dispatchExcerptMoveEndEvent(card.id, card.x, card.y, card.clusterId, card.stackCount)
-            }
           } else {
-            // Card tapped -> jump document to citation page
-            if (activeDocument != null && card.pageNumber > 0) {
-              docScrollY = max(0f, (card.pageNumber - 1) * 260f)
-            }
-            dispatchExcerptPressEvent(card.id)
+            handleDocTap(downDocX, downDocY)
           }
+          isScrollingDoc = false
+        }
+        velocityTracker?.recycle()
+        velocityTracker = null
 
-          draggingCard = null
-          heldCardId = null
+        // Dropping Lifted Excerpt onto Canvas!
+        if (isLiftingExcerpt && liftCandidateText != null) {
+          if (sy >= canvasTopY) {
+            val (dropWx, dropWy) = canvasScreenToWorld(sx, sy, canvasTopY)
+            val newId = "card-${System.currentTimeMillis()}"
+
+            var finalImgPath = liftCandidateImagePath
+            if (liftCandidateIsImage && liftCandidateBitmap != null) {
+              if (finalImgPath.isNullOrEmpty()) {
+                finalImgPath = saveCropToFile(liftCandidateBitmap!!)
+              }
+              cardBitmapCache.put(finalImgPath, liftCandidateBitmap!!)
+              cardBitmapCache.put(newId, liftCandidateBitmap!!)
+              cardBitmapCache.put("page_${liftCandidatePage}_image", liftCandidateBitmap!!)
+            }
+
+            val card = NativeCard(
+              id = newId,
+              x = dropWx - 120f,
+              y = dropWy - 50f,
+              width = if (liftCandidateIsImage) 240f else 220f,
+              text = liftCandidateText!!,
+              color = liftCandidateColor,
+              pageNumber = liftCandidatePage,
+              comment = null,
+              clusterId = null,
+              stackCount = 1,
+              isImage = liftCandidateIsImage,
+              imageUrl = finalImgPath,
+              isTable = false,
+              tableRows = null
+            )
+            cards.add(card)
+
+            links.add(NativeLink("link-${System.currentTimeMillis()}", newId, liftCandidateColor))
+            triggerShockwave(dropWx, dropWy, liftCandidateColor)
+            performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            dispatchExtractExcerptEvent(
+              card.text,
+              card.pageNumber,
+              card.color,
+              card.isImage,
+              card.imageUrl,
+              card.x,
+              card.y,
+              card.id
+            )
+          }
+          isLiftingExcerpt = false
+          liftCandidateText = null
+          liftCandidateBitmap = null
+          liftCandidateImagePath = null
+          activePdfSelection = null
+          activeCropSelection = null
+          docMode = "text"
           invalidate()
-        } else if (activePoints.size > 1) {
-          val strokeId = "stroke-${System.currentTimeMillis()}"
-          val isHighlighter = activeTool == "highlighter"
-          val smoothed = chaikinSmooth(activePoints.toList(), 1)
-          val newStroke = NativeStroke(strokeId, smoothed, selectedColor, if (isHighlighter) 14f else 3.5f, isHighlighter)
+          return true
+        }
+
+        // Dropping Dragged Card with Snapping & Stacking
+        if (draggingCard != null) {
+          val card = draggingCard!!
+          val other = cards.find { it.id != card.id && hypot(it.x - card.x, it.y - card.y) < 70f }
+          if (other != null) {
+            card.x = other.x
+            card.y = other.y + other.getHeight() + 12f
+            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+          }
+          dispatchExcerptMoveEndEvent(card.id, card.x, card.y)
+          draggingCard = null
+          invalidate()
+          return true
+        }
+
+        // Finalize Inking Stroke
+        if (activePoints.isNotEmpty()) {
+          val newStroke = NativeStroke(
+            id = "stroke-${System.currentTimeMillis()}",
+            points = activePoints.toList(),
+            color = selectedColor,
+            strokeWidth = if (activeTool == "highlighter") 20f else 3.5f,
+            isHighlighter = activeTool == "highlighter"
+          )
           strokes.add(newStroke)
           dispatchAddStrokeEvent(newStroke)
           activePoints.clear()
           activePath.reset()
           invalidate()
-        } else {
-          activePoints.clear()
-          activePath.reset()
+          return true
         }
-
-        isDraggingDivider = false
-        isScrollingDoc = false
-        isPanningCanvas = false
-        isLiftingExcerpt = false
-        liftCandidateText = null
-        lastTouchScreenX = 0f
-        lastTouchScreenY = 0f
-        return true
-      }
-
-      MotionEvent.ACTION_CANCEL -> {
-        isDraggingDivider = false
-        isScrollingDoc = false
-        isPanningCanvas = false
-        isLiftingExcerpt = false
-        liftCandidateText = null
-        draggingCard = null
-        heldCardId = null
-        activePoints.clear()
-        activePath.reset()
-        lastTouchScreenX = 0f
-        lastTouchScreenY = 0f
-        invalidate()
-        return true
       }
     }
 
-    return super.onTouchEvent(event)
+    return true
   }
 
-  private fun deleteCard(cardId: String) {
-    cards.removeAll { it.id == cardId }
-    links.removeAll { it.sourceExcerptId == cardId }
-    dispatchCardDeleteEvent(cardId)
+  // ---------------------------------------------------------------------------
+  // Document Tap Selection Handling
+  // ---------------------------------------------------------------------------
+  private fun handleDocTap(tapX: Float, tapY: Float) {
+    // 0. If user tapped outside an active selection, dismiss it and return!
+    if (activeCropSelection != null || activePdfSelection != null) {
+      activeCropSelection = null
+      activePdfSelection = null
+      docMode = "text"
+      invalidate()
+      return
+    }
+
+    // 1. Real PDF Word Selection
+    if (activePdfDoc != null) {
+      for (pl in pageLayouts) {
+        if (!pl.isFolded && pl.boundsOnScreen.contains(tapX, tapY)) {
+          val words = pageWordsCache[pl.pageIndex]
+          if (words != null && words.isNotEmpty()) {
+            val px = (tapX - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
+            val py = (tapY - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
+            val hitWord = words.find { w ->
+              val b = w.bounds
+              px >= b.left - 6f && px <= b.right + 6f && py >= b.top - 8f && py <= b.bottom + 8f
+            } ?: words.minByOrNull { w ->
+              val b = w.bounds
+              val cx = (b.left + b.right) / 2f
+              val cy = (b.top + b.bottom) / 2f
+              (cx - px) * (cx - px) + (cy - py) * (cy - py)
+            }?.takeIf { w ->
+              val b = w.bounds
+              val cx = (b.left + b.right) / 2f
+              val cy = (b.top + b.bottom) / 2f
+              val distSq = (cx - px) * (cx - px) + (cy - py) * (cy - py)
+              distSq < 36f * 36f
+            }
+
+            if (hitWord != null) {
+              updatePdfSelection(pl, hitWord, hitWord)
+              invalidate()
+              return
+            }
+          }
+
+          // If no text word was hit:
+          // ONLY create a Figure Crop selection if the user explicitly switched to "crop" mode!
+          if (docMode == "crop") {
+            val cropW = min(pl.boundsOnScreen.width() * 0.85f, 320f * density)
+            val cropH = min(pl.boundsOnScreen.height() * 0.45f, 220f * density)
+            val sRect = RectF(
+              (tapX - cropW / 2f).coerceIn(pl.boundsOnScreen.left + 8f * density, pl.boundsOnScreen.right - cropW - 8f * density),
+              (tapY - cropH / 2f).coerceIn(pl.boundsOnScreen.top + 8f * density, pl.boundsOnScreen.bottom - cropH - 8f * density),
+              (tapX + cropW / 2f).coerceIn(pl.boundsOnScreen.left + cropW + 8f * density, pl.boundsOnScreen.right - 8f * density),
+              (tapY + cropH / 2f).coerceIn(pl.boundsOnScreen.top + cropH + 8f * density, pl.boundsOnScreen.bottom - 8f * density)
+            )
+
+            val pW = pl.pageSize.width
+            val pH = pl.pageSize.height
+            val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+
+            val cW = 200f * density
+            val cH = 44f * density
+            val cLeft = sRect.centerX() - cW / 2f
+            val cTop = if (sRect.top - cH - 12f * density > subheaderH) sRect.top - cH - 12f * density else sRect.bottom + 12f * density
+            val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
+            val excerptBtn = RectF(cLeft + 8f * density, cTop + 4f * density, cLeft + cW - 44f * density, cTop + cH - 4f * density)
+            val closeBtn = RectF(cLeft + cW - 40f * density, cTop + 4f * density, cLeft + cW - 4f * density, cTop + cH - 4f * density)
+
+            activeCropSelection = NativeCropSelection(
+              pageIndex = pl.pageIndex,
+              pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
+              screenRect = sRect,
+              calloutRect = calloutR,
+              calloutExcerptBtn = excerptBtn,
+              calloutCloseBtn = closeBtn
+            )
+            activePdfSelection = null
+            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            invalidate()
+            return
+          } else {
+            // Normal tap on blank whitespace in text mode: dismiss selections
+            activeCropSelection = null
+            activePdfSelection = null
+            invalidate()
+            return
+          }
+        }
+      }
+    }
+
+    // 2. Structured Sections Demo (The Discovery of India)
+    if (activeDocument != null && activePdfDoc == null) {
+      for (pInfo in paragraphLayouts) {
+        val paraH = pInfo.layout.height.toFloat() + 16f
+        val pRect = RectF(pInfo.paperX, pInfo.topY, pInfo.paperX + pInfo.width + 56f, pInfo.topY + paraH)
+        if (pRect.contains(tapX, tapY)) {
+          val hlLeft = pInfo.paperX + 24f
+          val hlTop = pInfo.topY - 4f
+          val hlRight = pInfo.paperX + pInfo.width + 32f
+          val hlBottom = pInfo.topY + pInfo.layout.height + 4f
+          val highlightR = RectF(hlLeft, hlTop, hlRight, hlBottom)
+
+          val cW = 280f
+          val cH = 40f
+          val cLeft = (hlLeft + hlRight) / 2f - cW / 2f
+          val cTop = if (hlTop - cH - 12f > 50f) hlTop - cH - 12f else hlBottom + 12f
+          val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
+
+          val excerptBtn = RectF(cLeft + 6f, cTop + 4f, cLeft + 90f, cTop + cH - 4f)
+          val copyBtn = RectF(cLeft + 94f, cTop + 4f, cLeft + 168f, cTop + cH - 4f)
+          val hlBtn = RectF(cLeft + 172f, cTop + 4f, cLeft + 250f, cTop + cH - 4f)
+          val closeBtn = RectF(cLeft + 254f, cTop + 4f, cLeft + cW - 4f, cTop + cH - 4f)
+
+          activePdfSelection = NativePdfSelection(
+            pageIndex = pInfo.pageNumber - 1,
+            text = pInfo.text,
+            highlightRects = listOf(highlightR),
+            startHandle = RectF(hlLeft - 12f, hlTop - 20f, hlLeft + 12f, hlBottom),
+            endHandle = RectF(hlRight - 12f, hlTop, hlRight + 12f, hlBottom + 20f),
+            calloutRect = calloutR,
+            calloutExcerptBtn = excerptBtn,
+            calloutCopyBtn = copyBtn,
+            calloutHighlightBtn = hlBtn,
+            calloutCloseBtn = closeBtn
+          )
+          invalidate()
+          return
+        }
+      }
+    }
+
+    // 3. Tapped outside -> Dismiss selection
+    activePdfSelection = null
+    activeCropSelection = null
     invalidate()
   }
 
-  private fun eraseStrokeAt(worldX: Float, worldY: Float) {
-    val threshold = 28f
-    var erasedId: String? = null
-    for (i in strokes.size - 1 downTo 0) {
-      val s = strokes[i]
-      for (pt in s.points) {
-        if (hypot(pt.x - worldX, pt.y - worldY) < threshold) {
-          erasedId = s.id
-          strokes.removeAt(i)
-          break
-        }
-      }
-      if (erasedId != null) break
+  // ---------------------------------------------------------------------------
+  // Real PDF Word Selection Engine
+  // ---------------------------------------------------------------------------
+  private fun updatePdfSelection(pl: PdfPageLayout, w1: TextWord, w2: TextWord) {
+    val words = pageWordsCache[pl.pageIndex] ?: return
+    val idx1 = words.indexOf(w1)
+    val idx2 = words.indexOf(w2)
+    if (idx1 == -1 || idx2 == -1) return
+
+    val startIdx = min(idx1, idx2)
+    val endIdx = max(idx1, idx2)
+    val selWords = words.subList(startIdx, endIdx + 1)
+    val combinedText = selWords.joinToString(" ") { it.text }
+
+    val rects = selWords.map { w ->
+      val l = pl.boundsOnScreen.left + (w.bounds.left / pl.pageSize.width) * pl.boundsOnScreen.width()
+      val t = pl.boundsOnScreen.top + (w.bounds.top / pl.pageSize.height) * pl.boundsOnScreen.height()
+      val r = pl.boundsOnScreen.left + (w.bounds.right / pl.pageSize.width) * pl.boundsOnScreen.width()
+      val b = pl.boundsOnScreen.top + (w.bounds.bottom / pl.pageSize.height) * pl.boundsOnScreen.height()
+      RectF(l, t, r, b)
     }
-    if (erasedId != null) {
-      dispatchEraseStrokeEvent(erasedId)
+
+    val firstR = rects.first()
+    val lastR = rects.last()
+    val startHandle = RectF(firstR.left - 12f, firstR.top - 20f, firstR.left + 12f, firstR.bottom)
+    val endHandle = RectF(lastR.right - 12f, lastR.top, lastR.right + 12f, lastR.bottom + 20f)
+
+    val cW = 280f
+    val cH = 40f
+    val cLeft = (rects.minOf { it.left } + rects.maxOf { it.right }) / 2f - cW / 2f
+    val cTop = if (firstR.top - cH - 12f > 50f) firstR.top - cH - 12f else lastR.bottom + 12f
+    val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
+
+    val excerptBtn = RectF(cLeft + 6f, cTop + 4f, cLeft + 90f, cTop + cH - 4f)
+    val copyBtn = RectF(cLeft + 94f, cTop + 4f, cLeft + 168f, cTop + cH - 4f)
+    val hlBtn = RectF(cLeft + 172f, cTop + 4f, cLeft + 250f, cTop + cH - 4f)
+    val closeBtn = RectF(cLeft + 254f, cTop + 4f, cLeft + cW - 4f, cTop + cH - 4f)
+
+    activePdfSelection = NativePdfSelection(
+      pageIndex = pl.pageIndex,
+      text = combinedText,
+      highlightRects = rects,
+      startHandle = startHandle,
+      endHandle = endHandle,
+      calloutRect = calloutR,
+      calloutExcerptBtn = excerptBtn,
+      calloutCopyBtn = copyBtn,
+      calloutHighlightBtn = hlBtn,
+      calloutCloseBtn = closeBtn
+    )
+    invalidate()
+  }
+
+  // ---------------------------------------------------------------------------
+  // Excerpt & Annotation Helpers
+  // ---------------------------------------------------------------------------
+  private fun extractExcerptToCanvas(text: String, pageNumber: Int, color: Int) {
+    val newId = "card-${System.currentTimeMillis()}"
+    val (dropWx, dropWy) = canvasScreenToWorld(width / 2f, height * splitRatio + 80f, height * splitRatio + 14f)
+
+    cards.add(
+      NativeCard(
+        id = newId,
+        x = dropWx - 110f,
+        y = dropWy - 40f,
+        width = 220f,
+        text = text,
+        color = color,
+        pageNumber = pageNumber,
+        comment = null,
+        clusterId = null,
+        stackCount = 1,
+        isImage = false,
+        imageUrl = null,
+        isTable = false,
+        tableRows = null
+      )
+    )
+
+    links.add(NativeLink("link-${System.currentTimeMillis()}", newId, color))
+    triggerShockwave(dropWx, dropWy, color)
+    dispatchExtractExcerptEvent(text, pageNumber, color, false)
+  }
+
+  private fun extractCropToCanvas(cropSel: NativeCropSelection) {
+    val newId = "card-${System.currentTimeMillis()}"
+    val (dropWx, dropWy) = canvasScreenToWorld(width / 2f, height * splitRatio + 80f, height * splitRatio + 14f)
+
+    val bmp = generateCropBitmap(cropSel.pageIndex, cropSel.pageBounds)
+    val imgPath = if (bmp != null) {
+      val p = saveCropToFile(bmp)
+      cardBitmapCache.put(p, bmp)
+      cardBitmapCache.put(newId, bmp)
+      cardBitmapCache.put("page_${cropSel.pageIndex + 1}_image", bmp)
+      p
+    } else null
+
+    val card = NativeCard(
+      id = newId,
+      x = dropWx - 120f,
+      y = dropWy - 50f,
+      width = 240f,
+      text = "[Figure Excerpt]",
+      color = selectedColor,
+      pageNumber = cropSel.pageIndex + 1,
+      comment = null,
+      clusterId = null,
+      stackCount = 1,
+      isImage = true,
+      imageUrl = imgPath,
+      isTable = false,
+      tableRows = null
+    )
+    cards.add(card)
+
+    // Reset docMode and dismiss crop selector so user can scroll immediately
+    activeCropSelection = null
+    docMode = "text"
+
+    links.add(NativeLink("link-${System.currentTimeMillis()}", newId, selectedColor))
+    triggerShockwave(dropWx, dropWy, selectedColor)
+    performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+    dispatchExtractExcerptEvent(
+      card.text,
+      card.pageNumber,
+      card.color,
+      card.isImage,
+      card.imageUrl,
+      card.x,
+      card.y,
+      card.id
+    )
+    invalidate()
+  }
+
+  private fun addAnnotation(text: String, pageNumber: Int, color: Int) {
+    val annId = "ann-${System.currentTimeMillis()}"
+    annotations.add(NativeAnnotation(annId, "page-$pageNumber", 0, pageNumber, color, text))
+    invalidate()
+  }
+
+  private fun copyToClipboard(text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    val clip = ClipData.newPlainText("Excerpt", text)
+    clipboard?.setPrimaryClip(clip)
+    copiedToastText = "✓ Copied!"
+    postDelayed({
+      copiedToastText = null
+      invalidate()
+    }, 1500)
+    invalidate()
+  }
+
+  private fun eraseStrokesNear(wx: Float, wy: Float) {
+    val threshold = 28f
+    val toRemove = strokes.filter { s ->
+      s.points.any { hypot(it.x - wx, it.y - wy) <= threshold }
+    }
+    if (toRemove.isNotEmpty()) {
+      strokes.removeAll(toRemove)
+      for (s in toRemove) {
+        dispatchEraseStrokeEvent(s.id)
+      }
       invalidate()
     }
   }
 
-  // Event dispatchers
-  private fun dispatchAddStrokeEvent(stroke: NativeStroke) {
-    try {
-      val json = JSONObject()
-      json.put("id", stroke.id)
-      json.put("color", String.format("#%06X", 0xFFFFFF and stroke.color))
-      json.put("strokeWidth", stroke.strokeWidth.toDouble())
-      json.put("isHighlighter", stroke.isHighlighter)
-      val ptsArr = JSONArray()
-      for (pt in stroke.points) {
-        val ptObj = JSONObject()
-        ptObj.put("x", pt.x.toDouble())
-        ptObj.put("y", pt.y.toDouble())
-        ptsArr.put(ptObj)
+  private fun scrollToDocumentPage(targetPageNum: Int) {
+    val pl = pageLayouts.find { it.pageNumber == targetPageNum } ?: return
+    val targetScrollY = (docScrollY + pl.topY - 56f).coerceIn(0f, maxDocScrollY)
+
+    val animator = ValueAnimator.ofFloat(docScrollY, targetScrollY).apply {
+      duration = 380
+      interpolator = DecelerateInterpolator()
+      addUpdateListener {
+        docScrollY = it.animatedValue as Float
+        invalidate()
       }
-      json.put("points", ptsArr)
-      val map = Arguments.createMap()
-      map.putString("strokeJson", json.toString())
-      dispatchEvent("topAddStroke", map)
-    } catch (e: Exception) {
-      e.printStackTrace()
+      start()
+    }
+
+    pulsePageNumber = targetPageNum
+    pulseAlpha = 220
+    val pulseAnim = ValueAnimator.ofInt(220, 0).apply {
+      duration = 1200
+      addUpdateListener {
+        pulseAlpha = it.animatedValue as Int
+        invalidate()
+      }
+      start()
     }
   }
 
-  private fun dispatchEraseStrokeEvent(strokeId: String) {
-    val map = Arguments.createMap()
-    map.putString("id", strokeId)
-    dispatchEvent("topEraseStroke", map)
-  }
-
-  private fun dispatchExcerptMoveEndEvent(id: String, x: Float, y: Float, clusterId: String?, stackCount: Int?) {
-    val map = Arguments.createMap()
-    map.putString("id", id)
-    map.putDouble("x", x.toDouble())
-    map.putDouble("y", y.toDouble())
-    if (clusterId != null) map.putString("clusterId", clusterId)
-    if (stackCount != null) map.putDouble("stackCount", stackCount.toDouble())
-    dispatchEvent("topExcerptMoveEnd", map)
-  }
-
-  private fun dispatchExcerptPressEvent(id: String) {
-    val map = Arguments.createMap()
-    map.putString("id", id)
-    dispatchEvent("topExcerptPress", map)
-  }
-
-  private fun dispatchCardDeleteEvent(id: String) {
-    val map = Arguments.createMap()
-    map.putString("id", id)
-    dispatchEvent("topCardDelete", map)
-  }
-
-  private fun dispatchCardColorChangeEvent(id: String, colorHex: String) {
-    val map = Arguments.createMap()
-    map.putString("id", id)
-    map.putString("color", colorHex)
-    dispatchEvent("topChangeCardColor", map)
-  }
-
-  private fun dispatchSplitRatioEvent(ratio: Float) {
-    val map = Arguments.createMap()
-    map.putDouble("ratio", ratio.toDouble())
-    dispatchEvent("topSplitRatioChange", map)
-  }
-
-  private fun dispatchExtractExcerptEvent(text: String, pageNumber: Int, colorHex: String, isTable: Boolean, isImage: Boolean) {
-    val map = Arguments.createMap()
-    map.putString("text", text)
-    map.putDouble("pageNumber", pageNumber.toDouble())
-    map.putString("color", colorHex)
-    map.putBoolean("isTable", isTable)
-    map.putBoolean("isImage", isImage)
-    dispatchEvent("topExtractExcerpt", map)
+  // ---------------------------------------------------------------------------
+  // React Native Fabric Event Dispatchers
+  // ---------------------------------------------------------------------------
+  private fun getEventDispatcher() = (context as? com.facebook.react.bridge.ReactContext)?.let {
+    UIManagerHelper.getEventDispatcherForReactTag(it, id)
   }
 
   private fun dispatchTransformEvent() {
-    val map = Arguments.createMap()
-    map.putDouble("panX", panX.toDouble())
-    map.putDouble("panY", panY.toDouble())
-    map.putDouble("scale", scaleFactor.toDouble())
-    dispatchEvent("topTransformChange", map)
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putDouble("panX", panX.toDouble())
+      putDouble("panY", panY.toDouble())
+      putDouble("scale", scaleFactor.toDouble())
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topTransformChange", data))
   }
 
-  private fun dispatchEvent(eventName: String, data: WritableMap) {
-    try {
-      val reactContext = UIManagerHelper.getReactContext(this)
-      val surfaceId = UIManagerHelper.getSurfaceId(this)
-      val dispatcher = UIManagerHelper.getEventDispatcherForReactTag(reactContext, id)
-      dispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, eventName, data))
-    } catch (e: Exception) {
-      e.printStackTrace()
+  private fun dispatchSplitRatioEvent(ratio: Float) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putDouble("ratio", ratio.toDouble())
     }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topSplitRatioChange", data))
+  }
+
+  private fun dispatchToggleSqueezeEvent(squeezed: Boolean) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putBoolean("isSqueezed", squeezed)
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topToggleSqueeze", data))
+  }
+
+  private fun dispatchExtractExcerptEvent(
+    text: String,
+    pageNumber: Int,
+    color: Int,
+    isImg: Boolean,
+    imageUrl: String? = null,
+    x: Float = 0f,
+    y: Float = 0f,
+    cardId: String? = null
+  ) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("text", text)
+      putDouble("pageNumber", pageNumber.toDouble())
+      putString("color", String.format("#%06X", 0xFFFFFF and color))
+      putBoolean("isTable", false)
+      putBoolean("isImage", isImg)
+      if (!imageUrl.isNullOrEmpty()) {
+        putString("imageUrl", imageUrl)
+      }
+      if (!cardId.isNullOrEmpty()) {
+        putString("id", cardId)
+      }
+      putDouble("x", x.toDouble())
+      putDouble("y", y.toDouble())
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topExtractExcerpt", data))
+  }
+
+  private fun dispatchExcerptPressEvent(cardId: String) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("id", cardId)
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topExcerptPress", data))
+  }
+
+  private fun dispatchExcerptMoveEndEvent(cardId: String, x: Float, y: Float) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("id", cardId)
+      putDouble("x", x.toDouble())
+      putDouble("y", y.toDouble())
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topExcerptMoveEnd", data))
+  }
+
+  private fun dispatchAddStrokeEvent(stroke: NativeStroke) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val json = JSONObject().apply {
+      put("id", stroke.id)
+      put("color", String.format("#%06X", 0xFFFFFF and stroke.color))
+      put("strokeWidth", stroke.strokeWidth.toDouble())
+      put("isHighlighter", stroke.isHighlighter)
+      val ptsArr = JSONArray()
+      for (p in stroke.points) {
+        ptsArr.put(JSONObject().apply {
+          put("x", p.x.toDouble())
+          put("y", p.y.toDouble())
+        })
+      }
+      put("points", ptsArr)
+    }
+    val data = Arguments.createMap().apply {
+      putString("strokeJson", json.toString())
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topAddStroke", data))
+  }
+
+  private fun dispatchEraseStrokeEvent(strokeId: String) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("id", strokeId)
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topEraseStroke", data))
   }
 }

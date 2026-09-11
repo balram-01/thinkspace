@@ -91,8 +91,9 @@ export interface WorkspaceDocument {
   id: string;
   title: string;
   pageCount: number;
+  uri?: string;
   author?: string;
-  sections: DocumentSection[];
+  sections?: DocumentSection[];
 }
 
 export interface ExcerptModel {
@@ -238,4 +239,166 @@ export interface LiquidTextWorkspaceProps {
   document: WorkspaceDocument;
   initialPattern?: WorkspacePattern;
   initialTool?: WorkspaceTool;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PDF Engine Types
+// These types mirror the Kotlin pdf-engine data model classes.
+// All coordinates are in PDF page space: points (1/72 inch), top-left origin.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Axis-aligned bounding box in page coordinates (points). */
+export interface PdfBoundingBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+/** A 2D point in page coordinates. */
+export interface PdfPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * Arbitrary quadrilateral for rotated / skewed text selections.
+ * Vertices are clockwise: topLeft → topRight → bottomRight → bottomLeft.
+ */
+export interface PdfQuad {
+  topLeft: PdfPoint;
+  topRight: PdfPoint;
+  bottomRight: PdfPoint;
+  bottomLeft: PdfPoint;
+}
+
+/** A single extracted word with exact bounding box and font metadata. */
+export interface PdfWord {
+  text: string;
+  bounds: PdfBoundingBox;
+  fontSize: number;
+  fontName: string;
+  isBold: boolean;
+  isItalic: boolean;
+  baseline: number;
+  orderIndex: number;
+  pageIndex: number;
+}
+
+/** A line of text composed of words. */
+export interface PdfTextLine {
+  text: string;
+  bounds: PdfBoundingBox;
+  averageFontSize: number;
+  orderIndex: number;
+  words: PdfWord[];
+}
+
+/** A visual block of text lines (belongs to a layout column). */
+export interface PdfTextBlock {
+  id: string;
+  text: string;
+  bounds: PdfBoundingBox;
+  isHeading: boolean;
+  columnIndex: number;
+  orderIndex: number;
+  lines: PdfTextLine[];
+}
+
+/** Result of `PdfEngine.extractText()` — all words on a page. */
+export interface PdfTextPage {
+  pageIndex: number;
+  words: PdfWord[];
+}
+
+/** Result of `PdfEngine.analyzePage()` — full layout structure of a page. */
+export interface PdfPageAnalysis {
+  pageIndex: number;
+  columnCount: number;
+  pageWidth: number;
+  pageHeight: number;
+  isScanned: boolean;
+  lines: PdfTextLine[];
+  blocks: PdfTextBlock[];
+}
+
+/** A single search match returned by `PdfEngine.searchDocument()`. */
+export interface PdfSearchResult {
+  pageIndex: number;
+  matchedText: string;
+  bounds: PdfBoundingBox;
+  context: string;
+  startOffset: number;
+  endOffset: number;
+  quads: PdfQuad[];
+  isFromOcr: boolean;
+}
+
+/**
+ * Rendered page image returned by `PdfEngine.renderPage()`.
+ * `uri` is a temp `file://` URI pointing to a PNG on disk — use it
+ * directly with `<Image source={{ uri }} />`.
+ */
+export interface PdfRenderedPage {
+  uri: string;
+  width: number;
+  height: number;
+  pageWidth?: number;
+  pageHeight?: number;
+  scale?: number;
+  pageIndex: number;
+}
+
+/** Per-page slice of a multi-page text selection. */
+export interface PdfPageTextSelection {
+  pageIndex: number;
+  text: string;
+  bounds: PdfBoundingBox;
+  quads: PdfQuad[];
+}
+
+/** Result of `PdfEngine.getSelectionGeometry()`. */
+export interface PdfTextSelection {
+  text: string;
+  startPage: number;
+  endPage: number;
+  bounds: PdfBoundingBox;
+  quads: PdfQuad[];
+  pageSelections: PdfPageTextSelection[];
+}
+
+/**
+ * Document handle returned by `PdfEngine.openDocument()`.
+ * Store `documentId` and pass it to all subsequent API calls.
+ */
+export interface PdfDocumentInfo {
+  documentId: string;
+  pageCount: number;
+  title: string;
+  author: string;
+  subject: string;
+  isEncrypted: boolean;
+  pdfVersion: string;
+}
+
+/** Options for `PdfEngine.processDocument()` batch pre-processing. */
+export interface PdfProcessingOptions {
+  /** Enable on-device ML Kit OCR for scanned pages. Default: false. */
+  enableOcr?: boolean;
+  /** Also extract embedded images. Default: false. */
+  extractImages?: boolean;
+  /** Start processing from this page (zero-based). Default: 0. */
+  startPageIndex?: number;
+  /** Limit processing to this many pages. Omit for all pages. */
+  pageLimit?: number;
+}
+
+/** Result of `PdfEngine.processDocument()`. */
+export interface PdfProcessingResult {
+  totalPages: number;
+  processedPages: number;
+  totalDurationMs: number;
+  isFullyIndexed: boolean;
 }

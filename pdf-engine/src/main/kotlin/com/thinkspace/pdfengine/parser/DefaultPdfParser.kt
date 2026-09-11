@@ -106,6 +106,7 @@ class DefaultPdfParser(
 
         PdfBoxDocumentWrapper(
             id = documentId,
+            file = fileToOpen,
             pdDocument = pdDocument,
             metadata = docMetadata,
             resourceManager = resourceManager,
@@ -152,6 +153,7 @@ class DefaultPdfParser(
  */
 class PdfBoxDocumentWrapper(
     override val id: String,
+    val file: File,
     val pdDocument: PDDocument,
     override val metadata: DocumentMetadata,
     private val resourceManager: ResourceManager,

@@ -2,9 +2,11 @@ package com.thinkspace.pdfengine.rendering
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import android.os.ParcelFileDescriptor
 import com.thinkspace.pdfengine.api.PdfDocument
 import com.thinkspace.pdfengine.api.RenderOptions
 import com.thinkspace.pdfengine.cache.PdfCache
@@ -73,11 +75,27 @@ class PdfBoxRenderer(
 
         val startTime = System.currentTimeMillis()
         try {
-            val tomRoushRenderer = TomRoushPdfRenderer(wrapper.pdDocument)
-
-            // Render page at requested scale
+            // Render page with PDFBox, or fallback to Android native PdfRenderer on stream decompression failure
             currentCoroutineContext().ensureActive()
-            val fullPageBitmap = tomRoushRenderer.renderImage(pageIndex, scale)
+            val fullPageBitmap = try {
+                val tomRoushRenderer = TomRoushPdfRenderer(wrapper.pdDocument)
+                tomRoushRenderer.renderImage(pageIndex, scale)
+            } catch (t: Throwable) {
+                logger.warn("PdfBoxRenderer", { "PDFBox render failed for page $pageIndex, falling back to Android native PdfRenderer: ${t.message}" }, t)
+                val pfd = ParcelFileDescriptor.open(wrapper.file, ParcelFileDescriptor.MODE_READ_ONLY)
+                pfd.use { descriptor ->
+                    val nativeRenderer = android.graphics.pdf.PdfRenderer(descriptor)
+                    val page = nativeRenderer.openPage(pageIndex)
+                    val w = maxOf(1, (page.width * scale).roundToInt())
+                    val h = maxOf(1, (page.height * scale).roundToInt())
+                    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    bmp.eraseColor(Color.WHITE)
+                    page.render(bmp, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    page.close()
+                    nativeRenderer.close()
+                    bmp
+                }
+            }
             currentCoroutineContext().ensureActive()
 
             val finalBitmap: Bitmap

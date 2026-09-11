@@ -1,6 +1,17 @@
-plugins {
-    id 'com.android.library' version '8.7.2'
-    id 'org.jetbrains.kotlin.android' version '2.1.20'
+// pdf-engine/build.gradle
+// This module is designed to work both as a standalone project AND as a
+// subproject included by the thinkspace React Native library.
+// When included via `include ':pdf-engine'` in the parent settings.gradle,
+// the parent's buildscript classpath provides the Android & Kotlin plugins.
+
+if (project == rootProject) {
+    // Standalone build: declare plugins with versions
+    apply plugin: 'com.android.library'
+    apply plugin: 'org.jetbrains.kotlin.android'
+} else {
+    // Subproject build: use plugins already on parent classpath
+    apply plugin: 'com.android.library'
+    apply plugin: 'kotlin-android'
 }
 
 android {

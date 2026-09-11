@@ -58,6 +58,10 @@ export type ExtractExcerptEvent = Readonly<{
   color: string;
   isTable: boolean;
   isImage: boolean;
+  imageUrl?: string;
+  id?: string;
+  x?: Float;
+  y?: Float;
 }>;
 
 export type ToggleSqueezeEvent = Readonly<{

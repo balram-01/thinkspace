@@ -3,4 +3,6 @@ plugins { id("com.facebook.react.settings") }
 extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
 rootProject.name = 'thinkspace.example'
 include ':app'
+include ':pdf-engine'
+project(':pdf-engine').projectDir = new File(rootDir, '../../pdf-engine')
 includeBuild('../node_modules/@react-native/gradle-plugin')
