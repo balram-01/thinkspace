@@ -34,6 +34,7 @@ import com.thinkspace.pdfengine.model.BoundingBox
 import com.thinkspace.pdfengine.model.PageSize
 import com.thinkspace.pdfengine.model.TextElement
 import com.thinkspace.pdfengine.model.TextWord
+import com.thinkspace.engine.*
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -127,10 +128,15 @@ data class NativeCard(
   val isImage: Boolean,
   val imageUrl: String?,
   val isTable: Boolean,
-  val tableRows: List<NativeTableRow>?
+  val tableRows: List<NativeTableRow>?,
+  var groupedItems: MutableList<GroupedExcerpt>? = null
 ) {
   fun getHeight(): Float {
     return when {
+      !groupedItems.isNullOrEmpty() && groupedItems!!.size > 1 -> {
+        val baseH = if (groupedItems!!.any { it.isImage }) 175f else 140f
+        baseH + (groupedItems!!.size - 1) * 8f
+      }
       isTable -> 170f
       isImage -> 160f
       else -> if (text.length > 70) 130f else 105f
@@ -171,7 +177,13 @@ data class NativePdfSelection(
   val calloutExcerptBtn: RectF,
   val calloutCopyBtn: RectF,
   val calloutHighlightBtn: RectF,
-  val calloutCloseBtn: RectF
+  val calloutCloseBtn: RectF,
+  val startWordIndex: Int = 0,
+  val endWordIndex: Int = 0,
+  val calloutAddWordLeftBtn: RectF = RectF(),
+  val calloutAddWordRightBtn: RectF = RectF(),
+  val calloutSelectAllBtn: RectF = RectF(),
+  val charCountText: String = ""
 )
 
 data class NativeCropSelection(
@@ -180,7 +192,9 @@ data class NativeCropSelection(
   val screenRect: RectF,
   val calloutRect: RectF,
   val calloutExcerptBtn: RectF,
-  val calloutCloseBtn: RectF
+  val calloutCloseBtn: RectF,
+  val dimensionsText: String = "",
+  val holdAndDragRect: RectF = RectF()
 )
 
 class ThinkspaceView : View {
@@ -369,8 +383,10 @@ class ThinkspaceView : View {
   private var rippleProgress = 1f
   private var rippleAnimator: ValueAnimator? = null
 
-  // Toast feedback
+  // Toast feedback & HUD Notification Engine
   private var copiedToastText: String? = null
+  private val hudToast = HudToastRenderer(density)
+  private var magneticTargetCardId: String? = null
 
   // Context colors
   private val contextColors = intArrayOf(
@@ -388,11 +404,27 @@ class ThinkspaceView : View {
   private val headerModeCropRect = RectF()
   private val headerSqueezeRect = RectF()
   private val headerSearchRect = RectF()
+  private val headerZoomOutRect = RectF()
+  private val headerZoomResetRect = RectF()
+  private val headerZoomInRect = RectF()
 
   private val canvasToolbarRect = RectF()
   private val toolBtnRects = mutableMapOf<String, RectF>()
   private val colorBtnRects = mutableMapOf<Int, RectF>()
   private val resetCanvasBtnRect = RectF()
+
+  // Bottom HUD matching video: Workspaces, Text Box, Tidy, Squeeze, Pattern, Zoom Out
+  private val bottomHudRect = RectF()
+  private val bottomWorkspacesBtnRect = RectF()
+  private val bottomTextBoxBtnRect = RectF()
+  private val bottomTidyBtnRect = RectF()
+  private val bottomSqueezeBtnRect = RectF()
+  private val bottomPatternBtnRect = RectF()
+  private val bottomZoomOutBtnRect = RectF()
+  private val modeDrawingRect = RectF()
+  private val modeDocumentRect = RectF()
+  private val modeWorkspaceRect = RectF()
+  private var currentNavMode: String = "workspace" // "drawing", "document", "workspace"
 
   // Paints
   private val docBgPaint = Paint().apply { color = Color.parseColor("#0B1120") }
@@ -1193,35 +1225,55 @@ class ThinkspaceView : View {
       val pageInd = "p. $curPageNum / $pageTotal"
       canvas.drawText(pageInd, 12f * density + pillW + 12f * density, btnTop + 22f * density, docTitlePaint)
 
-      // Right Side Controls: Mode Switcher (📝 Text vs ✂️ Crop) & Accordion Squeeze (🪗)
-      val modeBtnW = 88f * density
-      val cropBtnLeft = viewW - 12f * density - modeBtnW
-      val textBtnLeft = cropBtnLeft - 8f * density - modeBtnW
-      val squeezeBtnW = 40f * density
-      val squeezeBtnLeft = textBtnLeft - 8f * density - squeezeBtnW
+      // Right Side Controls matching Video: Crop toggle [X Crop], Zoom Pill [- 1:1 +], and Accordion Squeeze [🪗]
+      val cropBtnW = 82f * density
+      val cropBtnLeft = viewW - 12f * density - cropBtnW
 
+      val zoomPillW = 86f * density
+      val zoomPillLeft = cropBtnLeft - 8f * density - zoomPillW
+
+      val squeezeBtnW = 38f * density
+      val squeezeBtnLeft = zoomPillLeft - 8f * density - squeezeBtnW
+
+      // Squeeze Button [🪗]
       headerSqueezeRect.set(squeezeBtnLeft, btnTop, squeezeBtnLeft + squeezeBtnW, btnBottom)
       val sqBg = if (isSqueezed) Color.parseColor("#00ADB5") else Color.parseColor("#1E293B")
       canvas.drawRoundRect(headerSqueezeRect, 10f * density, 10f * density, Paint().apply { color = sqBg })
       canvas.drawText("🪗", squeezeBtnLeft + 10f * density, btnTop + 23f * density, TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 16f * density })
 
-      headerModeTextRect.set(textBtnLeft, btnTop, textBtnLeft + modeBtnW, btnBottom)
-      val textBg = if (docMode == "text") Color.parseColor("#00ADB5") else Color.parseColor("#1E293B")
-      val textCol = if (docMode == "text") Color.WHITE else Color.parseColor("#94A3B8")
-      canvas.drawRoundRect(headerModeTextRect, 10f * density, 10f * density, Paint().apply { color = textBg })
-      canvas.drawText("📝 Text", textBtnLeft + 12f * density, btnTop + 22f * density, TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = textCol
-        textSize = 14f * density
-        isFakeBoldText = true
-      })
+      // Zoom Pill [- 1:1 +]
+      val zoomBgPaint = Paint().apply { color = Color.parseColor("#1E293B") }
+      val zoomBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#334155")
+        strokeWidth = 1f * density
+        style = Paint.Style.STROKE
+      }
+      val zoomFullRect = RectF(zoomPillLeft, btnTop, zoomPillLeft + zoomPillW, btnBottom)
+      canvas.drawRoundRect(zoomFullRect, 10f * density, 10f * density, zoomBgPaint)
+      canvas.drawRoundRect(zoomFullRect, 10f * density, 10f * density, zoomBorderPaint)
 
-      headerModeCropRect.set(cropBtnLeft, btnTop, cropBtnLeft + modeBtnW, btnBottom)
+      val zoomSegW = zoomPillW / 3f
+      headerZoomOutRect.set(zoomPillLeft, btnTop, zoomPillLeft + zoomSegW, btnBottom)
+      headerZoomResetRect.set(zoomPillLeft + zoomSegW, btnTop, zoomPillLeft + zoomSegW * 2f, btnBottom)
+      headerZoomInRect.set(zoomPillLeft + zoomSegW * 2f, btnTop, zoomPillLeft + zoomPillW, btnBottom)
+
+      val zoomTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 12f * density
+        isFakeBoldText = true
+      }
+      canvas.drawText("-", headerZoomOutRect.centerX() - 3f * density, btnTop + 21f * density, zoomTextPaint)
+      canvas.drawText("1:1", headerZoomResetRect.centerX() - 9f * density, btnTop + 21f * density, zoomTextPaint)
+      canvas.drawText("+", headerZoomInRect.centerX() - 4f * density, btnTop + 21f * density, zoomTextPaint)
+
+      // Crop Mode Toggle [✕ Crop] or [✂️ Crop]
+      headerModeCropRect.set(cropBtnLeft, btnTop, cropBtnLeft + cropBtnW, btnBottom)
       val cropBg = if (docMode == "crop") Color.parseColor("#00ADB5") else Color.parseColor("#1E293B")
-      val cropCol = if (docMode == "crop") Color.WHITE else Color.parseColor("#94A3B8")
+      val cropText = if (docMode == "crop") "✕ Crop" else "✂️ Crop"
       canvas.drawRoundRect(headerModeCropRect, 10f * density, 10f * density, Paint().apply { color = cropBg })
-      canvas.drawText("✂️ Crop", cropBtnLeft + 12f * density, btnTop + 22f * density, TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = cropCol
-        textSize = 14f * density
+      canvas.drawText(cropText, cropBtnLeft + 14f * density, btnTop + 22f * density, TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 13f * density
         isFakeBoldText = true
       })
 
@@ -1475,7 +1527,7 @@ class ThinkspaceView : View {
       }
 
       // -----------------------------------------------------------------------
-      // Draw Active Text Selection (Real PDF or Fallback)
+      // Draw Active Text Selection (Real PDF or Fallback) matching Video
       // -----------------------------------------------------------------------
       val pdfSel = activePdfSelection
       if (pdfSel != null) {
@@ -1495,50 +1547,109 @@ class ThinkspaceView : View {
           canvas.drawCircle(lastR.right, lastR.bottom + 8f, 7.5f, selectionHandlePinPaint)
         }
 
-        // Callout Dock
+        // Sleek 2-Tier Callout Dock
         val cRect = pdfSel.calloutRect
-        canvas.drawRoundRect(cRect, 10f, 10f, calloutBgPaint)
-        canvas.drawRoundRect(cRect, 10f, 10f, calloutBorderPaint)
+        canvas.drawRoundRect(cRect, 12f * density, 12f * density, calloutBgPaint)
+        canvas.drawRoundRect(cRect, 12f * density, 12f * density, calloutBorderPaint)
 
-        canvas.drawRoundRect(pdfSel.calloutExcerptBtn, 6f, 6f, calloutPrimaryBtnPaint)
-        canvas.drawText("+ Excerpt", pdfSel.calloutExcerptBtn.left + 14f, pdfSel.calloutExcerptBtn.centerY() + 6f, calloutTextPaint)
+        // Tier 1 Header: Chars Count & Snippet Preview + Close Button
+        val countPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#38BDF8")
+          textSize = 12f * density
+          isFakeBoldText = true
+        }
+        val headerDisplay = if (pdfSel.charCountText.isNotEmpty()) pdfSel.charCountText else "${pdfSel.text.length} chars selected"
+        canvas.drawText(headerDisplay, cRect.left + 12f * density, cRect.top + 20f * density, countPaint)
+        canvas.drawText("✕", pdfSel.calloutCloseBtn.left + 8f * density, cRect.top + 20f * density, closeBtnTextPaint)
 
-        canvas.drawRoundRect(pdfSel.calloutCopyBtn, 6f, 6f, calloutSecondaryBtnPaint)
-        canvas.drawText(copiedToastText ?: "📋 Copy", pdfSel.calloutCopyBtn.left + 10f, pdfSel.calloutCopyBtn.centerY() + 6f, calloutSecondaryTextPaint)
+        // Tier 2 Actions: [+ Excerpt] [Copy] [Highlight] [+Word] [Word+] [All]
+        canvas.drawRoundRect(pdfSel.calloutExcerptBtn, 6f * density, 6f * density, calloutPrimaryBtnPaint)
+        canvas.drawText("+ Excerpt", pdfSel.calloutExcerptBtn.left + 10f * density, pdfSel.calloutExcerptBtn.centerY() + 5f * density, calloutTextPaint)
 
-        canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 6f, 6f, calloutHighlightBtnPaint)
-        canvas.drawText("🖍️ Highlight", pdfSel.calloutHighlightBtn.left + 8f, pdfSel.calloutHighlightBtn.centerY() + 6f, calloutTextPaint)
+        canvas.drawRoundRect(pdfSel.calloutCopyBtn, 6f * density, 6f * density, calloutSecondaryBtnPaint)
+        canvas.drawText(copiedToastText ?: "Copy", pdfSel.calloutCopyBtn.left + 10f * density, pdfSel.calloutCopyBtn.centerY() + 5f * density, calloutSecondaryTextPaint)
 
-        canvas.drawText("✕", pdfSel.calloutCloseBtn.left + 8f, pdfSel.calloutCloseBtn.centerY() + 6f, closeBtnTextPaint)
+        canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 6f * density, 6f * density, calloutHighlightBtnPaint)
+        canvas.drawText("Highlight", pdfSel.calloutHighlightBtn.left + 8f * density, pdfSel.calloutHighlightBtn.centerY() + 5f * density, calloutTextPaint)
+
+        // Dynamic Word Boundaries: +Word, Word+, All
+        val auxBtnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#1E293B")
+          style = Paint.Style.FILL
+        }
+        val auxBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#334155")
+          strokeWidth = 1f * density
+          style = Paint.Style.STROKE
+        }
+        val auxTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#E2E8F0")
+          textSize = 11f * density
+          isFakeBoldText = true
+        }
+
+        canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 5f * density, 5f * density, auxBtnPaint)
+        canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 5f * density, 5f * density, auxBorderPaint)
+        canvas.drawText("+Word", pdfSel.calloutAddWordLeftBtn.left + 4f * density, pdfSel.calloutAddWordLeftBtn.centerY() + 4f * density, auxTextPaint)
+
+        canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 5f * density, 5f * density, auxBtnPaint)
+        canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 5f * density, 5f * density, auxBorderPaint)
+        canvas.drawText("Word+", pdfSel.calloutAddWordRightBtn.left + 4f * density, pdfSel.calloutAddWordRightBtn.centerY() + 4f * density, auxTextPaint)
+
+        canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 5f * density, 5f * density, auxBtnPaint)
+        canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 5f * density, 5f * density, auxBorderPaint)
+        canvas.drawText("All", pdfSel.calloutSelectAllBtn.left + 8f * density, pdfSel.calloutSelectAllBtn.centerY() + 4f * density, auxTextPaint)
       }
 
-      // Draw Figure Crop Selection
+      // Draw Figure Crop Selection matching Video
       val cropSel = activeCropSelection
       if (cropSel != null) {
         canvas.drawRect(cropSel.screenRect, cropFillPaint)
         canvas.drawRect(cropSel.screenRect, cropDashPaint)
 
         // Corner Grips
-        val gSize = 12f
+        val gSize = 14f * density
         val r = cropSel.screenRect
         val gp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#00ADB5"); style = Paint.Style.FILL }
-        canvas.drawRect(r.left - 2f, r.top - 2f, r.left + gSize, r.top + 3f, gp)
-        canvas.drawRect(r.left - 2f, r.top - 2f, r.left + 3f, r.top + gSize, gp)
-        canvas.drawRect(r.right - gSize, r.top - 2f, r.right + 2f, r.top + 3f, gp)
-        canvas.drawRect(r.right - 3f, r.top - 2f, r.right + 2f, r.top + gSize, gp)
-        canvas.drawRect(r.left - 2f, r.bottom - 3f, r.left + gSize, r.bottom + 2f, gp)
-        canvas.drawRect(r.left - 2f, r.bottom - gSize, r.left + 3f, r.bottom + 2f, gp)
-        canvas.drawRect(r.right - gSize, r.bottom - 3f, r.right + 2f, r.bottom + 2f, gp)
-        canvas.drawRect(r.right - 3f, r.bottom - gSize, r.right + 2f, r.bottom + 2f, gp)
+        canvas.drawRect(r.left - 2f, r.top - 2f, r.left + gSize, r.top + 3f * density, gp)
+        canvas.drawRect(r.left - 2f, r.top - 2f, r.left + 3f * density, r.top + gSize, gp)
+        canvas.drawRect(r.right - gSize, r.top - 2f, r.right + 2f, r.top + 3f * density, gp)
+        canvas.drawRect(r.right - 3f * density, r.top - 2f, r.right + 2f, r.top + gSize, gp)
+        canvas.drawRect(r.left - 2f, r.bottom - 3f * density, r.left + gSize, r.bottom + 2f, gp)
+        canvas.drawRect(r.left - 2f, r.bottom - gSize, r.left + 3f * density, r.bottom + 2f, gp)
+        canvas.drawRect(r.right - gSize, r.bottom - 3f * density, r.right + 2f, r.bottom + 2f, gp)
+        canvas.drawRect(r.right - 3f * density, r.bottom - gSize, r.right + 2f, r.bottom + 2f, gp)
 
-        // Crop Callout
-        canvas.drawRoundRect(cropSel.calloutRect, 10f, 10f, calloutBgPaint)
-        canvas.drawRoundRect(cropSel.calloutRect, 10f, 10f, calloutBorderPaint)
+        // "Hold & Drag" top badge
+        val holdBadgeRect = RectF(r.left, r.top - 26f * density, r.left + 96f * density, r.top - 4f * density)
+        val holdBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0F172A"); style = Paint.Style.FILL }
+        val holdBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#00ADB5"); strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
+        canvas.drawRoundRect(holdBadgeRect, 5f * density, 5f * density, holdBg)
+        canvas.drawRoundRect(holdBadgeRect, 5f * density, 5f * density, holdBorder)
+        val holdTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.WHITE
+          textSize = 11f * density
+          isFakeBoldText = true
+        }
+        canvas.drawText("✋ Hold & Drag", holdBadgeRect.left + 8f * density, holdBadgeRect.centerY() + 4f * density, holdTextPaint)
 
-        canvas.drawRoundRect(cropSel.calloutExcerptBtn, 6f, 6f, calloutPrimaryBtnPaint)
-        canvas.drawText("✂️ Extract Figure", cropSel.calloutExcerptBtn.left + 12f, cropSel.calloutExcerptBtn.centerY() + 6f, calloutTextPaint)
+        // Crop Callout Pill: [Image / Graphic] [Page X (WxH pt)] [+ Excerpt] [✕ Crop]
+        canvas.drawRoundRect(cropSel.calloutRect, 10f * density, 10f * density, calloutBgPaint)
+        canvas.drawRoundRect(cropSel.calloutRect, 10f * density, 10f * density, calloutBorderPaint)
 
-        canvas.drawText("✕", cropSel.calloutCloseBtn.left + 8f, cropSel.calloutCloseBtn.centerY() + 6f, closeBtnTextPaint)
+        // Dimension text
+        val dimText = if (cropSel.dimensionsText.isNotEmpty()) cropSel.dimensionsText else "Page ${cropSel.pageIndex + 1} (${cropSel.pageBounds.width.toInt()}x${cropSel.pageBounds.height.toInt()} pt)"
+        val dimPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#94A3B8")
+          textSize = 12f * density
+          isFakeBoldText = true
+        }
+        canvas.drawText(dimText, cropSel.calloutRect.left + 12f * density, cropSel.calloutRect.centerY() + 4f * density, dimPaint)
+
+        canvas.drawRoundRect(cropSel.calloutExcerptBtn, 6f * density, 6f * density, calloutPrimaryBtnPaint)
+        canvas.drawText("+ Excerpt", cropSel.calloutExcerptBtn.left + 10f * density, cropSel.calloutExcerptBtn.centerY() + 4f * density, calloutTextPaint)
+
+        canvas.drawText("✕", cropSel.calloutCloseBtn.left + 8f * density, cropSel.calloutCloseBtn.centerY() + 5f * density, closeBtnTextPaint)
       }
 
       canvas.restore()
@@ -1713,15 +1824,62 @@ class ThinkspaceView : View {
       val cardH = card.getHeight()
       val cardRect = RectF(card.x, card.y, card.x + card.width, card.y + cardH)
 
+      val isSnapTarget = card.id == magneticTargetCardId
+      val isGrouped = card.groupedItems != null && card.groupedItems!!.size > 1
+
+      // Draw stacked physical deck layers behind card if grouped
+      if (isGrouped) {
+        val deck2 = RectF(cardRect.left + 5f, cardRect.top + 5f, cardRect.right + 5f, cardRect.bottom + 5f)
+        val deckPaint2 = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#CBD5E1")
+          style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(deck2, 10f, 10f, deckPaint2)
+        canvas.drawRoundRect(deck2, 10f, 10f, cardBorderPaint)
+
+        val deck1 = RectF(cardRect.left + 2.5f, cardRect.top + 2.5f, cardRect.right + 2.5f, cardRect.bottom + 2.5f)
+        val deckPaint1 = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#E2E8F0")
+          style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(deck1, 10f, 10f, deckPaint1)
+        canvas.drawRoundRect(deck1, 10f, 10f, cardBorderPaint)
+      }
+
+      // Magnetic Snap Target Highlight & Banner
+      if (isSnapTarget) {
+        val snapGlow = RectF(cardRect.left - 6f, cardRect.top - 6f, cardRect.right + 6f, cardRect.bottom + 6f)
+        val snapPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#00ADB5")
+          strokeWidth = 3f * density
+          style = Paint.Style.STROKE
+        }
+        canvas.drawRoundRect(snapGlow, 14f, 14f, snapPaint)
+
+        val snapBanner = RectF(cardRect.left, cardRect.top - 24f * density, cardRect.right, cardRect.top - 4f * density)
+        val bannerBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#0F172A")
+          style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(snapBanner, 6f * density, 6f * density, bannerBg)
+        canvas.drawRoundRect(snapBanner, 6f * density, 6f * density, snapPaint)
+        val bannerText = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#00ADB5")
+          textSize = 11f * density
+          isFakeBoldText = true
+        }
+        canvas.drawText("🎯 SNAP & STACK ON CARD", snapBanner.left + 8f * density, snapBanner.centerY() + 4f * density, bannerText)
+      }
+
       // Selected Glow
-      if (card.id == selectedCardId) {
+      if (card.id == selectedCardId && !isSnapTarget) {
         val glowRect = RectF(cardRect.left - 4f, cardRect.top - 4f, cardRect.right + 4f, cardRect.bottom + 4f)
         canvas.drawRoundRect(glowRect, 14f, 14f, cardSelectedGlowPaint)
       }
 
       // Card Background & Border
       canvas.drawRoundRect(cardRect, 10f, 10f, cardBgPaint)
-      cardBorderPaint.color = if (card.id == selectedCardId) card.color else Color.parseColor("#CBD5E1")
+      cardBorderPaint.color = if (card.id == selectedCardId || isSnapTarget) card.color else Color.parseColor("#CBD5E1")
       canvas.drawRoundRect(cardRect, 10f, 10f, cardBorderPaint)
 
       // Left Accent Strip
@@ -1729,16 +1887,32 @@ class ThinkspaceView : View {
       val accentBar = RectF(cardRect.left, cardRect.top + 6f, cardRect.left + 5f, cardRect.bottom - 6f)
       canvas.drawRoundRect(accentBar, 2f, 2f, cardAccentPaint)
 
-      // Card Header: Page Badge
-      val badgeRect = RectF(cardRect.left + 14f, cardRect.top + 10f, cardRect.left + 88f, cardRect.top + 30f)
+      // Card Header: Page Badge & Grouped Count Badge
+      val pageText = if (isGrouped) MagneticStackingEngine.formatStackedPages(card) else "p. ${card.pageNumber}"
+      val pageBadgeW = badgeTextPaint.measureText(pageText) + 16f
+      val badgeRect = RectF(cardRect.left + 14f, cardRect.top + 10f, cardRect.left + 14f + pageBadgeW, cardRect.top + 30f)
       canvas.drawRoundRect(badgeRect, 5f, 5f, badgeBgPaint)
-        canvas.drawRoundRect(badgeRect, 5f, 5f, badgeBorderPaint)
-        canvas.drawText("Page ${card.pageNumber}", cardRect.left + 20f, cardRect.top + 25f, badgeTextPaint)
+      canvas.drawRoundRect(badgeRect, 5f, 5f, badgeBorderPaint)
+      canvas.drawText(pageText, cardRect.left + 20f, cardRect.top + 25f, badgeTextPaint)
 
-        // Delete Button if selected
-        if (card.id == selectedCardId) {
-          canvas.drawText("✕", cardRect.right - 22f, cardRect.top + 25f, closeBtnTextPaint)
+      if (isGrouped) {
+        val groupCountText = "${card.groupedItems!!.size} grouped"
+        val groupBadgeW = badgeTextPaint.measureText(groupCountText) + 16f
+        val groupBadgeRect = RectF(badgeRect.right + 8f, cardRect.top + 10f, badgeRect.right + 8f + groupBadgeW, cardRect.top + 30f)
+        val groupBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#8B5CF6"); style = Paint.Style.FILL }
+        canvas.drawRoundRect(groupBadgeRect, 5f, 5f, groupBg)
+        val groupTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.WHITE
+          textSize = 11f
+          isFakeBoldText = true
         }
+        canvas.drawText(groupCountText, groupBadgeRect.left + 8f, cardRect.top + 24f, groupTextPaint)
+      }
+
+      // Delete Button if selected
+      if (card.id == selectedCardId) {
+        canvas.drawText("✕", cardRect.right - 22f, cardRect.top + 25f, closeBtnTextPaint)
+      }
 
         // Card Body: Image, Table, or Text Quote
         if (card.isImage) {
@@ -1867,38 +2041,45 @@ class ThinkspaceView : View {
       // =========================================================================
       if (isLiftingExcerpt && liftCandidateText != null) {
         val isOverCanvas = liftGhostY >= canvasTopY - 20f
-        val themeColor = if (isOverCanvas) Color.parseColor("#10B981") else Color.parseColor("#00ADB5")
+        val isSnapping = magneticTargetCardId != null
+        val themeColor = when {
+          isSnapping -> Color.parseColor("#00ADB5")
+          isOverCanvas -> Color.parseColor("#10B981")
+          else -> Color.parseColor("#00ADB5")
+        }
 
-        // Tether Cord
+        // Live Cubic Bezier Spline matching Video
         val tetherPath = Path()
         val startX = if (liftAnchorScreenX > 0f) liftAnchorScreenX else 40f
-        tetherPath.moveTo(startX, liftAnchorScreenY)
-        val midX = (startX + liftGhostX) / 2f
-        val midY = (liftAnchorScreenY + liftGhostY) / 2f + 35f
-        tetherPath.quadTo(midX, midY, liftGhostX, liftGhostY)
+        val startY = liftAnchorScreenY
+        tetherPath.moveTo(startX, startY)
+        val dy = liftGhostY - startY
+        val cp1Y = startY + dy * 0.45f
+        val cp2Y = liftGhostY - dy * 0.45f
+        tetherPath.cubicTo(startX, cp1Y, liftGhostX, cp2Y, liftGhostX, liftGhostY)
 
         linkGlowPaint.color = themeColor
-        linkGlowPaint.strokeWidth = 9f
-        linkGlowPaint.alpha = 65
+        linkGlowPaint.strokeWidth = 10f * density
+        linkGlowPaint.alpha = 75
         canvas.drawPath(tetherPath, linkGlowPaint)
 
         linkPaint.color = themeColor
-        linkPaint.strokeWidth = 3.5f
+        linkPaint.strokeWidth = 3.5f * density
         canvas.drawPath(tetherPath, linkPaint)
 
         // Ghost Card
-        val ghostW = if (liftCandidateIsImage) 240f else 230f
-        val ghostH = if (liftCandidateIsImage) 150f else 92f
+        val ghostW = if (liftCandidateIsImage) 250f else 235f
+        val ghostH = if (liftCandidateIsImage) 155f else 96f
         val ghostRect = RectF(-ghostW / 2f, -ghostH / 2f, ghostW / 2f, ghostH / 2f)
 
         canvas.save()
         canvas.translate(liftGhostX, liftGhostY)
-        canvas.rotate(-2.5f)
-        canvas.scale(1.08f, 1.08f)
+        canvas.rotate(-2f)
+        canvas.scale(1.06f, 1.06f)
 
         canvas.drawRoundRect(ghostRect, 12f, 12f, cardBgPaint)
         cardBorderPaint.color = themeColor
-        cardBorderPaint.strokeWidth = 2.5f
+        cardBorderPaint.strokeWidth = 2.5f * density
         canvas.drawRoundRect(ghostRect, 12f, 12f, cardBorderPaint)
 
         cardAccentPaint.color = themeColor
@@ -1907,14 +2088,30 @@ class ThinkspaceView : View {
 
         val headerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
           color = themeColor
-          textSize = 15f
+          textSize = 14f
           isFakeBoldText = true
         }
-        val headerText = if (isOverCanvas) "🎯 RELEASE TO DROP ON CANVAS" else if (liftCandidateIsImage) "📸 DRAGGING FIGURE" else "✨ DRAGGING EXCERPT"
-        canvas.drawText(headerText, ghostRect.left + 16f, ghostRect.top + 24f, headerPaint)
+        val subheaderPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#64748B")
+          textSize = 11f
+        }
+
+        val headerText = when {
+          isSnapping -> "🎯 SNAP & STACK ON CARD"
+          isOverCanvas -> if (liftCandidateIsImage) "🎯 RELEASE TO DROP FIGURE" else "🎯 RELEASE TO DROP ON CANVAS"
+          else -> if (liftCandidateIsImage) "📸 DRAGGING FIGURE" else "✨ DRAGGING EXCERPT"
+        }
+        val subheaderText = when {
+          isSnapping -> "Release thumb to group into stacked pile (+1)"
+          isOverCanvas -> "Drop right here on workspace"
+          else -> if (liftCandidateIsImage) "Extracted Figure - Drag thumb into workspace canvas" else "Drag thumb into workspace canvas"
+        }
+
+        canvas.drawText(headerText, ghostRect.left + 16f, ghostRect.top + 22f, headerPaint)
+        canvas.drawText(subheaderText, ghostRect.left + 16f, ghostRect.top + 36f, subheaderPaint)
 
         if (liftCandidateIsImage && liftCandidateBitmap != null) {
-          val imgR = RectF(ghostRect.left + 12f, ghostRect.top + 34f, ghostRect.right - 12f, ghostRect.bottom - 26f)
+          val imgR = RectF(ghostRect.left + 12f, ghostRect.top + 42f, ghostRect.right - 12f, ghostRect.bottom - 26f)
           canvas.drawBitmap(liftCandidateBitmap!!, null, imgR, null)
 
           val badgeRect = RectF(ghostRect.left + 14f, ghostRect.bottom - 24f, ghostRect.left + 94f, ghostRect.bottom - 6f)
@@ -1924,19 +2121,25 @@ class ThinkspaceView : View {
         } else {
           val previewPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#1E293B")
-            textSize = 17f
+            textSize = 15f
             typeface = Typeface.SERIF
           }
           val preview = if (liftCandidateText!!.length > 32) liftCandidateText!!.substring(0, 30) + "..." else liftCandidateText!!
-          canvas.drawText("\"$preview\"", ghostRect.left + 16f, ghostRect.top + 50f, previewPaint)
+          canvas.drawText("\"$preview\"", ghostRect.left + 16f, ghostRect.top + 58f, previewPaint)
 
-          val badgeRect = RectF(ghostRect.left + 16f, ghostRect.top + 62f, ghostRect.left + 94f, ghostRect.top + 82f)
+          val badgeRect = RectF(ghostRect.left + 16f, ghostRect.top + 68f, ghostRect.left + 94f, ghostRect.top + 88f)
           canvas.drawRoundRect(badgeRect, 5f, 5f, badgeBgPaint)
           canvas.drawRoundRect(badgeRect, 5f, 5f, badgeBorderPaint)
-          canvas.drawText("🔗 Page $liftCandidatePage", ghostRect.left + 22f, ghostRect.top + 76f, badgeTextPaint)
+          canvas.drawText("🔗 Page $liftCandidatePage", ghostRect.left + 22f, ghostRect.top + 82f, badgeTextPaint)
         }
 
         canvas.restore()
+      }
+
+      // Draw bottom floating toast matching video
+      hudToast.draw(canvas, viewW, viewH - 64f * density)
+      if (hudToast.isShowing) {
+        postInvalidateOnAnimation()
       }
     }
 
@@ -2003,30 +2206,80 @@ class ThinkspaceView : View {
         lastTouchScreenY = sy
         totalDragDistance = 0f
 
-        // Check Top Subheader UI Clicks
+        // Check Top Subheader UI Clicks matching Video
         if (inDocZone && sy < subheaderH) {
-          if (headerModeTextRect.contains(sx, sy)) {
-            docMode = "text"
-            activeCropSelection = null
+          if (headerZoomOutRect.contains(sx, sy)) {
+            scaleFactor = max(0.6f, scaleFactor - 0.15f)
+            hudToast.show("Zoom: ${(scaleFactor * 100).toInt()}%")
+            invalidate()
+            return true
+          }
+          if (headerZoomResetRect.contains(sx, sy)) {
+            scaleFactor = 1.0f
+            hudToast.show("Zoom: 100%")
+            invalidate()
+            return true
+          }
+          if (headerZoomInRect.contains(sx, sy)) {
+            scaleFactor = min(2.5f, scaleFactor + 0.15f)
+            hudToast.show("Zoom: ${(scaleFactor * 100).toInt()}%")
             invalidate()
             return true
           }
           if (headerModeCropRect.contains(sx, sy)) {
-            docMode = "crop"
-            activePdfSelection = null
+            docMode = if (docMode == "crop") "text" else "crop"
+            if (docMode == "crop") {
+              activePdfSelection = null
+              val curPl = pageLayouts.firstOrNull { it.boundsOnScreen.bottom > subheaderH + 20f }
+              if (curPl != null) {
+                val boxW = curPl.boundsOnScreen.width() * 0.75f
+                val boxH = curPl.boundsOnScreen.height() * 0.45f
+                val boxLeft = curPl.boundsOnScreen.centerX() - boxW / 2f
+                val boxTop = curPl.boundsOnScreen.top + 50f * density
+                val sRect = RectF(boxLeft, boxTop, boxLeft + boxW, boxTop + boxH)
+                val pW = curPl.pageSize.width
+                val pH = curPl.pageSize.height
+                val pageLeft = (sRect.left - curPl.boundsOnScreen.left) / curPl.boundsOnScreen.width() * pW
+                val pageTop = (sRect.top - curPl.boundsOnScreen.top) / curPl.boundsOnScreen.height() * pH
+                val pageRight = (sRect.right - curPl.boundsOnScreen.left) / curPl.boundsOnScreen.width() * pW
+                val pageBottom = (sRect.bottom - curPl.boundsOnScreen.top) / curPl.boundsOnScreen.height() * pH
+
+                val cW = 200f * density
+                val cH = 42f * density
+                val cLeft = sRect.centerX() - cW / 2f
+                val cTop = sRect.bottom + 12f * density
+                val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
+                val excerptBtn = RectF(cLeft + 8f * density, cTop + 4f * density, cLeft + cW - 44f * density, cTop + cH - 4f * density)
+                val closeBtn = RectF(cLeft + cW - 40f * density, cTop + 4f * density, cLeft + cW - 4f * density, cTop + cH - 4f * density)
+
+                activeCropSelection = NativeCropSelection(
+                  pageIndex = curPl.pageIndex,
+                  pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
+                  screenRect = sRect,
+                  calloutRect = calloutR,
+                  calloutExcerptBtn = excerptBtn,
+                  calloutCloseBtn = closeBtn,
+                  dimensionsText = "Page ${curPl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)",
+                  holdAndDragRect = RectF(sRect.left, sRect.top - 26f * density, sRect.left + 96f * density, sRect.top - 4f * density)
+                )
+              }
+            } else {
+              activeCropSelection = null
+            }
             invalidate()
             return true
           }
           if (headerSqueezeRect.contains(sx, sy)) {
             isSqueezed = !isSqueezed
             dispatchToggleSqueezeEvent(isSqueezed)
+            hudToast.show(if (isSqueezed) "🪗 Document Squeezed" else "Document Expanded")
             invalidate()
             return true
           }
           return true
         }
 
-        // Check Floating Canvas Bottom Toolbar Clicks
+        // Check Floating Canvas Bottom Toolbar & HUD Clicks
         if (inCanvasZone && canvasToolbarRect.contains(sx, sy)) {
           for ((toolId, rect) in toolBtnRects) {
             if (rect.contains(sx, sy)) {
@@ -2047,6 +2300,7 @@ class ThinkspaceView : View {
             panY = 0f
             scaleFactor = 1f
             dispatchTransformEvent()
+            hudToast.show("Canvas Centered")
             invalidate()
             return true
           }
@@ -2061,11 +2315,10 @@ class ThinkspaceView : View {
 
         // Document Zone Gestures
         if (inDocZone) {
-          // Check Callout Clicks
+          // Check Callout Clicks matching Video (+Word, Word+, All, Excerpt, Copy, Highlight, Close)
           val pdfSel = activePdfSelection
           if (pdfSel != null && pdfSel.calloutRect.contains(sx, sy)) {
             if (pdfSel.calloutExcerptBtn.contains(sx, sy)) {
-              // Extract to canvas
               extractExcerptToCanvas(pdfSel.text, pdfSel.pageIndex + 1, selectedColor)
               activePdfSelection = null
               invalidate()
@@ -2079,6 +2332,32 @@ class ThinkspaceView : View {
               addAnnotation(pdfSel.text, pdfSel.pageIndex + 1, selectedColor)
               activePdfSelection = null
               invalidate()
+              return true
+            }
+            if (pdfSel.calloutAddWordLeftBtn.contains(sx, sy)) {
+              val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
+              if (pl != null && pdfSel.startWordIndex > 0) {
+                updatePdfSelectionByIndex(pl, pdfSel.startWordIndex - 1, pdfSel.endWordIndex)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              }
+              return true
+            }
+            if (pdfSel.calloutAddWordRightBtn.contains(sx, sy)) {
+              val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
+              val words = pageWordsCache[pdfSel.pageIndex]
+              if (pl != null && words != null && pdfSel.endWordIndex < words.size - 1) {
+                updatePdfSelectionByIndex(pl, pdfSel.startWordIndex, pdfSel.endWordIndex + 1)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              }
+              return true
+            }
+            if (pdfSel.calloutSelectAllBtn.contains(sx, sy)) {
+              val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
+              val words = pageWordsCache[pdfSel.pageIndex]
+              if (pl != null && !words.isNullOrEmpty()) {
+                updatePdfSelectionByIndex(pl, 0, words.size - 1)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              }
               return true
             }
             if (pdfSel.calloutCloseBtn.contains(sx, sy)) {
@@ -2265,6 +2544,13 @@ class ThinkspaceView : View {
         if (isLiftingExcerpt) {
           liftGhostX = sx
           liftGhostY = sy
+          if (sy >= canvasTopY) {
+            val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+            val snap = MagneticStackingEngine.findSnapTarget(wx, wy, cards)
+            magneticTargetCardId = snap?.id
+          } else {
+            magneticTargetCardId = null
+          }
           invalidate()
           return true
         }
@@ -2371,11 +2657,18 @@ class ThinkspaceView : View {
           return true
         }
 
-        // Dragging Excerpt Card
+        // Dragging Excerpt Card with magnetic proximity check
         if (draggingCard != null) {
           val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
           draggingCard!!.x = wx - dragOffsetWorldX
           draggingCard!!.y = wy - dragOffsetWorldY
+          val snap = MagneticStackingEngine.findSnapTarget(
+            draggingCard!!.x + draggingCard!!.width / 2f,
+            draggingCard!!.y + draggingCard!!.getHeight() / 2f,
+            cards,
+            ignoreCardId = draggingCard!!.id
+          )
+          magneticTargetCardId = snap?.id
           invalidate()
           return true
         }
@@ -2398,6 +2691,8 @@ class ThinkspaceView : View {
       }
 
       MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+        downDocX = 0f
+        downDocY = 0f
         pendingLongPressRunnable?.let {
           longPressHandler.removeCallbacks(it)
           pendingLongPressRunnable = null
@@ -2434,7 +2729,7 @@ class ThinkspaceView : View {
         velocityTracker?.recycle()
         velocityTracker = null
 
-        // Dropping Lifted Excerpt onto Canvas!
+        // Dropping Lifted Excerpt onto Canvas with Stacking & Collision Avoidance matching Video!
         if (isLiftingExcerpt && liftCandidateText != null) {
           if (sy >= canvasTopY) {
             val (dropWx, dropWy) = canvasScreenToWorld(sx, sy, canvasTopY)
@@ -2450,42 +2745,78 @@ class ThinkspaceView : View {
               cardBitmapCache.put("page_${liftCandidatePage}_image", liftCandidateBitmap!!)
             }
 
-            val card = NativeCard(
-              id = newId,
-              x = dropWx - 120f,
-              y = dropWy - 50f,
-              width = if (liftCandidateIsImage) 240f else 220f,
-              text = liftCandidateText!!,
-              color = liftCandidateColor,
-              pageNumber = liftCandidatePage,
-              comment = null,
-              clusterId = null,
-              stackCount = 1,
-              isImage = liftCandidateIsImage,
-              imageUrl = finalImgPath,
-              isTable = false,
-              tableRows = null
-            )
-            cards.add(card)
+            val snapTarget = if (magneticTargetCardId != null) cards.find { it.id == magneticTargetCardId } else null
+            if (snapTarget != null) {
+              // Magnetically stack into pile!
+              val newExcerpt = GroupedExcerpt(
+                id = newId,
+                text = liftCandidateText!!,
+                pageNumber = liftCandidatePage,
+                color = liftCandidateColor,
+                isImage = liftCandidateIsImage,
+                imageUrl = finalImgPath
+              )
+              MagneticStackingEngine.stackIntoCard(snapTarget, newExcerpt)
+              links.add(NativeLink("link-${System.currentTimeMillis()}", snapTarget.id, liftCandidateColor))
+              triggerShockwave(snapTarget.x + snapTarget.width / 2f, snapTarget.y + snapTarget.getHeight() / 2f, liftCandidateColor)
+              performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+              hudToast.show("Magnetically stacked with nearby card!")
+            } else {
+              // Resolve non-overlapping placement!
+              val cardW = if (liftCandidateIsImage) 240f else 220f
+              val cardH = if (liftCandidateIsImage) 160f else 115f
+              val resolvedPos = CollisionPlacementSolver.findNonOverlappingPosition(
+                desiredX = dropWx - cardW / 2f,
+                desiredY = dropWy - cardH / 2f,
+                cardWidth = cardW,
+                cardHeight = cardH,
+                existingCards = cards
+              )
 
-            links.add(NativeLink("link-${System.currentTimeMillis()}", newId, liftCandidateColor))
-            triggerShockwave(dropWx, dropWy, liftCandidateColor)
-            performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-            dispatchExtractExcerptEvent(
-              card.text,
-              card.pageNumber,
-              card.color,
-              card.isImage,
-              card.imageUrl,
-              card.x,
-              card.y,
-              card.id
-            )
+              val card = NativeCard(
+                id = newId,
+                x = resolvedPos.x,
+                y = resolvedPos.y,
+                width = cardW,
+                text = liftCandidateText!!,
+                color = liftCandidateColor,
+                pageNumber = liftCandidatePage,
+                comment = null,
+                clusterId = null,
+                stackCount = 1,
+                isImage = liftCandidateIsImage,
+                imageUrl = finalImgPath,
+                isTable = false,
+                tableRows = null
+              )
+              cards.add(card)
+
+              links.add(NativeLink("link-${System.currentTimeMillis()}", newId, liftCandidateColor))
+              triggerShockwave(resolvedPos.x + cardW / 2f, resolvedPos.y + cardH / 2f, liftCandidateColor)
+              performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+              dispatchExtractExcerptEvent(
+                card.text,
+                card.pageNumber,
+                card.color,
+                card.isImage,
+                card.imageUrl,
+                card.x,
+                card.y,
+                card.id
+              )
+
+              if (liftCandidateIsImage) {
+                hudToast.show("Extracted figure placed neatly with live Ink-Link!")
+              } else {
+                hudToast.show("Excerpt placed without overlap with live Ink-Link!")
+              }
+            }
           }
           isLiftingExcerpt = false
           liftCandidateText = null
           liftCandidateBitmap = null
           liftCandidateImagePath = null
+          magneticTargetCardId = null
           activePdfSelection = null
           activeCropSelection = null
           docMode = "text"
@@ -2496,14 +2827,27 @@ class ThinkspaceView : View {
         // Dropping Dragged Card with Snapping & Stacking
         if (draggingCard != null) {
           val card = draggingCard!!
-          val other = cards.find { it.id != card.id && hypot(it.x - card.x, it.y - card.y) < 70f }
-          if (other != null) {
-            card.x = other.x
-            card.y = other.y + other.getHeight() + 12f
-            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+          val snapTarget = if (magneticTargetCardId != null) cards.find { it.id == magneticTargetCardId && it.id != card.id } else null
+          if (snapTarget != null) {
+            val newExcerpt = GroupedExcerpt(
+              id = card.id,
+              text = card.text,
+              pageNumber = card.pageNumber,
+              color = card.color,
+              isImage = card.isImage,
+              imageUrl = card.imageUrl
+            )
+            MagneticStackingEngine.stackIntoCard(snapTarget, newExcerpt)
+            cards.remove(card)
+            links.removeIf { it.sourceExcerptId == card.id }
+            links.add(NativeLink("link-${System.currentTimeMillis()}", snapTarget.id, card.color))
+            performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            hudToast.show("Magnetically stacked with nearby card!")
+          } else {
+            dispatchExcerptMoveEndEvent(card.id, card.x, card.y)
           }
-          dispatchExcerptMoveEndEvent(card.id, card.x, card.y)
           draggingCard = null
+          magneticTargetCardId = null
           invalidate()
           return true
         }
@@ -2672,17 +3016,14 @@ class ThinkspaceView : View {
   }
 
   // ---------------------------------------------------------------------------
-  // Real PDF Word Selection Engine
+  // Real PDF Word Selection Engine matching Video
   // ---------------------------------------------------------------------------
-  private fun updatePdfSelection(pl: PdfPageLayout, w1: TextWord, w2: TextWord) {
+  private fun updatePdfSelectionByIndex(pl: PdfPageLayout, startIdx: Int, endIdx: Int) {
     val words = pageWordsCache[pl.pageIndex] ?: return
-    val idx1 = words.indexOf(w1)
-    val idx2 = words.indexOf(w2)
-    if (idx1 == -1 || idx2 == -1) return
-
-    val startIdx = min(idx1, idx2)
-    val endIdx = max(idx1, idx2)
-    val selWords = words.subList(startIdx, endIdx + 1)
+    if (words.isEmpty()) return
+    val clampedStart = startIdx.coerceIn(0, words.size - 1)
+    val clampedEnd = endIdx.coerceIn(clampedStart, words.size - 1)
+    val selWords = words.subList(clampedStart, clampedEnd + 1)
     val combinedText = selWords.joinToString(" ") { it.text }
 
     val rects = selWords.map { w ->
@@ -2695,19 +3036,29 @@ class ThinkspaceView : View {
 
     val firstR = rects.first()
     val lastR = rects.last()
-    val startHandle = RectF(firstR.left - 12f, firstR.top - 20f, firstR.left + 12f, firstR.bottom)
-    val endHandle = RectF(lastR.right - 12f, lastR.top, lastR.right + 12f, lastR.bottom + 20f)
+    val startHandle = RectF(firstR.left - 12f * density, firstR.top - 20f * density, firstR.left + 12f * density, firstR.bottom)
+    val endHandle = RectF(lastR.right - 12f * density, lastR.top, lastR.right + 12f * density, lastR.bottom + 20f * density)
 
-    val cW = 280f
-    val cH = 40f
-    val cLeft = (rects.minOf { it.left } + rects.maxOf { it.right }) / 2f - cW / 2f
-    val cTop = if (firstR.top - cH - 12f > 50f) firstR.top - cH - 12f else lastR.bottom + 12f
+    val charCount = combinedText.length
+    val previewSnippet = if (combinedText.length > 22) combinedText.substring(0, 20) + "..." else combinedText
+    val charCountText = "$charCount chars selected \"$previewSnippet\""
+
+    val cW = 340f * density
+    val cH = 74f * density
+    val cLeft = ((rects.minOf { it.left } + rects.maxOf { it.right }) / 2f - cW / 2f).coerceIn(10f * density, width - cW - 10f * density)
+    val cTop = if (firstR.top - cH - 16f * density > subheaderH) firstR.top - cH - 16f * density else (lastR.bottom + 16f * density).coerceAtMost(height * splitRatio - cH - 10f * density)
     val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
 
-    val excerptBtn = RectF(cLeft + 6f, cTop + 4f, cLeft + 90f, cTop + cH - 4f)
-    val copyBtn = RectF(cLeft + 94f, cTop + 4f, cLeft + 168f, cTop + cH - 4f)
-    val hlBtn = RectF(cLeft + 172f, cTop + 4f, cLeft + 250f, cTop + cH - 4f)
-    val closeBtn = RectF(cLeft + 254f, cTop + 4f, cLeft + cW - 4f, cTop + cH - 4f)
+    val closeBtn = RectF(cLeft + cW - 34f * density, cTop + 4f * density, cLeft + cW - 6f * density, cTop + 30f * density)
+
+    val row2Top = cTop + 34f * density
+    val row2Bottom = cTop + cH - 6f * density
+    val excerptBtn = RectF(cLeft + 8f * density, row2Top, cLeft + 86f * density, row2Bottom)
+    val copyBtn = RectF(cLeft + 90f * density, row2Top, cLeft + 144f * density, row2Bottom)
+    val hlBtn = RectF(cLeft + 148f * density, row2Top, cLeft + 224f * density, row2Bottom)
+    val addWordLeftBtn = RectF(cLeft + 228f * density, row2Top, cLeft + 268f * density, row2Bottom)
+    val addWordRightBtn = RectF(cLeft + 272f * density, row2Top, cLeft + 312f * density, row2Bottom)
+    val selectAllBtn = RectF(cLeft + 316f * density, row2Top, cLeft + cW - 8f * density, row2Bottom)
 
     activePdfSelection = NativePdfSelection(
       pageIndex = pl.pageIndex,
@@ -2719,24 +3070,50 @@ class ThinkspaceView : View {
       calloutExcerptBtn = excerptBtn,
       calloutCopyBtn = copyBtn,
       calloutHighlightBtn = hlBtn,
-      calloutCloseBtn = closeBtn
+      calloutCloseBtn = closeBtn,
+      startWordIndex = clampedStart,
+      endWordIndex = clampedEnd,
+      calloutAddWordLeftBtn = addWordLeftBtn,
+      calloutAddWordRightBtn = addWordRightBtn,
+      calloutSelectAllBtn = selectAllBtn,
+      charCountText = charCountText
     )
     invalidate()
   }
 
+  private fun updatePdfSelection(pl: PdfPageLayout, w1: TextWord, w2: TextWord) {
+    val words = pageWordsCache[pl.pageIndex] ?: return
+    val idx1 = words.indexOf(w1)
+    val idx2 = words.indexOf(w2)
+    if (idx1 == -1 || idx2 == -1) return
+    val startIdx = min(idx1, idx2)
+    val endIdx = max(idx1, idx2)
+    updatePdfSelectionByIndex(pl, startIdx, endIdx)
+  }
+
   // ---------------------------------------------------------------------------
-  // Excerpt & Annotation Helpers
+  // Excerpt & Annotation Helpers with Collision-Free Drop & Toast Feedback
   // ---------------------------------------------------------------------------
   private fun extractExcerptToCanvas(text: String, pageNumber: Int, color: Int) {
     val newId = "card-${System.currentTimeMillis()}"
     val (dropWx, dropWy) = canvasScreenToWorld(width / 2f, height * splitRatio + 80f, height * splitRatio + 14f)
 
+    val cardW = 220f
+    val cardH = if (text.length > 70) 130f else 105f
+    val resolved = CollisionPlacementSolver.findNonOverlappingPosition(
+      desiredX = dropWx - cardW / 2f,
+      desiredY = dropWy - cardH / 2f,
+      cardWidth = cardW,
+      cardHeight = cardH,
+      existingCards = cards
+    )
+
     cards.add(
       NativeCard(
         id = newId,
-        x = dropWx - 110f,
-        y = dropWy - 40f,
-        width = 220f,
+        x = resolved.x,
+        y = resolved.y,
+        width = cardW,
         text = text,
         color = color,
         pageNumber = pageNumber,
@@ -2751,8 +3128,11 @@ class ThinkspaceView : View {
     )
 
     links.add(NativeLink("link-${System.currentTimeMillis()}", newId, color))
-    triggerShockwave(dropWx, dropWy, color)
+    triggerShockwave(resolved.x + cardW / 2f, resolved.y + cardH / 2f, color)
+    performHapticFeedback(HapticFeedbackConstants.CONFIRM)
     dispatchExtractExcerptEvent(text, pageNumber, color, false)
+    hudToast.show("Excerpt placed without overlap with live Ink-Link!")
+    invalidate()
   }
 
   private fun extractCropToCanvas(cropSel: NativeCropSelection) {
@@ -2768,11 +3148,21 @@ class ThinkspaceView : View {
       p
     } else null
 
+    val cardW = 240f
+    val cardH = 160f
+    val resolved = CollisionPlacementSolver.findNonOverlappingPosition(
+      desiredX = dropWx - cardW / 2f,
+      desiredY = dropWy - cardH / 2f,
+      cardWidth = cardW,
+      cardHeight = cardH,
+      existingCards = cards
+    )
+
     val card = NativeCard(
       id = newId,
-      x = dropWx - 120f,
-      y = dropWy - 50f,
-      width = 240f,
+      x = resolved.x,
+      y = resolved.y,
+      width = cardW,
       text = "[Figure Excerpt]",
       color = selectedColor,
       pageNumber = cropSel.pageIndex + 1,
@@ -2791,7 +3181,7 @@ class ThinkspaceView : View {
     docMode = "text"
 
     links.add(NativeLink("link-${System.currentTimeMillis()}", newId, selectedColor))
-    triggerShockwave(dropWx, dropWy, selectedColor)
+    triggerShockwave(resolved.x + cardW / 2f, resolved.y + cardH / 2f, selectedColor)
     performHapticFeedback(HapticFeedbackConstants.CONFIRM)
     dispatchExtractExcerptEvent(
       card.text,
@@ -2803,6 +3193,29 @@ class ThinkspaceView : View {
       card.y,
       card.id
     )
+    hudToast.show("Extracted figure placed neatly with live Ink-Link!")
+    invalidate()
+  }
+
+  private fun tidyCards() {
+    if (cards.isEmpty()) {
+      hudToast.show("No cards to tidy")
+      invalidate()
+      return
+    }
+    var curX = 60f
+    var curY = 40f
+    for (c in cards) {
+      c.x = curX
+      c.y = curY
+      curX += c.width + 24f
+      if (curX > 600f) {
+        curX = 60f
+        curY += c.getHeight() + 24f
+      }
+    }
+    performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+    hudToast.show("✨ Workspace tidied neatly!")
     invalidate()
   }
 

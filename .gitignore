@@ -91,3 +91,7 @@ nitrogen/
 # Vite / Web builds
 dist/
 example/dist/
+
+# Video / Prompt material
+prompt_mtrl/
+*.mp4
