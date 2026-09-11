@@ -212,9 +212,16 @@ class ThinkspaceView : View {
   var activeTool: String = "select" // "select", "pan", "pen", "highlighter", "eraser"
   var selectedColor: Int = Color.parseColor("#00ADB5")
   var pattern: String = "looseleaf"
-  var panX: Float = 0f
-  var panY: Float = 0f
-  var scaleFactor: Float = 1f
+  val camera = CameraState()
+  var panX: Float
+    get() = camera.panX
+    set(value) { camera.panX = value }
+  var panY: Float
+    get() = camera.panY
+    set(value) { camera.panY = value }
+  var scaleFactor: Float
+    get() = camera.scaleFactor
+    set(value) { camera.scaleFactor = value }
 
   // Real PDF Engine State
   private var activePdfDoc: PdfDocument? = null
@@ -247,67 +254,8 @@ class ThinkspaceView : View {
 
   // Canvas Collections
   private val strokes = mutableListOf<NativeStroke>()
-  private val cards = mutableListOf<NativeCard>().apply {
-    add(
-      NativeCard(
-        id = "card-1",
-        x = 60f,
-        y = 35f,
-        width = 225f,
-        text = "that essay. What was my philosophy of life? I did not know. Some years earlier I would not have been so hesitant. There was a definite-ness...",
-        color = Color.parseColor("#3B82F6"),
-        pageNumber = 23,
-        comment = null,
-        clusterId = null,
-        stackCount = 1,
-        isImage = false,
-        imageUrl = null,
-        isTable = false,
-        tableRows = null
-      )
-    )
-    add(
-      NativeCard(
-        id = "card-2",
-        x = 320f,
-        y = 55f,
-        width = 235f,
-        text = "successively different ages and periods and had for companions men and women who had lived long ago. I had leisure in jail there was no sens...",
-        color = Color.parseColor("#00ADB5"),
-        pageNumber = 22,
-        comment = null,
-        clusterId = null,
-        stackCount = 1,
-        isImage = false,
-        imageUrl = null,
-        isTable = false,
-        tableRows = null
-      )
-    )
-    add(
-      NativeCard(
-        id = "card-3",
-        x = 75f,
-        y = 195f,
-        width = 225f,
-        text = "of life have always a way out of it, if they so choose. That is always in our power to achieve...",
-        color = Color.parseColor("#F59E0B"),
-        pageNumber = 22,
-        comment = null,
-        clusterId = null,
-        stackCount = 1,
-        isImage = false,
-        imageUrl = null,
-        isTable = false,
-        tableRows = null
-      )
-    )
-  }
-  private val links = mutableListOf<NativeLink>().apply {
-    add(NativeLink("link-1", "card-1", Color.parseColor("#3B82F6")))
-    add(NativeLink("link-2", "card-2", Color.parseColor("#00ADB5")))
-    add(NativeLink("link-3", "card-3", Color.parseColor("#F59E0B")))
-  }
+  private val cards = mutableListOf<NativeCard>()
+  private val links = mutableListOf<NativeLink>()
 
   // Active inking state
   private val activePoints = mutableListOf<NativePoint>()
@@ -386,6 +334,7 @@ class ThinkspaceView : View {
   // Toast feedback & HUD Notification Engine
   private var copiedToastText: String? = null
   private val hudToast = HudToastRenderer(density)
+  private val inkLinkRenderer by lazy { InkLinkRenderer(density) }
   private var magneticTargetCardId: String? = null
 
   // Context colors
@@ -632,11 +581,8 @@ class ThinkspaceView : View {
         return true
       }
 
-      val oldScale = scaleFactor
-      scaleFactor = (scaleFactor * detector.scaleFactor).coerceIn(0.4f, 3.5f)
-      val fx = detector.focusX
-      panX = fx - (fx - panX) * (scaleFactor / oldScale)
-      panY = fy - (fy - panY) * (scaleFactor / oldScale)
+      val canvasTopY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio + 14f else 0f
+      camera.applyPinch(detector.focusX, detector.focusY - canvasTopY, detector.scaleFactor)
       dispatchTransformEvent()
       invalidate()
       return true
@@ -882,7 +828,7 @@ class ThinkspaceView : View {
       }
 
       val sec = activeDocument?.sections?.getOrNull(pageIndex) ?: activeDocument?.sections?.firstOrNull()
-      val title = sec?.heading ?: "Discovery of India"
+      val title = sec?.heading ?: activeDocument?.title ?: "Document"
       cropCanvas.drawText("📖 $title", 20f, 36f, headerP)
 
       val lines = sec?.paragraphs ?: listOf("Historical excerpt and excerpted diagram.")
@@ -1166,11 +1112,11 @@ class ThinkspaceView : View {
   }
 
   private fun canvasScreenToWorld(sx: Float, sy: Float, canvasTopY: Float): Pair<Float, Float> {
-    return Pair((sx - panX) / scaleFactor, (sy - canvasTopY - panY) / scaleFactor)
+    return Pair(camera.screenToWorldX(sx), camera.screenToWorldY(sy, canvasTopY))
   }
 
   private fun canvasWorldToScreen(wx: Float, wy: Float, canvasTopY: Float): Pair<Float, Float> {
-    return Pair(wx * scaleFactor + panX, wy * scaleFactor + panY + canvasTopY)
+    return Pair(camera.worldToScreenX(wx), camera.worldToScreenY(wy, canvasTopY))
   }
 
   // ---------------------------------------------------------------------------
@@ -1444,7 +1390,7 @@ class ThinkspaceView : View {
           }
         }
       } else if (activeDocument != null) {
-        // Fallback Structured Text Sections (e.g. Discovery of India Demo)
+        // Fallback Structured Text Sections
         val doc = activeDocument!!
         paragraphLayouts.clear()
         var curY = subheaderH + 16f - docScrollY
@@ -1751,35 +1697,26 @@ class ThinkspaceView : View {
       canvas.drawCircle(rippleOriginX, rippleOriginY, currentRadius, ripplePaint)
     }
 
-    // Dynamic Bezier Ink Links (LiquidText connector cords)
+    // Dynamic Bezier Ink Links (LiquidText connector cords - §8 of spec)
+    val docAnchorScreenX = viewW / 2f
+    val worldDocAnchorX = camera.screenToWorldX(docAnchorScreenX)
+    val worldDocAnchorY = camera.screenToWorldY(splitY, canvasTopY)
+
     for (link in links) {
       val card = cards.find { it.id == link.sourceExcerptId } ?: continue
-      val cardTargetX = card.x + card.width / 2f
-      val cardTargetY = card.y
+      val cardTargetX = card.x + 14f
+      val cardTargetY = card.y + 16f
+      val isCardHeld = draggingCard?.id == card.id || heldCardId == card.id || selectedCardId == card.id || magneticTargetCardId == card.id
 
-      val docAnchorScreenX = viewW / 2f
-      val (worldDocAnchorX, worldDocAnchorY) = canvasScreenToWorld(docAnchorScreenX, splitY, canvasTopY)
-
-      val linkPath = Path().apply {
-        moveTo(worldDocAnchorX, worldDocAnchorY)
-        val midY = (worldDocAnchorY + cardTargetY) / 2f
-        cubicTo(
-          worldDocAnchorX, midY - 20f,
-          cardTargetX, midY + 20f,
-          cardTargetX, cardTargetY
-        )
-      }
-
-      linkGlowPaint.color = link.color
-      linkGlowPaint.alpha = 50
-      canvas.drawPath(linkPath, linkGlowPaint)
-
-      linkPaint.color = link.color
-      canvas.drawPath(linkPath, linkPaint)
-
-      pinPaint.color = link.color
-      canvas.drawCircle(worldDocAnchorX, worldDocAnchorY, 4.5f, pinPaint)
-      canvas.drawCircle(cardTargetX, cardTargetY, 4.5f, pinPaint)
+      inkLinkRenderer.drawTether(
+        canvas = canvas,
+        startX = worldDocAnchorX,
+        startY = worldDocAnchorY,
+        endX = cardTargetX,
+        endY = cardTargetY,
+        color = link.color,
+        isHeld = isCardHeld
+      )
     }
 
     // Completed Canvas Strokes
@@ -2048,24 +1985,18 @@ class ThinkspaceView : View {
           else -> Color.parseColor("#00ADB5")
         }
 
-        // Live Cubic Bezier Spline matching Video
-        val tetherPath = Path()
+        // Live Cubic Bezier Spline matching Video (§8 of spec)
         val startX = if (liftAnchorScreenX > 0f) liftAnchorScreenX else 40f
         val startY = liftAnchorScreenY
-        tetherPath.moveTo(startX, startY)
-        val dy = liftGhostY - startY
-        val cp1Y = startY + dy * 0.45f
-        val cp2Y = liftGhostY - dy * 0.45f
-        tetherPath.cubicTo(startX, cp1Y, liftGhostX, cp2Y, liftGhostX, liftGhostY)
-
-        linkGlowPaint.color = themeColor
-        linkGlowPaint.strokeWidth = 10f * density
-        linkGlowPaint.alpha = 75
-        canvas.drawPath(tetherPath, linkGlowPaint)
-
-        linkPaint.color = themeColor
-        linkPaint.strokeWidth = 3.5f * density
-        canvas.drawPath(tetherPath, linkPaint)
+        inkLinkRenderer.drawTether(
+          canvas = canvas,
+          startX = startX,
+          startY = startY,
+          endX = liftGhostX,
+          endY = liftGhostY,
+          color = themeColor,
+          isHeld = true
+        )
 
         // Ghost Card
         val ghostW = if (liftCandidateIsImage) 250f else 235f
@@ -2968,7 +2899,7 @@ class ThinkspaceView : View {
       }
     }
 
-    // 2. Structured Sections Demo (The Discovery of India)
+    // 2. Structured Sections Document
     if (activeDocument != null && activePdfDoc == null) {
       for (pInfo in paragraphLayouts) {
         val paraH = pInfo.layout.height.toFloat() + 16f

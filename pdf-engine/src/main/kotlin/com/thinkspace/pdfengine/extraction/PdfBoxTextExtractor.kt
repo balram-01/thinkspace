@@ -143,12 +143,29 @@ class PdfBoxTextExtractor(
             val x = text.xDirAdj
             val y = text.yDirAdj
             val width = text.widthDirAdj
-            val height = text.heightDir
+            val fontSize = text.fontSizeInPt
+
+            val font = text.font
+            val fontName = font?.name ?: "Unknown"
+            val descriptor = font?.fontDescriptor
+
+            // Direct glyph ascent/descent metrics (§6 of specification)
+            val ascent = if (descriptor != null && descriptor.ascent > 0f) {
+                (descriptor.ascent / 1000f * fontSize).coerceAtLeast(fontSize * 0.70f)
+            } else {
+                fontSize * 0.80f
+            }
+
+            val descent = if (descriptor != null && descriptor.descent != 0f) {
+                abs(descriptor.descent / 1000f * fontSize).coerceAtLeast(fontSize * 0.15f)
+            } else {
+                fontSize * 0.20f
+            }
 
             val left = min(x, x + width)
             val right = max(x, x + width)
-            val top = min(y - height, y)
-            val bottom = max(y - height, y)
+            val top = y - ascent
+            val bottom = y + descent
 
             val bounds = BoundingBox(
                 left = left,
@@ -156,10 +173,6 @@ class PdfBoxTextExtractor(
                 right = if (right <= left) left + 1f else right,
                 bottom = if (bottom <= top) top + 1f else bottom
             )
-
-            val font = text.font
-            val fontName = font?.name ?: "Unknown"
-            val descriptor = font?.fontDescriptor
 
             val isBold = descriptor?.isForceBold == true ||
                 fontName.contains("Bold", ignoreCase = true) ||

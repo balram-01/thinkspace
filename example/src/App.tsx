@@ -20,91 +20,9 @@ import {
   type WorkspaceDocument,
 } from 'thinkspace';
 
-const INITIAL_ANNOTATIONS: DocumentAnnotation[] = [
-  {
-    id: 'ann-1',
-    sectionId: 'sec-preface',
-    paragraphIndex: 0,
-    pageNumber: 7,
-    color: '#00ADB5',
-    text: 'Prison is not a pleasant place to live in even for a short period, much less for long years...',
-    type: 'highlight',
-  },
-];
-
-const INITIAL_EXCERPTS: ExcerptModel[] = [
-  {
-    id: 'card-1',
-    documentId: 'doc-discovery-of-india',
-    pageNumber: 23,
-    text: 'that essay. What was my philosophy of life? I did not know. Some years earlier I would not have been so hesitant. There was a definite-ness...',
-    color: '#3B82F6',
-    x: 60,
-    y: 35,
-    width: 225,
-  },
-  {
-    id: 'card-2',
-    documentId: 'doc-discovery-of-india',
-    pageNumber: 22,
-    text: 'successively different ages and periods and had for companions men and women who had lived long ago. I had leisure in jail there was no sens...',
-    color: '#00ADB5',
-    x: 320,
-    y: 55,
-    width: 235,
-  },
-  {
-    id: 'card-3',
-    documentId: 'doc-discovery-of-india',
-    pageNumber: 22,
-    text: 'of life have always a way out of it, if they so choose. That is always in our power to achieve...',
-    color: '#F59E0B',
-    x: 75,
-    y: 195,
-    width: 225,
-  },
-];
-
-const INITIAL_LINKS: InkLink[] = [
-  { id: 'link-1', sourceExcerptId: 'card-1', color: '#3B82F6' },
-  { id: 'link-2', sourceExcerptId: 'card-2', color: '#00ADB5' },
-  { id: 'link-3', sourceExcerptId: 'card-3', color: '#F59E0B' },
-];
-
-const DEFAULT_DOC: WorkspaceDocument = {
-  id: 'doc-discovery-of-india',
-  title: 'The Discovery of India',
-  pageCount: 38,
-  sections: [
-    {
-      id: 'sec-preface',
-      pageNumber: 7,
-      heading: 'PREFACE',
-      paragraphs: [
-        'Prison is not a pleasant place to live in even for a short period, much less for long years. But it brings a certain detachment and perspective.',
-        'In Ahmednagar Fort, where we were cut off from the outside world, my mind wandered over India and its long story. What was this India?',
-      ],
-    },
-    {
-      id: 'sec-philosophy',
-      pageNumber: 22,
-      heading: 'PHILOSOPHY OF LIFE',
-      paragraphs: [
-        'What was my philosophy of life? I did not know. Some years earlier I would not have been so hesitant. There was a definiteness about my thinking then.',
-        'Man has leisure in jail; there is no sense of hurry. In the long hours of evening, history unfolds like an endless tapestry.',
-      ],
-    },
-    {
-      id: 'sec-past',
-      pageNumber: 23,
-      heading: 'THE BURDEN OF THE PAST',
-      paragraphs: [
-        'The past oppresses me; it surrounds me with its invisible bonds. Yet without that past, what are we?',
-        'The living present is an inheritance of five thousand years of continuous human experience. It shapes our impulses and thought patterns.',
-      ],
-    },
-  ],
-};
+const INITIAL_ANNOTATIONS: DocumentAnnotation[] = [];
+const INITIAL_EXCERPTS: ExcerptModel[] = [];
+const INITIAL_LINKS: InkLink[] = [];
 
 export default function App() {
   const [appScreen, setAppScreen] = useState<'workspace' | 'pdftest'>(
@@ -125,7 +43,7 @@ export default function App() {
   const [pdfUri, setPdfUri] = useState<string | null>(null);
 
   // Active document object for ThinkspaceView
-  const activeDocument: WorkspaceDocument = useMemo(() => {
+  const activeDocument: WorkspaceDocument | undefined = useMemo(() => {
     if (pdfDoc) {
       return {
         id: pdfDoc.documentId,
@@ -134,7 +52,7 @@ export default function App() {
         uri: pdfUri || undefined,
       };
     }
-    return DEFAULT_DOC;
+    return undefined;
   }, [pdfDoc, pdfUri]);
 
   // ── Import PDF via system file picker ─────────────────────────────────────
@@ -174,7 +92,7 @@ export default function App() {
   }
 
   const docTitle =
-    pdfDoc?.title || (pdfDoc ? 'PDF Document' : 'The Discovery of India');
+    pdfDoc?.title || (pdfDoc ? 'PDF Document' : 'No Document Opened');
 
   return (
     <View style={styles.container}>
@@ -265,7 +183,7 @@ export default function App() {
             const newId = item.id || `excerpt-${Date.now()}`;
             const newCard: ExcerptModel = {
               id: newId,
-              documentId: pdfDoc?.documentId ?? 'doc-discovery-of-india',
+              documentId: pdfDoc?.documentId ?? 'doc-active',
               pageNumber: item.pageNumber,
               text: item.text,
               color: item.color,
