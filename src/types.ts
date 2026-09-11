@@ -1,4 +1,4 @@
-export type WorkspacePattern = 'dots' | 'grid' | 'looseleaf' | 'none';
+export type WorkspacePattern = 'dots' | 'grid' | 'looseleaf' | 'plain' | 'none';
 
 export type WorkspaceTool =
   'select' | 'pen' | 'highlighter' | 'eraser' | 'addNote';
@@ -115,6 +115,7 @@ export interface ExcerptModel {
   isImage?: boolean;
   isTable?: boolean;
   tableData?: ExtractedTable;
+  sourceRects?: { left: number; top: number; right: number; bottom: number }[];
 }
 
 export interface InkLink {
@@ -180,6 +181,12 @@ export interface ThinkspaceViewProps {
     color: string;
     isTable: boolean;
     isImage: boolean;
+    sourceRects?: {
+      left: number;
+      top: number;
+      right: number;
+      bottom: number;
+    }[];
   }) => void;
   onToggleSqueeze?: (isSqueezed: boolean) => void;
   onSelectText?: (selection: DocumentSelection | null) => void;

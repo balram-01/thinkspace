@@ -313,6 +313,7 @@ export default function App() {
               width: item.isImage ? 240 : 230,
               isImage: item.isImage,
               imageUrl: item.imageUrl,
+              sourceRects: item.sourceRects,
             };
             setExcerpts((prev) => [...prev, newCard]);
             setInkLinks((prev) => [

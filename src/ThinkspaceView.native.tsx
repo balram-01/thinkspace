@@ -151,6 +151,7 @@ export const ThinkspaceView: React.FC<ThinkspaceViewProps> = ({
                 id,
                 x,
                 y,
+                sourceRects,
               } = e.nativeEvent;
               onExtractExcerpt({
                 id,
@@ -162,6 +163,7 @@ export const ThinkspaceView: React.FC<ThinkspaceViewProps> = ({
                 imageUrl,
                 x,
                 y,
+                sourceRects,
               } as any);
             }
           : undefined
