@@ -290,9 +290,14 @@ class ThinkspaceView : View {
   private var cropStartY = 0f
   private var cropPageIndex = 0
 
-  // Fallback Text Selection state
+  // Text Selection Handle & Word Navigation state
   private val paragraphLayouts = mutableListOf<ParagraphLayoutInfo>()
   private var activeSelection: NativeDocumentSelection? = null
+  private var activeStructuredPInfo: ParagraphLayoutInfo? = null
+  private var activeStructuredStartOffset = 0
+  private var activeStructuredEndOffset = 0
+  private var isDraggingStartHandle = false
+  private var isDraggingEndHandle = false
 
   // Cross-Zone Lift-and-Drag state
   private var isLiftingExcerpt = false
@@ -592,114 +597,209 @@ class ThinkspaceView : View {
   }
   private val scaleGestureDetector = ScaleGestureDetector(context ?: throw IllegalStateException("Context required"), scaleGestureListener)
 
-  // Long-press gesture detector for instant LiquidText-style Figure / Excerpt lifting
+  // Long-press gesture detector for Android-style Text Selection (handles & copy/paste callout)
   private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
     override fun onLongPress(e: MotionEvent) {
-      triggerLongPressLift(e.x, e.y)
+      triggerLongPressSelect(e.x, e.y)
     }
   })
 
-  private fun triggerLongPressLift(x: Float, y: Float) {
+  private fun triggerLongPressSelect(x: Float, y: Float) {
     val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
     if (y < splitY - 14f && y >= subheaderH) {
-      performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
       isScrollingDoc = false
 
-      // 1. Check if there is a real PDF page under touch
-      for (pl in pageLayouts) {
-        if (!pl.isFolded && pl.boundsOnScreen.contains(x, y)) {
-          // Check if there is text directly under touch
-          val words = pageWordsCache[pl.pageIndex]
-          val px = (x - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
-          val py = (y - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
-          val hitWord = words?.find { w ->
-            px >= w.bounds.left - 6f && px <= w.bounds.right + 6f && py >= w.bounds.top - 8f && py <= w.bounds.bottom + 8f
-          }
+      // 1. Real PDF document
+      if (activePdfDoc != null) {
+        for (pl in pageLayouts) {
+          if (!pl.isFolded && pl.boundsOnScreen.contains(x, y)) {
+            val words = pageWordsCache[pl.pageIndex]
+            if (!words.isNullOrEmpty()) {
+              val px = (x - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
+              val py = (y - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
+              val hitWord = words.find { w ->
+                val b = w.bounds
+                px >= b.left - 6f && px <= b.right + 6f && py >= b.top - 8f && py <= b.bottom + 8f
+              } ?: words.minByOrNull { w ->
+                val b = w.bounds
+                val cx = (b.left + b.right) / 2f
+                val cy = (b.top + b.bottom) / 2f
+                (cx - px) * (cx - px) + (cy - py) * (cy - py)
+              }?.takeIf { w ->
+                val b = w.bounds
+                val cx = (b.left + b.right) / 2f
+                val cy = (b.top + b.bottom) / 2f
+                val distSq = (cx - px) * (cx - px) + (cy - py) * (cy - py)
+                distSq < 48f * 48f
+              }
 
-          if (hitWord != null) {
-            isLiftingExcerpt = true
-            liftCandidateText = hitWord.text
-            liftCandidatePage = pl.pageIndex + 1
-            liftCandidateColor = selectedColor
-            liftCandidateIsImage = false
-            liftCandidateImagePath = null
-            liftCandidateBitmap = null
-            liftGhostX = x
-            liftGhostY = y
-            liftAnchorScreenX = x
-            liftAnchorScreenY = y
-            activeCropSelection = null
-            activePdfSelection = null
+              if (hitWord != null) {
+                updatePdfSelection(pl, hitWord, hitWord)
+                isDraggingEndHandle = true
+                isDraggingStartHandle = false
+                isScrollingDoc = false
+                parent?.requestDisallowInterceptTouchEvent(true)
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                invalidate()
+                return
+              }
+            }
+
+            // If crop mode is explicitly active, long press can start figure crop
+            if (docMode == "crop") {
+              val cropW = min(pl.boundsOnScreen.width() * 0.85f, 320f * density)
+              val cropH = min(pl.boundsOnScreen.height() * 0.45f, 200f * density)
+              val sRect = RectF(
+                (x - cropW / 2f).coerceIn(pl.boundsOnScreen.left + 8f * density, pl.boundsOnScreen.right - cropW - 8f * density),
+                (y - cropH / 2f).coerceIn(pl.boundsOnScreen.top + 8f * density, pl.boundsOnScreen.bottom - cropH - 8f * density),
+                (x + cropW / 2f).coerceIn(pl.boundsOnScreen.left + cropW + 8f * density, pl.boundsOnScreen.right - 8f * density),
+                (y + cropH / 2f).coerceIn(pl.boundsOnScreen.top + cropH + 8f * density, pl.boundsOnScreen.bottom - 8f * density)
+              )
+              val pW = pl.pageSize.width
+              val pH = pl.pageSize.height
+              val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+              val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+              val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+              val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+
+              val cW = 200f * density
+              val cH = 44f * density
+              val cLeft = sRect.centerX() - cW / 2f
+              val cTop = if (sRect.top - cH - 12f * density > subheaderH) sRect.top - cH - 12f * density else sRect.bottom + 12f * density
+              val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
+              val excerptBtn = RectF(cLeft + 8f * density, cTop + 4f * density, cLeft + cW - 44f * density, cTop + cH - 4f * density)
+              val closeBtn = RectF(cLeft + cW - 40f * density, cTop + 4f * density, cLeft + cW - 4f * density, cTop + cH - 4f * density)
+
+              activeCropSelection = NativeCropSelection(
+                pageIndex = pl.pageIndex,
+                pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
+                screenRect = sRect,
+                calloutRect = calloutR,
+                calloutExcerptBtn = excerptBtn,
+                calloutCloseBtn = closeBtn
+              )
+              activePdfSelection = null
+              performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+              invalidate()
+              return
+            }
+          }
+        }
+      }
+
+      // 2. Structured Sections Document
+      if (activeDocument != null) {
+        for (pInfo in paragraphLayouts) {
+          val paraH = pInfo.layout.height.toFloat() + 16f
+          val pRect = RectF(pInfo.paperX, pInfo.topY, pInfo.paperX + pInfo.width + 56f, pInfo.topY + paraH)
+          if (pRect.contains(x, y)) {
+            updateStructuredSelection(pInfo, x, y)
+            isDraggingEndHandle = true
+            isDraggingStartHandle = false
+            isScrollingDoc = false
+            parent?.requestDisallowInterceptTouchEvent(true)
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
             invalidate()
             return
           }
-
-          val cropW = min(pl.boundsOnScreen.width() * 0.85f, 320f * density)
-          val cropH = min(pl.boundsOnScreen.height() * 0.45f, 200f * density)
-          val sRect = RectF(
-            (x - cropW / 2f).coerceIn(pl.boundsOnScreen.left + 8f * density, pl.boundsOnScreen.right - cropW - 8f * density),
-            (y - cropH / 2f).coerceIn(pl.boundsOnScreen.top + 8f * density, pl.boundsOnScreen.bottom - cropH - 8f * density),
-            (x + cropW / 2f).coerceIn(pl.boundsOnScreen.left + cropW + 8f * density, pl.boundsOnScreen.right - 8f * density),
-            (y + cropH / 2f).coerceIn(pl.boundsOnScreen.top + cropH + 8f * density, pl.boundsOnScreen.bottom - 8f * density)
-          )
-          val pW = pl.pageSize.width
-          val pH = pl.pageSize.height
-          val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-          val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
-          val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-          val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
-
-          val bounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom))
-          val bmp = generateCropBitmap(pl.pageIndex, bounds)
-
-          isLiftingExcerpt = true
-          liftCandidateText = "[Figure Crop]"
-          liftCandidatePage = pl.pageIndex + 1
-          liftCandidateColor = selectedColor
-          liftCandidateIsImage = true
-          if (bmp != null) {
-            val p = saveCropToFile(bmp)
-            liftCandidateImagePath = p
-            liftCandidateBitmap = bmp
-            cardBitmapCache.put(p, bmp)
-          } else {
-            liftCandidateImagePath = null
-            liftCandidateBitmap = null
-          }
-          liftGhostX = x
-          liftGhostY = y
-          liftAnchorScreenX = x
-          liftAnchorScreenY = y
-          activeCropSelection = null
-          activePdfSelection = null
-          invalidate()
-          return
         }
-      }
-
-      // 2. Fallback structured demo document
-      if (activeDocument != null) {
-        val bmp = generateCropBitmap(0, BoundingBox(0f, 0f, 400f, 260f))
-        isLiftingExcerpt = true
-        liftCandidateText = "Chapter Excerpt"
-        liftCandidatePage = 1
-        liftCandidateColor = selectedColor
-        liftCandidateIsImage = true
-        if (bmp != null) {
-          val p = saveCropToFile(bmp)
-          liftCandidateImagePath = p
-          liftCandidateBitmap = bmp
-          cardBitmapCache.put(p, bmp)
-        }
-        liftGhostX = x
-        liftGhostY = y
-        liftAnchorScreenX = x
-        liftAnchorScreenY = y
-        activeCropSelection = null
-        activePdfSelection = null
-        invalidate()
       }
     }
+  }
+
+  private fun updateStructuredSelection(pInfo: ParagraphLayoutInfo, touchX: Float, touchY: Float) {
+    val relY = (touchY - pInfo.topY).coerceIn(0f, pInfo.layout.height.toFloat() - 1f)
+    val line = pInfo.layout.getLineForVertical(relY.toInt())
+    val relX = touchX - pInfo.paperX
+    val offset = pInfo.layout.getOffsetForHorizontal(line, relX).coerceIn(0, pInfo.text.length)
+
+    var start = offset
+    var end = offset
+    while (start > 0 && !pInfo.text[start - 1].isWhitespace()) {
+      start--
+    }
+    while (end < pInfo.text.length && !pInfo.text[end].isWhitespace()) {
+      end++
+    }
+    if (start >= end) {
+      start = 0
+      end = min(pInfo.text.length, 20)
+    }
+
+    updateStructuredSelectionByOffsets(pInfo, start, end)
+  }
+
+  private fun updateStructuredSelectionByOffsets(pInfo: ParagraphLayoutInfo, startOffset: Int, endOffset: Int) {
+    val clampedStart = startOffset.coerceIn(0, pInfo.text.length)
+    val clampedEnd = max(clampedStart + 1, endOffset).coerceIn(clampedStart, pInfo.text.length)
+    val rawText = pInfo.text.substring(clampedStart, clampedEnd)
+    val selText = if (rawText.trim().isNotEmpty()) rawText.trim() else rawText
+
+    val startLine = pInfo.layout.getLineForOffset(clampedStart)
+    val endLine = pInfo.layout.getLineForOffset(clampedEnd)
+
+    val rects = mutableListOf<RectF>()
+    for (l in startLine..endLine) {
+      val lStart = if (l == startLine) clampedStart else pInfo.layout.getLineStart(l)
+      val lEnd = if (l == endLine) clampedEnd else pInfo.layout.getLineEnd(l)
+      if (lStart < lEnd) {
+        val lX1 = pInfo.paperX + pInfo.layout.getPrimaryHorizontal(lStart)
+        val lX2 = pInfo.paperX + pInfo.layout.getPrimaryHorizontal(lEnd)
+        val lTop = pInfo.topY + pInfo.layout.getLineTop(l)
+        val lBottom = pInfo.topY + pInfo.layout.getLineBottom(l)
+        rects.add(RectF(min(lX1, lX2), lTop, max(lX1, lX2), lBottom))
+      }
+    }
+    if (rects.isEmpty()) {
+      val lTop = pInfo.topY + pInfo.layout.getLineTop(startLine)
+      val lBottom = pInfo.topY + pInfo.layout.getLineBottom(startLine)
+      rects.add(RectF(pInfo.paperX, lTop, pInfo.paperX + pInfo.width, lBottom))
+    }
+
+    val firstR = rects.first()
+    val lastR = rects.last()
+    val startHandle = RectF(firstR.left - 14f * density, firstR.bottom - 4f * density, firstR.left + 14f * density, firstR.bottom + 22f * density)
+    val endHandle = RectF(lastR.right - 14f * density, lastR.bottom - 4f * density, lastR.right + 14f * density, lastR.bottom + 22f * density)
+
+    val cW = 320f * density
+    val cH = 74f * density
+    val cLeft = ((rects.minOf { it.left } + rects.maxOf { it.right }) / 2f - cW / 2f).coerceIn(10f * density, max(10f * density, width - cW - 10f * density))
+    val cTop = (if (firstR.top - cH - 16f * density > subheaderH) firstR.top - cH - 16f * density else lastR.bottom + 16f * density).coerceIn(subheaderH + 4f * density, max(subheaderH + 4f * density, height * splitRatio - cH - 8f * density))
+    val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
+
+    val closeBtn = RectF(cLeft + cW - 34f * density, cTop + 4f * density, cLeft + cW - 6f * density, cTop + 30f * density)
+    val row2Top = cTop + 34f * density
+    val row2Bottom = cTop + cH - 6f * density
+    val excerptBtn = RectF(cLeft + 8f * density, row2Top, cLeft + 86f * density, row2Bottom)
+    val copyBtn = RectF(cLeft + 90f * density, row2Top, cLeft + 144f * density, row2Bottom)
+    val hlBtn = RectF(cLeft + 148f * density, row2Top, cLeft + 224f * density, row2Bottom)
+    val addWordLeftBtn = RectF(cLeft + 228f * density, row2Top, cLeft + 268f * density, row2Bottom)
+    val addWordRightBtn = RectF(cLeft + 272f * density, row2Top, cLeft + 312f * density, row2Bottom)
+    val selectAllBtn = RectF(cLeft + 316f * density, row2Top, cLeft + cW - 8f * density, row2Bottom)
+
+    activeStructuredPInfo = pInfo
+    activeStructuredStartOffset = clampedStart
+    activeStructuredEndOffset = clampedEnd
+
+    activePdfSelection = NativePdfSelection(
+      pageIndex = pInfo.pageNumber - 1,
+      text = selText,
+      highlightRects = rects,
+      startHandle = startHandle,
+      endHandle = endHandle,
+      calloutRect = calloutR,
+      calloutExcerptBtn = excerptBtn,
+      calloutCopyBtn = copyBtn,
+      calloutHighlightBtn = hlBtn,
+      calloutCloseBtn = closeBtn,
+      startWordIndex = 0,
+      endWordIndex = 0,
+      calloutAddWordLeftBtn = addWordLeftBtn,
+      calloutAddWordRightBtn = addWordRightBtn,
+      calloutSelectAllBtn = selectAllBtn,
+      charCountText = "${selText.length} chars selected \"${if (selText.length > 20) selText.substring(0, 18) + "..." else selText}\""
+    )
+    invalidate()
   }
 
   init {
@@ -1554,69 +1654,86 @@ class ThinkspaceView : View {
           canvas.drawLine(r.left, r.bottom, r.right, r.bottom, selectionBorderPaint)
         }
 
-        // Handles
+        // Handles matching Android Copy & Paste handles
         if (pdfSel.highlightRects.isNotEmpty()) {
           val firstR = pdfSel.highlightRects.first()
-          canvas.drawLine(firstR.left, firstR.top - 6f, firstR.left, firstR.bottom, selectionHandleBarPaint)
-          canvas.drawCircle(firstR.left, firstR.top - 8f, 7.5f, selectionHandlePinPaint)
-
           val lastR = pdfSel.highlightRects.last()
-          canvas.drawLine(lastR.right, lastR.top, lastR.right, lastR.bottom + 6f, selectionHandleBarPaint)
-          canvas.drawCircle(lastR.right, lastR.bottom + 8f, 7.5f, selectionHandlePinPaint)
+
+          val handleColor = Color.parseColor("#00ADB5")
+          val pinPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = handleColor
+            style = Paint.Style.FILL
+          }
+          val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = handleColor
+            strokeWidth = 2.5f * density
+            strokeCap = Paint.Cap.ROUND
+            style = Paint.Style.STROKE
+          }
+
+          // Start handle: vertical cyan bar + teardrop pin at bottom-left
+          canvas.drawLine(firstR.left, firstR.top, firstR.left, firstR.bottom + 8f * density, barPaint)
+          canvas.drawCircle(firstR.left - 4f * density, firstR.bottom + 8f * density, 8f * density, pinPaint)
+
+          // End handle: vertical cyan bar + teardrop pin at bottom-right
+          canvas.drawLine(lastR.right, lastR.top, lastR.right, lastR.bottom + 8f * density, barPaint)
+          canvas.drawCircle(lastR.right + 4f * density, lastR.bottom + 8f * density, 8f * density, pinPaint)
         }
 
-        // Sleek 2-Tier Callout Dock
-        val cRect = pdfSel.calloutRect
-        canvas.drawRoundRect(cRect, 12f * density, 12f * density, calloutBgPaint)
-        canvas.drawRoundRect(cRect, 12f * density, 12f * density, calloutBorderPaint)
+        // Sleek 2-Tier Callout Dock (hidden during active handle dragging for clean feedback)
+        if (!isDraggingStartHandle && !isDraggingEndHandle) {
+          val cRect = pdfSel.calloutRect
+          canvas.drawRoundRect(cRect, 12f * density, 12f * density, calloutBgPaint)
+          canvas.drawRoundRect(cRect, 12f * density, 12f * density, calloutBorderPaint)
 
-        // Tier 1 Header: Chars Count & Snippet Preview + Close Button
-        val countPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#38BDF8")
-          textSize = 12f * density
-          isFakeBoldText = true
+          // Tier 1 Header: Chars Count & Snippet Preview + Close Button
+          val countPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#38BDF8")
+            textSize = 12f * density
+            isFakeBoldText = true
+          }
+          val headerDisplay = if (pdfSel.charCountText.isNotEmpty()) pdfSel.charCountText else "${pdfSel.text.length} chars selected"
+          canvas.drawText(headerDisplay, cRect.left + 12f * density, cRect.top + 20f * density, countPaint)
+          canvas.drawText("✕", pdfSel.calloutCloseBtn.left + 8f * density, cRect.top + 20f * density, closeBtnTextPaint)
+
+          // Tier 2 Actions: [+ Excerpt] [Copy] [Highlight] [+Word] [Word+] [All]
+          canvas.drawRoundRect(pdfSel.calloutExcerptBtn, 6f * density, 6f * density, calloutPrimaryBtnPaint)
+          canvas.drawText("+ Excerpt", pdfSel.calloutExcerptBtn.left + 10f * density, pdfSel.calloutExcerptBtn.centerY() + 5f * density, calloutTextPaint)
+
+          canvas.drawRoundRect(pdfSel.calloutCopyBtn, 6f * density, 6f * density, calloutSecondaryBtnPaint)
+          canvas.drawText(copiedToastText ?: "Copy", pdfSel.calloutCopyBtn.left + 10f * density, pdfSel.calloutCopyBtn.centerY() + 5f * density, calloutSecondaryTextPaint)
+
+          canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 6f * density, 6f * density, calloutHighlightBtnPaint)
+          canvas.drawText("Highlight", pdfSel.calloutHighlightBtn.left + 8f * density, pdfSel.calloutHighlightBtn.centerY() + 5f * density, calloutTextPaint)
+
+          // Dynamic Word Boundaries: +Word, Word+, All
+          val auxBtnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#1E293B")
+            style = Paint.Style.FILL
+          }
+          val auxBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#334155")
+            strokeWidth = 1f * density
+            style = Paint.Style.STROKE
+          }
+          val auxTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#E2E8F0")
+            textSize = 11f * density
+            isFakeBoldText = true
+          }
+
+          canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 5f * density, 5f * density, auxBtnPaint)
+          canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 5f * density, 5f * density, auxBorderPaint)
+          canvas.drawText("+Word", pdfSel.calloutAddWordLeftBtn.left + 4f * density, pdfSel.calloutAddWordLeftBtn.centerY() + 4f * density, auxTextPaint)
+
+          canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 5f * density, 5f * density, auxBtnPaint)
+          canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 5f * density, 5f * density, auxBorderPaint)
+          canvas.drawText("Word+", pdfSel.calloutAddWordRightBtn.left + 4f * density, pdfSel.calloutAddWordRightBtn.centerY() + 4f * density, auxTextPaint)
+
+          canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 5f * density, 5f * density, auxBtnPaint)
+          canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 5f * density, 5f * density, auxBorderPaint)
+          canvas.drawText("All", pdfSel.calloutSelectAllBtn.left + 8f * density, pdfSel.calloutSelectAllBtn.centerY() + 4f * density, auxTextPaint)
         }
-        val headerDisplay = if (pdfSel.charCountText.isNotEmpty()) pdfSel.charCountText else "${pdfSel.text.length} chars selected"
-        canvas.drawText(headerDisplay, cRect.left + 12f * density, cRect.top + 20f * density, countPaint)
-        canvas.drawText("✕", pdfSel.calloutCloseBtn.left + 8f * density, cRect.top + 20f * density, closeBtnTextPaint)
-
-        // Tier 2 Actions: [+ Excerpt] [Copy] [Highlight] [+Word] [Word+] [All]
-        canvas.drawRoundRect(pdfSel.calloutExcerptBtn, 6f * density, 6f * density, calloutPrimaryBtnPaint)
-        canvas.drawText("+ Excerpt", pdfSel.calloutExcerptBtn.left + 10f * density, pdfSel.calloutExcerptBtn.centerY() + 5f * density, calloutTextPaint)
-
-        canvas.drawRoundRect(pdfSel.calloutCopyBtn, 6f * density, 6f * density, calloutSecondaryBtnPaint)
-        canvas.drawText(copiedToastText ?: "Copy", pdfSel.calloutCopyBtn.left + 10f * density, pdfSel.calloutCopyBtn.centerY() + 5f * density, calloutSecondaryTextPaint)
-
-        canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 6f * density, 6f * density, calloutHighlightBtnPaint)
-        canvas.drawText("Highlight", pdfSel.calloutHighlightBtn.left + 8f * density, pdfSel.calloutHighlightBtn.centerY() + 5f * density, calloutTextPaint)
-
-        // Dynamic Word Boundaries: +Word, Word+, All
-        val auxBtnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#1E293B")
-          style = Paint.Style.FILL
-        }
-        val auxBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#334155")
-          strokeWidth = 1f * density
-          style = Paint.Style.STROKE
-        }
-        val auxTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#E2E8F0")
-          textSize = 11f * density
-          isFakeBoldText = true
-        }
-
-        canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 5f * density, 5f * density, auxBtnPaint)
-        canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 5f * density, 5f * density, auxBorderPaint)
-        canvas.drawText("+Word", pdfSel.calloutAddWordLeftBtn.left + 4f * density, pdfSel.calloutAddWordLeftBtn.centerY() + 4f * density, auxTextPaint)
-
-        canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 5f * density, 5f * density, auxBtnPaint)
-        canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 5f * density, 5f * density, auxBorderPaint)
-        canvas.drawText("Word+", pdfSel.calloutAddWordRightBtn.left + 4f * density, pdfSel.calloutAddWordRightBtn.centerY() + 4f * density, auxTextPaint)
-
-        canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 5f * density, 5f * density, auxBtnPaint)
-        canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 5f * density, 5f * density, auxBorderPaint)
-        canvas.drawText("All", pdfSel.calloutSelectAllBtn.left + 8f * density, pdfSel.calloutSelectAllBtn.centerY() + 4f * density, auxTextPaint)
       }
 
       // Draw Figure Crop Selection matching Video
@@ -2388,35 +2505,133 @@ class ThinkspaceView : View {
               return true
             }
             if (pdfSel.calloutAddWordLeftBtn.contains(sx, sy)) {
-              val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
-              if (pl != null && pdfSel.startWordIndex > 0) {
-                updatePdfSelectionByIndex(pl, pdfSel.startWordIndex - 1, pdfSel.endWordIndex)
+              if (activePdfDoc != null) {
+                val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
+                if (pl != null && pdfSel.startWordIndex > 0) {
+                  updatePdfSelectionByIndex(pl, pdfSel.startWordIndex - 1, pdfSel.endWordIndex)
+                  performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                }
+              } else if (activeStructuredPInfo != null) {
+                val pInfo = activeStructuredPInfo!!
+                var newStart = (activeStructuredStartOffset - 1).coerceAtLeast(0)
+                while (newStart > 0 && pInfo.text[newStart].isWhitespace()) {
+                  newStart--
+                }
+                while (newStart > 0 && !pInfo.text[newStart - 1].isWhitespace()) {
+                  newStart--
+                }
+                updateStructuredSelectionByOffsets(pInfo, newStart, activeStructuredEndOffset)
                 performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
               }
               return true
             }
             if (pdfSel.calloutAddWordRightBtn.contains(sx, sy)) {
-              val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
-              val words = pageWordsCache[pdfSel.pageIndex]
-              if (pl != null && words != null && pdfSel.endWordIndex < words.size - 1) {
-                updatePdfSelectionByIndex(pl, pdfSel.startWordIndex, pdfSel.endWordIndex + 1)
+              if (activePdfDoc != null) {
+                val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
+                val words = pageWordsCache[pdfSel.pageIndex]
+                if (pl != null && words != null && pdfSel.endWordIndex < words.size - 1) {
+                  updatePdfSelectionByIndex(pl, pdfSel.startWordIndex, pdfSel.endWordIndex + 1)
+                  performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                }
+              } else if (activeStructuredPInfo != null) {
+                val pInfo = activeStructuredPInfo!!
+                var newEnd = (activeStructuredEndOffset + 1).coerceAtMost(pInfo.text.length)
+                while (newEnd < pInfo.text.length && pInfo.text[newEnd].isWhitespace()) {
+                  newEnd++
+                }
+                while (newEnd < pInfo.text.length && !pInfo.text[newEnd].isWhitespace()) {
+                  newEnd++
+                }
+                updateStructuredSelectionByOffsets(pInfo, activeStructuredStartOffset, newEnd)
                 performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
               }
               return true
             }
             if (pdfSel.calloutSelectAllBtn.contains(sx, sy)) {
-              val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
-              val words = pageWordsCache[pdfSel.pageIndex]
-              if (pl != null && !words.isNullOrEmpty()) {
-                updatePdfSelectionByIndex(pl, 0, words.size - 1)
+              if (activePdfDoc != null) {
+                val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
+                val words = pageWordsCache[pdfSel.pageIndex]
+                if (pl != null && !words.isNullOrEmpty()) {
+                  updatePdfSelectionByIndex(pl, 0, words.size - 1)
+                  performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                }
+              } else if (activeStructuredPInfo != null) {
+                val pInfo = activeStructuredPInfo!!
+                updateStructuredSelectionByOffsets(pInfo, 0, pInfo.text.length)
                 performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
               }
               return true
             }
             if (pdfSel.calloutCloseBtn.contains(sx, sy)) {
               activePdfSelection = null
+              activeStructuredPInfo = null
               invalidate()
               return true
+            }
+          }
+
+          // Check if touch hits selection handles (start pin or end pin)
+          if (pdfSel != null) {
+            val firstR = pdfSel.highlightRects.firstOrNull()
+            val lastR = pdfSel.highlightRects.lastOrNull()
+            if (firstR != null && lastR != null) {
+              val startPinX = firstR.left - 4f * density
+              val startPinY = firstR.bottom + 8f * density
+              val endPinX = lastR.right + 4f * density
+              val endPinY = lastR.bottom + 8f * density
+
+              val hitRadius = 36f * density
+              val distToStartPin = hypot(sx - startPinX, sy - startPinY)
+              val distToEndPin = hypot(sx - endPinX, sy - endPinY)
+
+              val startHit = distToStartPin <= hitRadius || RectF(
+                firstR.left - 28f * density,
+                firstR.top - 16f * density,
+                firstR.left + 28f * density,
+                firstR.bottom + 36f * density
+              ).contains(sx, sy)
+
+              val endHit = distToEndPin <= hitRadius || RectF(
+                lastR.right - 28f * density,
+                lastR.top - 16f * density,
+                lastR.right + 28f * density,
+                lastR.bottom + 36f * density
+              ).contains(sx, sy)
+
+              if (startHit) {
+                isDraggingStartHandle = true
+                isDraggingEndHandle = false
+                isScrollingDoc = false
+                parent?.requestDisallowInterceptTouchEvent(true)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                invalidate()
+                return true
+              }
+              if (endHit) {
+                isDraggingEndHandle = true
+                isDraggingStartHandle = false
+                isScrollingDoc = false
+                parent?.requestDisallowInterceptTouchEvent(true)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                invalidate()
+                return true
+              }
+
+              // Also check if touch lands inside active selection highlight
+              if (pdfSel.highlightRects.any { it.contains(sx, sy) }) {
+                if (distToStartPin <= distToEndPin) {
+                  isDraggingStartHandle = true
+                  isDraggingEndHandle = false
+                } else {
+                  isDraggingEndHandle = true
+                  isDraggingStartHandle = false
+                }
+                isScrollingDoc = false
+                parent?.requestDisallowInterceptTouchEvent(true)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                invalidate()
+                return true
+              }
             }
           }
 
@@ -2441,49 +2656,11 @@ class ThinkspaceView : View {
           // Check Folded Accordion Pleat Tap -> Expand
           for (pl in pageLayouts) {
             if (pl.isFolded && pl.boundsOnScreen.contains(sx, sy)) {
-              // Unfold this page or disable squeeze
               isSqueezed = false
               dispatchToggleSqueezeEvent(false)
               invalidate()
               return true
             }
-          }
-
-          // Check Lift from Active Selection
-          if (pdfSel != null && pdfSel.highlightRects.any { it.contains(sx, sy) }) {
-            isLiftingExcerpt = true
-            liftCandidateText = pdfSel.text
-            liftCandidatePage = pdfSel.pageIndex + 1
-            liftCandidateColor = selectedColor
-            liftCandidateIsImage = false
-            liftGhostX = sx
-            liftGhostY = sy
-            liftAnchorScreenX = sx
-            liftAnchorScreenY = sy
-            return true
-          }
-
-          if (cropSel != null && cropSel.screenRect.contains(sx, sy)) {
-            isLiftingExcerpt = true
-            liftCandidateText = "[Figure Crop]"
-            liftCandidatePage = cropSel.pageIndex + 1
-            liftCandidateColor = selectedColor
-            liftCandidateIsImage = true
-            val bmp = generateCropBitmap(cropSel.pageIndex, cropSel.pageBounds)
-            if (bmp != null) {
-              val p = saveCropToFile(bmp)
-              liftCandidateImagePath = p
-              liftCandidateBitmap = bmp
-              cardBitmapCache.put(p, bmp)
-            } else {
-              liftCandidateImagePath = null
-              liftCandidateBitmap = null
-            }
-            liftGhostX = sx
-            liftGhostY = sy
-            liftAnchorScreenX = sx
-            liftAnchorScreenY = sy
-            return true
           }
 
           // Crop Drag Start (Real PDF or Demo Document)
@@ -2516,14 +2693,14 @@ class ThinkspaceView : View {
           downDocX = sx
           downDocY = sy
 
-          // Start 260ms Long-Press Timer for effortless LiquidText-style Figure / Excerpt Lift
+          // Start 350ms Long-Press Timer for Android-style Text Selection (handles & callout)
           longPressStartX = sx
           longPressStartY = sy
           pendingLongPressRunnable?.let { longPressHandler.removeCallbacks(it) }
           pendingLongPressRunnable = Runnable {
-            triggerLongPressLift(longPressStartX, longPressStartY)
+            triggerLongPressSelect(longPressStartX, longPressStartY)
           }
-          longPressHandler.postDelayed(pendingLongPressRunnable!!, 260)
+          longPressHandler.postDelayed(pendingLongPressRunnable!!, 350)
           return true
         }
 
@@ -2582,6 +2759,82 @@ class ThinkspaceView : View {
             longPressHandler.removeCallbacks(it)
             pendingLongPressRunnable = null
           }
+        }
+
+        // Dragging Text Selection Start Handle (Android-style)
+        if (isDraggingStartHandle) {
+          val pdfSel = activePdfSelection
+          if (pdfSel != null) {
+            if (activePdfDoc != null) {
+              val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
+              val words = pageWordsCache[pdfSel.pageIndex]
+              if (pl != null && !words.isNullOrEmpty()) {
+                val effectiveSy = sy - 14f * density
+                val px = (sx - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
+                val py = (effectiveSy - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
+                val closestIdx = words.indices.minByOrNull { i ->
+                  val b = words[i].bounds
+                  val dy = if (py in b.top..b.bottom) 0f else min(abs(py - b.top), abs(py - b.bottom))
+                  val dx = if (px in b.left..b.right) 0f else min(abs(px - b.left), abs(px - b.right))
+                  dy * 3.5f + dx
+                } ?: pdfSel.startWordIndex
+                val newStart = min(closestIdx, pdfSel.endWordIndex)
+                updatePdfSelectionByIndex(pl, newStart, pdfSel.endWordIndex)
+              }
+            } else if (activeStructuredPInfo != null) {
+              val pInfo = activeStructuredPInfo!!
+              val effectiveSy = sy - 14f * density
+              val relY = (effectiveSy - pInfo.topY).coerceIn(0f, pInfo.layout.height.toFloat() - 1f)
+              val line = pInfo.layout.getLineForVertical(relY.toInt())
+              val relX = (sx - pInfo.paperX).coerceIn(0f, pInfo.width)
+              var offset = pInfo.layout.getOffsetForHorizontal(line, relX).coerceIn(0, pInfo.text.length)
+              while (offset > 0 && !pInfo.text[offset - 1].isWhitespace()) {
+                offset--
+              }
+              val newStart = min(offset, activeStructuredEndOffset - 1).coerceAtLeast(0)
+              updateStructuredSelectionByOffsets(pInfo, newStart, activeStructuredEndOffset)
+            }
+          }
+          invalidate()
+          return true
+        }
+
+        // Dragging Text Selection End Handle (Android-style)
+        if (isDraggingEndHandle) {
+          val pdfSel = activePdfSelection
+          if (pdfSel != null) {
+            if (activePdfDoc != null) {
+              val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
+              val words = pageWordsCache[pdfSel.pageIndex]
+              if (pl != null && !words.isNullOrEmpty()) {
+                val effectiveSy = sy - 14f * density
+                val px = (sx - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
+                val py = (effectiveSy - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
+                val closestIdx = words.indices.minByOrNull { i ->
+                  val b = words[i].bounds
+                  val dy = if (py in b.top..b.bottom) 0f else min(abs(py - b.top), abs(py - b.bottom))
+                  val dx = if (px in b.left..b.right) 0f else min(abs(px - b.left), abs(px - b.right))
+                  dy * 3.5f + dx
+                } ?: pdfSel.endWordIndex
+                val newEnd = max(closestIdx, pdfSel.startWordIndex)
+                updatePdfSelectionByIndex(pl, pdfSel.startWordIndex, newEnd)
+              }
+            } else if (activeStructuredPInfo != null) {
+              val pInfo = activeStructuredPInfo!!
+              val effectiveSy = sy - 14f * density
+              val relY = (effectiveSy - pInfo.topY).coerceIn(0f, pInfo.layout.height.toFloat() - 1f)
+              val line = pInfo.layout.getLineForVertical(relY.toInt())
+              val relX = (sx - pInfo.paperX).coerceIn(0f, pInfo.width)
+              var offset = pInfo.layout.getOffsetForHorizontal(line, relX).coerceIn(0, pInfo.text.length)
+              while (offset < pInfo.text.length && !pInfo.text[offset].isWhitespace()) {
+                offset++
+              }
+              val newEnd = max(offset, activeStructuredStartOffset + 1).coerceAtMost(pInfo.text.length)
+              updateStructuredSelectionByOffsets(pInfo, activeStructuredStartOffset, newEnd)
+            }
+          }
+          invalidate()
+          return true
         }
 
         // Dragging Divider
@@ -2744,6 +2997,8 @@ class ThinkspaceView : View {
       }
 
       MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+        val tapX = downDocX
+        val tapY = downDocY
         downDocX = 0f
         downDocY = 0f
         pendingLongPressRunnable?.let {
@@ -2751,6 +3006,8 @@ class ThinkspaceView : View {
           pendingLongPressRunnable = null
         }
 
+        isDraggingStartHandle = false
+        isDraggingEndHandle = false
         isDraggingDivider = false
         isPanningCanvas = false
         isSelectingPdfText = false
@@ -2775,7 +3032,7 @@ class ThinkspaceView : View {
               }
             }
           } else {
-            handleDocTap(downDocX, downDocY)
+            handleDocTap(tapX, tapY)
           }
           isScrollingDoc = false
         }
@@ -3089,8 +3346,8 @@ class ThinkspaceView : View {
 
     val firstR = rects.first()
     val lastR = rects.last()
-    val startHandle = RectF(firstR.left - 12f * density, firstR.top - 20f * density, firstR.left + 12f * density, firstR.bottom)
-    val endHandle = RectF(lastR.right - 12f * density, lastR.top, lastR.right + 12f * density, lastR.bottom + 20f * density)
+    val startHandle = RectF(firstR.left - 14f * density, firstR.bottom - 4f * density, firstR.left + 14f * density, firstR.bottom + 22f * density)
+    val endHandle = RectF(lastR.right - 14f * density, lastR.bottom - 4f * density, lastR.right + 14f * density, lastR.bottom + 22f * density)
 
     val charCount = combinedText.length
     val previewSnippet = if (combinedText.length > 22) combinedText.substring(0, 20) + "..." else combinedText
@@ -3098,8 +3355,8 @@ class ThinkspaceView : View {
 
     val cW = 340f * density
     val cH = 74f * density
-    val cLeft = ((rects.minOf { it.left } + rects.maxOf { it.right }) / 2f - cW / 2f).coerceIn(10f * density, width - cW - 10f * density)
-    val cTop = if (firstR.top - cH - 16f * density > subheaderH) firstR.top - cH - 16f * density else (lastR.bottom + 16f * density).coerceAtMost(height * splitRatio - cH - 10f * density)
+    val cLeft = ((rects.minOf { it.left } + rects.maxOf { it.right }) / 2f - cW / 2f).coerceIn(10f * density, max(10f * density, width - cW - 10f * density))
+    val cTop = (if (firstR.top - cH - 16f * density > subheaderH) firstR.top - cH - 16f * density else lastR.bottom + 16f * density).coerceIn(subheaderH + 4f * density, max(subheaderH + 4f * density, height * splitRatio - cH - 8f * density))
     val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
 
     val closeBtn = RectF(cLeft + cW - 34f * density, cTop + 4f * density, cLeft + cW - 6f * density, cTop + 30f * density)
