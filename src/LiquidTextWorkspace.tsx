@@ -11,6 +11,7 @@ import {
 import DocumentViewer from './DocumentViewer';
 import SplitDivider from './SplitDivider';
 import ThinkspaceView from './ThinkspaceView';
+import { PdfEngine } from './PdfEngine';
 import type {
   LiquidTextWorkspaceProps,
   WorkspaceTool,
@@ -20,6 +21,7 @@ import type {
   InkLink,
   DocumentAnnotation,
   ExtractedTable,
+  PdfSearchResult,
 } from './types';
 
 const TOOLS: { id: WorkspaceTool; label: string; icon: string }[] = [
@@ -70,6 +72,9 @@ export const LiquidTextWorkspace: React.FC<LiquidTextWorkspaceProps> = ({
   const [isSqueezed, setIsSqueezed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchResults, setSearchResults] = useState<PdfSearchResult[]>([]);
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const [isSearching, setIsSearching] = useState(false);
   const [annotations, setAnnotations] = useState<DocumentAnnotation[]>([]);
   const [targetPage, setTargetPage] = useState<number | null>(null);
   const [statusMsg, setStatusMsg] = useState(
@@ -102,6 +107,62 @@ export const LiquidTextWorkspace: React.FC<LiquidTextWorkspaceProps> = ({
     width: 800,
     height: 500,
   });
+
+  const handleSearchSubmit = async () => {
+    if (!searchQuery.trim() || !document?.id) {
+      setSearchResults([]);
+      setCurrentMatchIndex(0);
+      return;
+    }
+    setIsSearching(true);
+    setStatusMsg('Searching document natively...');
+    try {
+      const results = await PdfEngine.searchDocument(document.id, searchQuery);
+      setSearchResults(results);
+      setCurrentMatchIndex(0);
+      const firstMatch = results[0];
+      if (firstMatch) {
+        setTargetPage(firstMatch.pageIndex);
+        setStatusMsg(
+          `Match 1 of ${results.length} on page ${firstMatch.pageIndex}`
+        );
+      } else {
+        setStatusMsg(`No matches for "${searchQuery}"`);
+      }
+    } catch (e: any) {
+      console.warn('Search failed:', e);
+      setStatusMsg('Search failed.');
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const goToNextMatch = () => {
+    if (searchResults.length === 0) return;
+    const nextIdx = (currentMatchIndex + 1) % searchResults.length;
+    setCurrentMatchIndex(nextIdx);
+    const match = searchResults[nextIdx];
+    if (match) {
+      setTargetPage(match.pageIndex);
+      setStatusMsg(
+        `Match ${nextIdx + 1} of ${searchResults.length} on page ${match.pageIndex}`
+      );
+    }
+  };
+
+  const goToPrevMatch = () => {
+    if (searchResults.length === 0) return;
+    const prevIdx =
+      (currentMatchIndex - 1 + searchResults.length) % searchResults.length;
+    setCurrentMatchIndex(prevIdx);
+    const match = searchResults[prevIdx];
+    if (match) {
+      setTargetPage(match.pageIndex);
+      setStatusMsg(
+        `Match ${prevIdx + 1} of ${searchResults.length} on page ${match.pageIndex}`
+      );
+    }
+  };
 
   // Extract passage to workspace
   const handleExtractPassage = (
@@ -361,14 +422,72 @@ export const LiquidTextWorkspace: React.FC<LiquidTextWorkspaceProps> = ({
         {/* Search Input Toggle */}
         <View style={styles.searchSection}>
           {isSearchOpen ? (
-            <TextInput
-              style={styles.searchInput}
-              placeholder="Search document..."
-              placeholderTextColor="#64748B"
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              autoFocus
-            />
+            <View style={styles.searchBarRow}>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search document..."
+                placeholderTextColor="#64748B"
+                value={searchQuery}
+                onChangeText={(text) => {
+                  setSearchQuery(text);
+                  if (!text) {
+                    setSearchResults([]);
+                    setCurrentMatchIndex(0);
+                  }
+                }}
+                onSubmitEditing={handleSearchSubmit}
+                returnKeyType="search"
+                autoFocus
+              />
+              <TouchableOpacity
+                style={styles.searchNavBtn}
+                onPress={goToPrevMatch}
+                disabled={searchResults.length === 0}
+              >
+                <Text
+                  style={[
+                    styles.searchNavBtnText,
+                    searchResults.length === 0 && styles.searchNavBtnDisabled,
+                  ]}
+                >
+                  ‹
+                </Text>
+              </TouchableOpacity>
+              <Text style={styles.searchCounterText}>
+                {isSearching
+                  ? '…'
+                  : searchResults.length > 0
+                    ? `${currentMatchIndex + 1} / ${searchResults.length}`
+                    : searchQuery.trim()
+                      ? '0 / 0'
+                      : ''}
+              </Text>
+              <TouchableOpacity
+                style={styles.searchNavBtn}
+                onPress={goToNextMatch}
+                disabled={searchResults.length === 0}
+              >
+                <Text
+                  style={[
+                    styles.searchNavBtnText,
+                    searchResults.length === 0 && styles.searchNavBtnDisabled,
+                  ]}
+                >
+                  ›
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.searchCloseBtn}
+                onPress={() => {
+                  setIsSearchOpen(false);
+                  setSearchQuery('');
+                  setSearchResults([]);
+                  setCurrentMatchIndex(0);
+                }}
+              >
+                <Text style={styles.searchCloseBtnText}>✕</Text>
+              </TouchableOpacity>
+            </View>
           ) : (
             <TouchableOpacity
               style={styles.searchBtn}
@@ -626,6 +745,41 @@ const styles = StyleSheet.create({
     width: 140,
     borderWidth: 1,
     borderColor: '#00ADB5',
+  },
+  searchBarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  searchNavBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+    backgroundColor: '#334155',
+  },
+  searchNavBtnText: {
+    color: '#00ADB5',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  searchNavBtnDisabled: {
+    color: '#475569',
+  },
+  searchCounterText: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '600',
+    minWidth: 44,
+    textAlign: 'center',
+  },
+  searchCloseBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
+  searchCloseBtnText: {
+    color: '#94A3B8',
+    fontSize: 14,
+    fontWeight: '700',
   },
   splitContainer: {
     flex: 1,

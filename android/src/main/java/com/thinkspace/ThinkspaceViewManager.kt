@@ -132,6 +132,24 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
     return map
   }
 
+  override fun receiveCommand(root: ThinkspaceView, commandId: String, args: com.facebook.react.bridge.ReadableArray?) {
+    when (commandId) {
+      "openSearch", "1" -> root.promptSearchDialog()
+      "closeSearch", "2" -> root.closeSearch()
+      "nextMatch", "3" -> root.goToNextMatch()
+      "prevMatch", "4" -> root.goToPreviousMatch()
+    }
+  }
+
+  override fun receiveCommand(root: ThinkspaceView, commandId: Int, args: com.facebook.react.bridge.ReadableArray?) {
+    when (commandId) {
+      1 -> root.promptSearchDialog()
+      2 -> root.closeSearch()
+      3 -> root.goToNextMatch()
+      4 -> root.goToPreviousMatch()
+    }
+  }
+
   companion object {
     const val NAME = "ThinkspaceView"
   }

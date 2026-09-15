@@ -261,35 +261,39 @@ function buildDocSelection(
   };
 }
 
-export const ThinkspaceView: React.FC<ThinkspaceViewProps> = ({
-  style,
-  document,
-  annotations = [],
-  isSqueezed = false,
-  splitRatio: propSplitRatio = 0.45,
-  activeTool = 'select',
-  selectedColor = '#00ADB5',
-  pattern = 'looseleaf',
-  strokes = [],
-  excerpts = [],
-  inkLinks = [],
-  panX: propPanX = 0,
-  panY: propPanY = 0,
-  scale: propScale = 1,
-  onAddStroke,
-  onEraseStroke,
-  onExcerptMoveEnd,
-  onExcerptPress,
-  onCardDelete,
-  onChangeCardColor,
-  onHoldCard,
-  onTransformChange,
-  onSplitRatioChange,
-  onExtractExcerpt,
-  onSelectText,
-  onCopyText,
-  onHighlightText,
-}) => {
+export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
+  props: ThinkspaceViewProps,
+  _ref: React.ForwardedRef<any>
+) {
+  const {
+    style,
+    document,
+    annotations = [],
+    isSqueezed = false,
+    splitRatio: propSplitRatio = 0.45,
+    activeTool = 'select',
+    selectedColor = '#00ADB5',
+    pattern = 'looseleaf',
+    strokes = [],
+    excerpts = [],
+    inkLinks = [],
+    panX: propPanX = 0,
+    panY: propPanY = 0,
+    scale: propScale = 1,
+    onAddStroke,
+    onEraseStroke,
+    onExcerptMoveEnd,
+    onExcerptPress,
+    onCardDelete,
+    onChangeCardColor,
+    onHoldCard,
+    onTransformChange,
+    onSplitRatioChange,
+    onExtractExcerpt,
+    onSelectText,
+    onCopyText,
+    onHighlightText,
+  } = props;
   const canvasRef = useRef<any>(null);
 
   const [splitRatio, setSplitRatio] = useState(propSplitRatio);
@@ -1894,7 +1898,7 @@ export const ThinkspaceView: React.FC<ThinkspaceViewProps> = ({
       />
     </View>
   );
-};
+});
 
 const styles = StyleSheet.create({
   container: {

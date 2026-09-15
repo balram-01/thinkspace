@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef } from 'react';
 import PdfEngineTestScreen from './PdfEngineTestScreen';
 import {
   View,
@@ -84,6 +84,9 @@ export default function App() {
   // PDF Engine Document State
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentInfo | null>(null);
   const [pdfUri, setPdfUri] = useState<string | null>(null);
+
+  // Thinkspace Native View Reference
+  const thinkspaceRef = useRef<any>(null);
 
   // Active document object for ThinkspaceView
   const activeDocument: WorkspaceDocument = useMemo(() => {
@@ -253,7 +256,7 @@ export default function App() {
           <TouchableOpacity
             style={styles.iconBtn}
             activeOpacity={0.7}
-            onPress={handleImportPdf}
+            onPress={() => thinkspaceRef.current?.openSearch()}
           >
             <Text style={styles.headerIcon}>🔍</Text>
           </TouchableOpacity>
@@ -270,6 +273,7 @@ export default function App() {
       {/* ── 100% Native Kotlin Fabric Workspace Engine ────────────────────── */}
       <View style={styles.workspaceWrapper}>
         <ThinkspaceView
+          ref={thinkspaceRef}
           style={styles.nativeWorkspace}
           document={activeDocument}
           annotations={annotations}
@@ -480,6 +484,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#1E293B',
+    zIndex: 100, // Make sure it sits above the workspace
   },
   topBarLeft: {
     flexDirection: 'row',

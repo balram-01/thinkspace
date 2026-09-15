@@ -145,6 +145,7 @@ export interface DocumentSelection {
 }
 
 export interface ThinkspaceViewProps {
+  ref?: any;
   style?: any;
   document?: WorkspaceDocument;
   annotations?: DocumentAnnotation[];

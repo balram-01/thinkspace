@@ -1,35 +1,81 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef, forwardRef, useImperativeHandle } from 'react';
+import { UIManager, findNodeHandle } from 'react-native';
 import ThinkspaceViewNativeComponent from './ThinkspaceViewNativeComponent';
 import type { ThinkspaceViewProps, InkStroke } from './types';
 
-export const ThinkspaceView: React.FC<ThinkspaceViewProps> = ({
-  style,
-  document,
-  annotations = [],
-  isSqueezed = false,
-  splitRatio = 0.45,
-  activeTool = 'select',
-  selectedColor = '#00ADB5',
-  pattern = 'looseleaf',
-  strokes = [],
-  excerpts = [],
-  inkLinks = [],
-  panX = 0,
-  panY = 0,
-  scale = 1,
-  onAddStroke,
-  onEraseStroke,
-  onExcerptMoveEnd,
-  onExcerptPress,
-  onCardDelete,
-  onChangeCardColor,
-  onUpdateCardComment,
-  onHoldCard,
-  onTransformChange,
-  onSplitRatioChange,
-  onExtractExcerpt,
-  onToggleSqueeze,
-}) => {
+export interface ThinkspaceViewRef {
+  openSearch: () => void;
+  closeSearch: () => void;
+  nextMatch: () => void;
+  prevMatch: () => void;
+}
+
+export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
+  props: ThinkspaceViewProps,
+  ref: React.ForwardedRef<ThinkspaceViewRef>
+) {
+  const {
+    style,
+    document,
+    annotations = [],
+    isSqueezed = false,
+    splitRatio = 0.45,
+    activeTool = 'select',
+    selectedColor = '#00ADB5',
+    pattern = 'looseleaf',
+    strokes = [],
+    excerpts = [],
+    inkLinks = [],
+    panX = 0,
+    panY = 0,
+    scale = 1,
+    onAddStroke,
+    onEraseStroke,
+    onExcerptMoveEnd,
+    onExcerptPress,
+    onCardDelete,
+    onChangeCardColor,
+    onUpdateCardComment,
+    onHoldCard,
+    onTransformChange,
+    onSplitRatioChange,
+    onExtractExcerpt,
+    onToggleSqueeze,
+  } = props;
+
+  const nativeRef = useRef<any>(null);
+
+  useImperativeHandle(ref, () => ({
+    openSearch: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        (UIManager as any).dispatchViewManagerCommand(handle, 'openSearch', []);
+      }
+    },
+    closeSearch: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        (UIManager as any).dispatchViewManagerCommand(
+          handle,
+          'closeSearch',
+          []
+        );
+      }
+    },
+    nextMatch: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        (UIManager as any).dispatchViewManagerCommand(handle, 'nextMatch', []);
+      }
+    },
+    prevMatch: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        (UIManager as any).dispatchViewManagerCommand(handle, 'prevMatch', []);
+      }
+    },
+  }));
+
   const documentJson = useMemo(
     () => (document ? JSON.stringify(document) : ''),
     [document]
@@ -44,6 +90,7 @@ export const ThinkspaceView: React.FC<ThinkspaceViewProps> = ({
 
   return (
     <ThinkspaceViewNativeComponent
+      ref={nativeRef}
       style={style}
       documentJson={documentJson}
       annotationsJson={annotationsJson}
@@ -177,6 +224,6 @@ export const ThinkspaceView: React.FC<ThinkspaceViewProps> = ({
       }
     />
   );
-};
+});
 
 export default ThinkspaceView;

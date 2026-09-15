@@ -296,7 +296,90 @@ class DefaultPdfDocumentEngine(
         document: PdfDocument,
         query: String
     ): List<SearchResult> {
-        return searchEngine.search(document.id, query)
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return emptyList()
+
+        // Ensure all pages of the document are indexed before searching
+        for (pageIdx in 0 until document.pageCount) {
+            val cachedWords = cache.getTextWords(document.id, pageIdx)
+            val words = cachedWords ?: runCatching {
+                textExtractor.extractWords(document, pageIdx)
+            }.getOrDefault(emptyList())
+
+            if (cachedWords == null && words.isNotEmpty()) {
+                cache.putTextWords(document.id, pageIdx, words)
+            }
+            if (words.isNotEmpty()) {
+                searchEngine.indexPage(document.id, pageIdx, words, isFromOcr = false)
+            }
+        }
+        return searchEngine.search(document.id, trimmed)
+    }
+
+    /**
+     * Incremental search: extracts & indexes each page on-demand then immediately
+     * calls [onMatchFound] with that page's hits — callers see the FIRST match
+     * without waiting for the entire document to be processed.
+     *
+     * Already-cached pages are used instantly. Pages not yet extracted are
+     * processed lazily one-by-one in document order.
+     *
+     * [onMatchFound] is called on Dispatchers.Default. Return `false` to cancel.
+     * The coroutine itself respects cancellation between each page.
+     *
+     * @param onPageIndexed callback invoked after each page is extracted+indexed
+     *        (even if no matches); useful for progress reporting.
+     */
+    suspend fun searchIncremental(
+        document: PdfDocument,
+        query: String,
+        onMatchFound: suspend (pageResults: List<SearchResult>, totalSoFar: Int) -> Boolean,
+        onPageIndexed: (suspend (pageIndex: Int, totalPages: Int) -> Unit)? = null
+    ) = withContext(Dispatchers.Default) {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return@withContext
+
+        val totalPages = document.pageCount
+        val posIndex = searchEngine as? com.thinkspace.pdfengine.indexing.PositionalSearchIndex
+            ?: return@withContext // fall back gracefully if engine type changed
+
+        for (pageIdx in 0 until totalPages) {
+            currentCoroutineContext().ensureActive()
+
+            // Check if already indexed; if not, extract & index now
+            if (!posIndex.indexedPageIndices(document.id).contains(pageIdx)) {
+                val words = runCatching {
+                    val cached = cache.getTextWords(document.id, pageIdx)
+                    if (cached != null) {
+                        cached
+                    } else {
+                        val extracted = textExtractor.extractWords(document, pageIdx)
+                        if (extracted.isNotEmpty()) {
+                            cache.putTextWords(document.id, pageIdx, extracted)
+                        }
+                        extracted
+                    }
+                }.getOrDefault(emptyList())
+
+                if (words.isNotEmpty()) {
+                    searchEngine.indexPage(document.id, pageIdx, words, isFromOcr = false)
+                }
+            }
+
+            onPageIndexed?.invoke(pageIdx, totalPages)
+
+            // Now search this one page incrementally
+            var continueSearch = true
+            posIndex.searchIncremental(
+                documentId = document.id,
+                query = trimmed,
+                sortedPageIndices = listOf(pageIdx)
+            ) { pageResults, totalSoFar ->
+                continueSearch = onMatchFound(pageResults, totalSoFar)
+                continueSearch
+            }
+            if (!continueSearch) return@withContext
+        }
     }
 
     override suspend fun getSelectionGeometry(
