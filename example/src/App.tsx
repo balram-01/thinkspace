@@ -24,46 +24,6 @@ const INITIAL_ANNOTATIONS: DocumentAnnotation[] = [];
 const INITIAL_EXCERPTS: ExcerptModel[] = [];
 const INITIAL_LINKS: InkLink[] = [];
 
-const RESUME_DOCUMENT: WorkspaceDocument = {
-  id: 'kshitija-resume',
-  title: 'Kshitija_Resume (34)',
-  pageCount: 1,
-  sections: [
-    {
-      id: 'sec-header',
-      pageNumber: 1,
-      heading: 'Kshitija Sanjay Shejal',
-      paragraphs: [
-        '8830484483 | kshitija.shejal22@vit.edu | LinkedIn | GitHub',
-      ],
-    },
-    {
-      id: 'sec-summary',
-      pageNumber: 1,
-      heading: 'PROFESSIONAL SUMMARY',
-      paragraphs: [
-        'Computer Science undergraduate specializing in Artificial Intelligence with practical experience in Data Science, Data Analysis, and Machine Learning. Proficient in building machine learning, deep learning, and Retrieval-Augmented Generation (RAG) systems, supported by a strong foundation in statistical analysis, exploratory data analysis (EDA), and Python/SQL data engineering. Published research applying data-driven and generative AI methods to real-world problems.',
-      ],
-    },
-    {
-      id: 'sec-skills',
-      pageNumber: 1,
-      heading: 'TECHNICAL SKILLS',
-      paragraphs: [
-        'Machine Learning & AI: Machine Learning, Deep Learning (DL), Natural Language Processing (NLP), Retrieval-Augmented Generation (RAG), Predictive Modeling\n\nGenAI / LLM Tools: FastAPI, ChromaDB, Gemini API, Streamlit, Semantic Search, Prompt-based Retrieval\n\nProgramming Languages: Python, SQL, MySQL\n\nData Analysis Libraries: Pandas, NumPy, Matplotlib, Seaborn, Scikit-learn\n\nData Analytics: Data Cleaning, Data Transformation, Data Wrangling, ETL, Exploratory Data Analysis (EDA), A/B Testing, Statistical Analysis\n\nVisualization & BI Tools: Excel, Power BI, Dashboards, Data Storytelling\n\nOther: Database Management Systems (DBMS), Git, Google Cloud Platform (GCP), Quality Assurance (QA)',
-      ],
-    },
-    {
-      id: 'sec-experience',
-      pageNumber: 1,
-      heading: 'PROFESSIONAL EXPERIENCE',
-      paragraphs: [
-        'Data Analysis Intern                                                   Oct 2024 - Nov 2024\nAICTE & VOIS                                                   Pune, Maharashtra, India\n- Executed comprehensive data cleaning, preprocessing, and Exploratory Data Analysis (EDA) on real-world datasets utilizing Python and SQL.\n- Analyzed complex business datasets to identify key trends and generate actionable insights, directly supporting stakeholder decision-making.',
-      ],
-    },
-  ],
-};
-
 type NavTabMode = 'drawing' | 'document' | 'workspace';
 
 export default function App() {
@@ -81,15 +41,15 @@ export default function App() {
   const [annotations] = useState<DocumentAnnotation[]>(INITIAL_ANNOTATIONS);
   const [activeNav, setActiveNav] = useState<NavTabMode>('workspace');
 
-  // PDF Engine Document State
+  // PDF Engine Document State (null by default — no default document loaded)
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentInfo | null>(null);
   const [pdfUri, setPdfUri] = useState<string | null>(null);
 
   // Thinkspace Native View Reference
   const thinkspaceRef = useRef<any>(null);
 
-  // Active document object for ThinkspaceView
-  const activeDocument: WorkspaceDocument = useMemo(() => {
+  // Active document object for ThinkspaceView (undefined by default until user imports a PDF)
+  const activeDocument: WorkspaceDocument | undefined = useMemo(() => {
     if (pdfDoc) {
       return {
         id: pdfDoc.documentId,
@@ -98,7 +58,7 @@ export default function App() {
         uri: pdfUri || undefined,
       };
     }
-    return RESUME_DOCUMENT;
+    return undefined;
   }, [pdfDoc, pdfUri]);
 
   // ── Import PDF via system file picker ─────────────────────────────────────
@@ -256,7 +216,11 @@ export default function App() {
           <TouchableOpacity
             style={styles.iconBtn}
             activeOpacity={0.7}
-            onPress={() => thinkspaceRef.current?.openSearch()}
+            onPress={() => {
+              if (activeDocument) {
+                thinkspaceRef.current?.openSearch();
+              }
+            }}
           >
             <Text style={styles.headerIcon}>🔍</Text>
           </TouchableOpacity>
