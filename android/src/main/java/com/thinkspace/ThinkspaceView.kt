@@ -12,6 +12,12 @@ import android.graphics.*
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.text.InputType
+import android.view.KeyEvent
+import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -130,7 +136,7 @@ data class NativeCard(
   var x: Float,
   var y: Float,
   var width: Float,
-  val text: String,
+  var text: String,
   var color: Int,
   val pageNumber: Int,
   var comment: String?,
@@ -142,7 +148,15 @@ data class NativeCard(
   val tableRows: List<NativeTableRow>?,
   var groupedItems: MutableList<GroupedExcerpt>? = null,
   // Source location: PDF-page-space rects of original selection (for pulse-highlight on navigation)
-  val sourceRects: List<RectF> = emptyList()
+  val sourceRects: List<RectF> = emptyList(),
+  var fontSize: Float = 13f,
+  var isBold: Boolean = false,
+  var isItalic: Boolean = false,
+  var isUnderline: Boolean = false,
+  var isStrikethrough: Boolean = false,
+  var textColor: Int = Color.parseColor("#1E293B"),
+  var textStyleName: String = "Default",
+  val undoTextStack: ArrayDeque<String> = ArrayDeque()
 ) {
   fun getHeight(): Float {
     return when {
@@ -154,12 +168,22 @@ data class NativeCard(
       isImage -> 160f
       else -> {
         // Calculate dynamic height based on text layout!
-        val textPaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-          textSize = 15f * 2f // Approx density. We'll add padding.
+        val tp = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+          textSize = (fontSize * 1.8f).coerceAtLeast(18f)
+          if (isBold && isItalic) {
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD_ITALIC)
+          } else if (isBold) {
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+          } else if (isItalic) {
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.ITALIC)
+          } else {
+            typeface = android.graphics.Typeface.DEFAULT
+          }
         }
         val textW = Math.max(20f, width - 28f).toInt()
+        val textToMeasure = if (text.isEmpty()) " " else text
         val layout = android.text.StaticLayout.Builder
-          .obtain(text, 0, text.length, textPaint, textW)
+          .obtain(textToMeasure, 0, textToMeasure.length, tp, textW)
           .setAlignment(android.text.Layout.Alignment.ALIGN_NORMAL)
           .build()
         Math.max(105f, layout.height.toFloat() + 56f) // 56f for header/footer padding
@@ -214,13 +238,19 @@ data class NativePdfSelection(
 
 data class NativeCropSelection(
   val pageIndex: Int,
-  val pageBounds: BoundingBox,
-  val screenRect: RectF,
-  val calloutRect: RectF,
-  val calloutExcerptBtn: RectF,
-  val calloutCloseBtn: RectF,
+  var pageBounds: BoundingBox,
+  var screenRect: RectF,
+  val calloutRect: RectF = RectF(),
+  val calloutHighlightBtn: RectF = RectF(),
+  val calloutExcerptBtn: RectF = RectF(),
+  val calloutCloseBtn: RectF = RectF(),
+  val calloutCommentBtn: RectF = RectF(),
+  val calloutBookmarkBtn: RectF = RectF(),
+  val calloutTagsBtn: RectF = RectF(),
+  var color: Int = Color.parseColor("#3B82F6"),
   val dimensionsText: String = "",
-  val holdAndDragRect: RectF = RectF()
+  val holdAndDragRect: RectF = RectF(),
+  val calloutColorBtns: MutableList<Pair<RectF, Int>> = mutableListOf()
 )
 
 class ThinkspaceView : View {
@@ -231,6 +261,115 @@ class ThinkspaceView : View {
     attrs,
     defStyleAttr
   )
+
+  init {
+    isFocusable = true
+    isFocusableInTouchMode = true
+  }
+
+  override fun onCheckIsTextEditor(): Boolean = editingCardId != null
+
+  override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+    if (editingCardId == null) return null
+    outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+    outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
+    return object : BaseInputConnection(this, true) {
+      override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+        if (text != null && editingCardId != null) {
+          val card = cards.find { it.id == editingCardId }
+          if (card != null) {
+            card.undoTextStack.addLast(card.text)
+            if (card.undoTextStack.size > 20) card.undoTextStack.removeFirst()
+            val cur = card.text
+            val cPos = cursorPosition.coerceIn(0, cur.length)
+            val updated = cur.substring(0, cPos) + text + cur.substring(cPos)
+            card.text = updated
+            cursorPosition = cPos + text.length
+            invalidate()
+            return true
+          }
+        }
+        return super.commitText(text, newCursorPosition)
+      }
+
+      override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+        if (editingCardId != null) {
+          val card = cards.find { it.id == editingCardId }
+          if (card != null && card.text.isNotEmpty()) {
+            val cur = card.text
+            val cPos = cursorPosition.coerceIn(0, cur.length)
+            val delStart = (cPos - beforeLength).coerceAtLeast(0)
+            val delEnd = (cPos + afterLength).coerceAtMost(cur.length)
+            if (delStart < delEnd) {
+              card.undoTextStack.addLast(card.text)
+              if (card.undoTextStack.size > 20) card.undoTextStack.removeFirst()
+              card.text = cur.substring(0, delStart) + cur.substring(delEnd)
+              cursorPosition = delStart
+              invalidate()
+              return true
+            }
+          }
+        }
+        return super.deleteSurroundingText(beforeLength, afterLength)
+      }
+    }
+  }
+
+  override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+    if (editingCardId != null) {
+      val card = cards.find { it.id == editingCardId }
+      if (card != null) {
+        when (keyCode) {
+          KeyEvent.KEYCODE_DEL -> {
+            if (cursorPosition > 0 && card.text.isNotEmpty()) {
+              card.undoTextStack.addLast(card.text)
+              if (card.undoTextStack.size > 20) card.undoTextStack.removeFirst()
+              val cur = card.text
+              val cPos = cursorPosition.coerceIn(0, cur.length)
+              card.text = cur.substring(0, cPos - 1) + cur.substring(cPos)
+              cursorPosition = cPos - 1
+              invalidate()
+              return true
+            }
+          }
+          KeyEvent.KEYCODE_ENTER -> {
+            card.undoTextStack.addLast(card.text)
+            if (card.undoTextStack.size > 20) card.undoTextStack.removeFirst()
+            val cur = card.text
+            val cPos = cursorPosition.coerceIn(0, cur.length)
+            card.text = cur.substring(0, cPos) + "\n" + cur.substring(cPos)
+            cursorPosition = cPos + 1
+            invalidate()
+            return true
+          }
+        }
+      }
+    }
+    return super.onKeyDown(keyCode, event)
+  }
+
+  private fun startEditingCard(card: NativeCard) {
+    editingCardId = card.id
+    selectedCardId = card.id
+    cursorPosition = card.text.length
+    isCursorBlinkVisible = true
+    lastCursorBlinkTime = System.currentTimeMillis()
+    isFocusableInTouchMode = true
+    requestFocus()
+    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+    imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+    isTypographyBarVisible = true
+    invalidate()
+  }
+
+  private fun stopEditingCard() {
+    if (editingCardId != null) {
+      editingCardId = null
+      val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+      imm?.hideSoftInputFromWindow(windowToken, 0)
+      invalidate()
+    }
+  }
 
   // LiquidText Workspace State Props
   var splitRatio: Float = 0.44f
@@ -299,6 +438,44 @@ class ThinkspaceView : View {
   private var totalDragDistance: Float = 0f
   private var heldCardId: String? = null
 
+  // LiquidText Excerpt Card Toolbar & Typography state
+  private var isTypographyBarVisible = false
+  private var isStyleSheetOpen = false
+  private var isCardColorPaletteOpen = false
+  private var isTypoTextColorPaletteOpen = false
+  private var editingCardId: String? = null
+  private var cursorPosition: Int = 0
+  private var isCursorBlinkVisible = true
+  private var lastCursorBlinkTime = 0L
+
+  // Action Bar rects (Screen space)
+  private val cardActionBarRect = RectF()
+  private val btnCardCommentRect = RectF()
+  private val btnCardEditRect = RectF()
+  private val btnCardCopyRect = RectF()
+  private val btnCardDeleteRect = RectF()
+  private val btnCardTagsRect = RectF()
+  private val btnCardColorWheelRect = RectF()
+  private val btnCardTypographyRect = RectF()
+  private val cardColorPaletteRects = mutableListOf<Pair<RectF, Int>>()
+
+  // Typography Bar rects (Screen space)
+  private val typographyBarRect = RectF()
+  private val btnTypoUndoRect = RectF()
+  private val btnTypoStyleRect = RectF()
+  private val btnTypoBoldRect = RectF()
+  private val btnTypoItalicRect = RectF()
+  private val btnTypoUnderlineRect = RectF()
+  private val btnTypoStrikeRect = RectF()
+  private val btnTypoFontSizeRect = RectF()
+  private val btnTypoTextColorRect = RectF()
+  private val btnTypoMoreRect = RectF()
+  private val typoTextColorPaletteRects = mutableListOf<Pair<RectF, Int>>()
+
+  // Style Sheet Popover rects (Screen space)
+  private val styleSheetRect = RectF()
+  private val styleOptionRects = mutableListOf<Triple<RectF, String, RectF>>()
+
   // Gesture flags
   private var isPanningCanvas = false
   private var isDraggingDivider = false
@@ -315,6 +492,11 @@ class ThinkspaceView : View {
   // Figure Crop state
   private var activeCropSelection: NativeCropSelection? = null
   private var isDraggingCrop = false
+  private var isDraggingCropTopLeftHandle = false
+  private var isDraggingCropBottomRightHandle = false
+  private var isMovingCropSelection = false
+  private var cropDragOffsetDocX = 0f
+  private var cropDragOffsetDocY = 0f
   private var cropStartX = 0f
   private var cropStartY = 0f
   private var cropPageIndex = 0
@@ -551,6 +733,9 @@ class ThinkspaceView : View {
   private val highlightBgPaint = Paint().apply {
     style = Paint.Style.FILL
   }
+  private val highlightBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.STROKE
+  }
   private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#1E293B")
     textSize = 22f
@@ -740,6 +925,64 @@ class ThinkspaceView : View {
     }
   })
 
+  private fun createCropSelection(
+    pageIndex: Int,
+    sRect: RectF,
+    pageBounds: BoundingBox,
+    color: Int = selectedColor,
+    dimensionsText: String = ""
+  ): NativeCropSelection {
+    val sel = NativeCropSelection(
+      pageIndex = pageIndex,
+      pageBounds = pageBounds,
+      screenRect = sRect,
+      color = color,
+      dimensionsText = dimensionsText
+    )
+    recomputeCropCalloutRects(sel)
+    return sel
+  }
+
+  private fun recomputeCropCalloutRects(sel: NativeCropSelection) {
+    val cW = min(width - 24f * density, 340f * density)
+    val cH = 64f * density
+    val cLeft = (sel.screenRect.centerX() - cW / 2f).coerceIn(12f * density, width - cW - 12f * density)
+    val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
+    val cTop = if (sel.screenRect.top - cH - 12f * density >= subheaderH) {
+      sel.screenRect.top - cH - 12f * density
+    } else {
+      min(sel.screenRect.bottom + 12f * density, (splitY - cH - 14f * density).coerceAtLeast(subheaderH))
+    }
+    sel.calloutRect.set(cLeft, cTop, cLeft + cW, cTop + cH)
+
+    // Row 1: Actions (Highlight, AutoExcerpt, Comment, Bookmark, Close)
+    sel.calloutHighlightBtn.set(cLeft + 8f * density, cTop + 6f * density, cLeft + 72f * density, cTop + 30f * density)
+    sel.calloutExcerptBtn.set(cLeft + 76f * density, cTop + 6f * density, cLeft + 164f * density, cTop + 30f * density)
+    sel.calloutCommentBtn.set(cLeft + 168f * density, cTop + 6f * density, cLeft + 232f * density, cTop + 30f * density)
+    sel.calloutBookmarkBtn.set(cLeft + 236f * density, cTop + 6f * density, cLeft + 304f * density, cTop + 30f * density)
+    sel.calloutCloseBtn.set(cLeft + cW - 32f * density, cTop + 6f * density, cLeft + cW - 6f * density, cTop + 30f * density)
+
+    // Row 2: Color swatches & Tags
+    sel.calloutColorBtns.clear()
+    val palette = listOf(
+      Color.parseColor("#EF4444"), // Red
+      Color.parseColor("#22C55E"), // Green
+      Color.parseColor("#3B82F6"), // Blue
+      Color.parseColor("#EAB308"), // Yellow
+      Color.parseColor("#EC4899"), // Pink
+      Color.parseColor("#FFFFFF")  // White
+    )
+    val rad = 9f * density
+    val spacing = 24f * density
+    for (i in palette.indices) {
+      val cx = cLeft + 18f * density + i * spacing
+      val cy = cTop + 47f * density
+      sel.calloutColorBtns.add(Pair(RectF(cx - rad - 4f * density, cy - rad - 4f * density, cx + rad + 4f * density, cy + rad + 4f * density), palette[i]))
+    }
+    sel.calloutTagsBtn.set(cLeft + 180f * density, cTop + 35f * density, cLeft + 242f * density, cTop + 57f * density)
+    sel.holdAndDragRect.set(sel.screenRect.left, sel.screenRect.top - 24f * density, sel.screenRect.left + 115f * density, sel.screenRect.top - 4f * density)
+  }
+
   private fun triggerLongPressSelect(x: Float, y: Float) {
     val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
     if (y < splitY - 14f && y >= subheaderH) {
@@ -775,12 +1018,46 @@ class ThinkspaceView : View {
         }
       }
 
+      val crop = activeCropSelection
+      if (crop != null) {
+        if (crop.calloutRect.contains(x, y)) {
+          return
+        }
+        if (crop.screenRect.contains(x, y)) {
+          // Immediately lift excerpt on long press inside selection!
+          val cropBmp = generateCropBitmap(crop.pageIndex, crop.pageBounds)
+          val p = if (cropBmp != null) saveCropToFile(cropBmp) else null
+          if (cropBmp != null && p != null) {
+            cardBitmapCache.put(p, cropBmp)
+          }
+          isLiftingExcerpt = true
+          liftCandidateText = "[Photo Excerpt]"
+          liftCandidatePage = crop.pageIndex + 1
+          liftCandidateColor = crop.color
+          liftCandidateIsImage = true
+          liftCandidateImagePath = p
+          liftCandidateBitmap = cropBmp
+          liftCandidateSourceRects = listOf(RectF(crop.pageBounds.left, crop.pageBounds.top, crop.pageBounds.right, crop.pageBounds.bottom))
+
+          liftAnchorScreenX = x
+          liftAnchorScreenY = y
+          liftGhostX = x
+          liftGhostY = y
+
+          activeCropSelection = null
+          parent?.requestDisallowInterceptTouchEvent(true)
+          performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+          invalidate()
+          return
+        }
+      }
+
       // 1. Real PDF document
       if (activePdfDoc != null) {
         for (pl in pageLayouts) {
           if (!pl.isFolded && pl.boundsOnScreen.contains(x, y)) {
             val words = pageWordsCache[pl.pageIndex]
-            if (!words.isNullOrEmpty()) {
+            if (!words.isNullOrEmpty() && activeTool != "lasso" && docMode != "crop") {
               val px = (x - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
               val py = (y - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
               val hitWord = words.find { w ->
@@ -800,8 +1077,10 @@ class ThinkspaceView : View {
               }
 
               if (hitWord != null) {
+                isSelectingPdfText = true
+                pdfSelectStartWord = hitWord
+                pdfSelectPageIndex = pl.pageIndex
                 updatePdfSelection(pl, hitWord, hitWord)
-                // Removed isDraggingEndHandle = true to prevent accidental text selection expanding!
                 isScrollingDoc = false
                 parent?.requestDisallowInterceptTouchEvent(true)
                 performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
@@ -810,44 +1089,41 @@ class ThinkspaceView : View {
               }
             }
 
-            // If crop mode is explicitly active, long press can start figure crop
-            if (docMode == "crop") {
-              val cropW = min(pl.boundsOnScreen.width() * 0.85f, 320f * density)
-              val cropH = min(pl.boundsOnScreen.height() * 0.45f, 200f * density)
-              val sRect = RectF(
-                (x - cropW / 2f).coerceIn(pl.boundsOnScreen.left + 8f * density, pl.boundsOnScreen.right - cropW - 8f * density),
-                (y - cropH / 2f).coerceIn(pl.boundsOnScreen.top + 8f * density, pl.boundsOnScreen.bottom - cropH - 8f * density),
-                (x + cropW / 2f).coerceIn(pl.boundsOnScreen.left + cropW + 8f * density, pl.boundsOnScreen.right - 8f * density),
-                (y + cropH / 2f).coerceIn(pl.boundsOnScreen.top + cropH + 8f * density, pl.boundsOnScreen.bottom - 8f * density)
-              )
-              val pW = pl.pageSize.width
-              val pH = pl.pageSize.height
-              val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-              val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
-              val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-              val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            // LiquidText Dynamic Drag-to-Enclose Area Selection:
+            // Pin the anchor point and start real-time elastic box sizing!
+            isDraggingCrop = true
+            cropStartX = x
+            cropStartY = y
+            cropPageIndex = pl.pageIndex
 
-              val cW = 200f * density
-              val cH = 44f * density
-              val cLeft = sRect.centerX() - cW / 2f
-              val cTop = if (sRect.top - cH - 12f * density > subheaderH) sRect.top - cH - 12f * density else sRect.bottom + 12f * density
-              val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
-              val excerptBtn = RectF(cLeft + 8f * density, cTop + 4f * density, cLeft + cW - 44f * density, cTop + cH - 4f * density)
-              val closeBtn = RectF(cLeft + cW - 40f * density, cTop + 4f * density, cLeft + cW - 4f * density, cTop + cH - 4f * density)
+            val initialW = 32f * density
+            val initialH = 24f * density
+            val sRect = RectF(
+              (x - initialW / 2f).coerceIn(pl.boundsOnScreen.left + 4f * density, pl.boundsOnScreen.right - initialW - 4f * density),
+              (y - initialH / 2f).coerceIn(pl.boundsOnScreen.top + 4f * density, pl.boundsOnScreen.bottom - initialH - 4f * density),
+              (x + initialW / 2f).coerceIn(pl.boundsOnScreen.left + initialW + 4f * density, pl.boundsOnScreen.right - 4f * density),
+              (y + initialH / 2f).coerceIn(pl.boundsOnScreen.top + initialH + 4f * density, pl.boundsOnScreen.bottom - 4f * density)
+            )
+            val pW = pl.pageSize.width
+            val pH = pl.pageSize.height
+            val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
 
-              activeCropSelection = NativeCropSelection(
-                pageIndex = pl.pageIndex,
-                pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
-                screenRect = sRect,
-                calloutRect = calloutR,
-                calloutExcerptBtn = excerptBtn,
-                calloutCloseBtn = closeBtn
-              )
-              activePdfSelection = null
-              performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-              invalidate()
-              return
-            }
+            activeCropSelection = createCropSelection(
+              pageIndex = pl.pageIndex,
+              sRect = sRect,
+              pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
+              color = selectedColor,
+              dimensionsText = "Page ${pl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)"
+            )
+            activePdfSelection = null
+            isScrollingDoc = false
+            parent?.requestDisallowInterceptTouchEvent(true)
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            invalidate()
+            return
           }
         }
       }
@@ -1239,7 +1515,20 @@ class ThinkspaceView : View {
         val colorHex = obj.optString("color", "#00ADB5")
         val color = try { Color.parseColor(colorHex) } catch (e: Exception) { Color.YELLOW }
         val text = obj.optString("text", "")
-        annotations.add(NativeAnnotation(id, sectionId, pIdx, pageNumber, color, text))
+        val rects = mutableListOf<RectF>()
+        val rectsArr = obj.optJSONArray("rects")
+        if (rectsArr != null) {
+          for (rIdx in 0 until rectsArr.length()) {
+            val ro = rectsArr.getJSONObject(rIdx)
+            rects.add(RectF(
+              ro.optDouble("left", 0.0).toFloat(),
+              ro.optDouble("top", 0.0).toFloat(),
+              ro.optDouble("right", 0.0).toFloat(),
+              ro.optDouble("bottom", 0.0).toFloat()
+            ))
+          }
+        }
+        annotations.add(NativeAnnotation(id, sectionId, pIdx, pageNumber, color, text, rects))
       }
     } catch (e: Exception) {
       e.printStackTrace()
@@ -1708,18 +1997,27 @@ class ThinkspaceView : View {
 
               // Draw persistent annotations on this page
               val pageAnns = annotations.filter { it.pageNumber == pageNum }
+              val pSize = runCatching { pdf.getPage(pageIdx).size }.getOrNull() ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+              val pageWidth = pSize.width
+              val pageHeight = pSize.height
               for (ann in pageAnns) {
-                highlightBgPaint.color = ann.color
-                highlightBgPaint.alpha = 50
+                val baseColor = ann.color
+                highlightBgPaint.color = baseColor
+                highlightBgPaint.alpha = 85
+                highlightBorderPaint.color = baseColor
+                highlightBorderPaint.alpha = 180
+                highlightBorderPaint.strokeWidth = 1.5f * density
                 if (ann.rects.isNotEmpty()) {
-                  val pageWidth = com.thinkspace.pdfengine.model.PageSize.LETTER.width
-                  val pageHeight = com.thinkspace.pdfengine.model.PageSize.LETTER.height
                   for (r in ann.rects) {
                     val l = screenRect.left + (r.left / pageWidth) * screenRect.width()
                     val t = screenRect.top + (r.top / pageHeight) * screenRect.height()
                     val right = screenRect.left + (r.right / pageWidth) * screenRect.width()
                     val b = screenRect.top + (r.bottom / pageHeight) * screenRect.height()
-                    canvas.drawRect(l, t, right, b, highlightBgPaint)
+                    val hRect = RectF(l, t, right, b)
+                    canvas.drawRoundRect(hRect, 3f * density, 3f * density, highlightBgPaint)
+                    if (hRect.width() > 30f * density && hRect.height() > 24f * density) {
+                      canvas.drawRoundRect(hRect, 3f * density, 3f * density, highlightBorderPaint)
+                    }
                   }
                 } else {
                   canvas.drawRect(
@@ -2040,55 +2338,145 @@ class ThinkspaceView : View {
         }
       }
 
-      // Draw Figure Crop Selection matching Video
+      // Draw LiquidText Area / Photo Selection matching Screenshot
       val cropSel = activeCropSelection
       if (cropSel != null) {
-        canvas.drawRect(cropSel.screenRect, cropFillPaint)
-        canvas.drawRect(cropSel.screenRect, cropDashPaint)
+        val cropColor = cropSel.color
 
-        // Corner Grips
-        val gSize = 14f * density
-        val r = cropSel.screenRect
-        val gp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#00ADB5"); style = Paint.Style.FILL }
-        canvas.drawRect(r.left - 2f, r.top - 2f, r.left + gSize, r.top + 3f * density, gp)
-        canvas.drawRect(r.left - 2f, r.top - 2f, r.left + 3f * density, r.top + gSize, gp)
-        canvas.drawRect(r.right - gSize, r.top - 2f, r.right + 2f, r.top + 3f * density, gp)
-        canvas.drawRect(r.right - 3f * density, r.top - 2f, r.right + 2f, r.top + gSize, gp)
-        canvas.drawRect(r.left - 2f, r.bottom - 3f * density, r.left + gSize, r.bottom + 2f, gp)
-        canvas.drawRect(r.left - 2f, r.bottom - gSize, r.left + 3f * density, r.bottom + 2f, gp)
-        canvas.drawRect(r.right - gSize, r.bottom - 3f * density, r.right + 2f, r.bottom + 2f, gp)
-        canvas.drawRect(r.right - 3f * density, r.bottom - gSize, r.right + 2f, r.bottom + 2f, gp)
+        // Translucent fill with accent color (matches screenshot blue box)
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = cropColor
+          alpha = 70
+          style = Paint.Style.FILL
+        }
+        canvas.drawRect(cropSel.screenRect, fillPaint)
 
-        // "Hold & Drag" top badge
-        val holdBadgeRect = RectF(r.left, r.top - 26f * density, r.left + 96f * density, r.top - 4f * density)
-        val holdBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0F172A"); style = Paint.Style.FILL }
-        val holdBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#00ADB5"); strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
-        canvas.drawRoundRect(holdBadgeRect, 5f * density, 5f * density, holdBg)
-        canvas.drawRoundRect(holdBadgeRect, 5f * density, 5f * density, holdBorder)
-        val holdTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        // Crisp solid border with accent color
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = cropColor
+          strokeWidth = 2f * density
+          style = Paint.Style.STROKE
+        }
+        canvas.drawRect(cropSel.screenRect, borderPaint)
+
+        // Diagonal Corner Circular Handles matching Screenshot (Top-Left & Bottom-Right)
+        val handleR = 7.5f * density
+        val handleFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = cropColor
+          style = Paint.Style.FILL
+        }
+        val handleBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
           color = Color.WHITE
-          textSize = 11f * density
-          isFakeBoldText = true
+          strokeWidth = 1.8f * density
+          style = Paint.Style.STROKE
         }
-        canvas.drawText("✋ Hold & Drag", holdBadgeRect.left + 8f * density, holdBadgeRect.centerY() + 4f * density, holdTextPaint)
 
-        // Crop Callout Pill: [Image / Graphic] [Page X (WxH pt)] [+ Excerpt] [✕ Crop]
-        canvas.drawRoundRect(cropSel.calloutRect, 10f * density, 10f * density, calloutBgPaint)
-        canvas.drawRoundRect(cropSel.calloutRect, 10f * density, 10f * density, calloutBorderPaint)
+        // Top-Left Circle Handle
+        val tlX = cropSel.screenRect.left
+        val tlY = cropSel.screenRect.top
+        canvas.drawCircle(tlX, tlY, handleR, handleFill)
+        canvas.drawCircle(tlX, tlY, handleR, handleBorder)
 
-        // Dimension text
-        val dimText = if (cropSel.dimensionsText.isNotEmpty()) cropSel.dimensionsText else "Page ${cropSel.pageIndex + 1} (${cropSel.pageBounds.width.toInt()}x${cropSel.pageBounds.height.toInt()} pt)"
-        val dimPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#94A3B8")
-          textSize = 12f * density
-          isFakeBoldText = true
+        // Bottom-Right Circle Handle
+        val brX = cropSel.screenRect.right
+        val brY = cropSel.screenRect.bottom
+        canvas.drawCircle(brX, brY, handleR, handleFill)
+        canvas.drawCircle(brX, brY, handleR, handleBorder)
+
+        // LiquidText Top Contextual Toolbar (hidden while actively dragging/sizing for clean feedback)
+        if (!isDraggingCrop && !isDraggingCropTopLeftHandle && !isDraggingCropBottomRightHandle) {
+          val holdBadgeRect = cropSel.holdAndDragRect
+          val holdBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0F172A"); style = Paint.Style.FILL }
+          val holdBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = cropColor; strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
+          canvas.drawRoundRect(holdBadgeRect, 5f * density, 5f * density, holdBg)
+          canvas.drawRoundRect(holdBadgeRect, 5f * density, 5f * density, holdBorder)
+          val holdTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 10.5f * density
+            isFakeBoldText = true
+          }
+          canvas.drawText("✋ Move / Drag to Canvas", holdBadgeRect.left + 8f * density, holdBadgeRect.centerY() + 3.5f * density, holdTextPaint)
+
+          canvas.drawRoundRect(cropSel.calloutRect, 12f * density, 12f * density, calloutBgPaint)
+          canvas.drawRoundRect(cropSel.calloutRect, 12f * density, 12f * density, calloutBorderPaint)
+
+          // Row 1: Actions (Highlight, AutoExcerpt, Comment, Bookmark, Close)
+          val actionPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 12f * density
+            isFakeBoldText = true
+          }
+
+          // Highlight button: styled pill with accent color
+          val hlPillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#EAB308")
+            style = Paint.Style.FILL
+          }
+          canvas.drawRoundRect(cropSel.calloutHighlightBtn, 5f * density, 5f * density, hlPillPaint)
+          val hlTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#0F172A")
+            textSize = 11.5f * density
+            isFakeBoldText = true
+          }
+          canvas.drawText("Highlight", cropSel.calloutHighlightBtn.left + 6f * density, cropSel.calloutHighlightBtn.centerY() + 4f * density, hlTextPaint)
+
+          // AutoExcerpt button: styled pill with accent color
+          val excerptPillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = cropColor
+            style = Paint.Style.FILL
+          }
+          canvas.drawRoundRect(cropSel.calloutExcerptBtn, 5f * density, 5f * density, excerptPillPaint)
+          val autoExcerptTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 11.5f * density
+            isFakeBoldText = true
+          }
+          canvas.drawText("AutoExcerpt", cropSel.calloutExcerptBtn.left + 6f * density, cropSel.calloutExcerptBtn.centerY() + 4f * density, autoExcerptTextPaint)
+
+          canvas.drawText("Comment", cropSel.calloutCommentBtn.left + 4f * density, cropSel.calloutCommentBtn.centerY() + 4f * density, actionPaint)
+          canvas.drawText("Bookmark", cropSel.calloutBookmarkBtn.left + 4f * density, cropSel.calloutBookmarkBtn.centerY() + 4f * density, actionPaint)
+
+          val closePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#94A3B8")
+            textSize = 13f * density
+            isFakeBoldText = true
+          }
+          canvas.drawText("✕", cropSel.calloutCloseBtn.left + 6f * density, cropSel.calloutCloseBtn.centerY() + 4.5f * density, closePaint)
+
+          // Row 2: Color Swatches & Tags
+          for (pair in cropSel.calloutColorBtns) {
+            val btnR = pair.first
+            val col = pair.second
+            val swPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = col
+              style = Paint.Style.FILL
+            }
+            val rad = btnR.width() / 2f - 4f * density
+            canvas.drawCircle(btnR.centerX(), btnR.centerY(), rad, swPaint)
+            if (col == cropColor) {
+              val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                strokeWidth = 2f * density
+                style = Paint.Style.STROKE
+              }
+              canvas.drawCircle(btnR.centerX(), btnR.centerY(), rad + 2.5f * density, ringPaint)
+            }
+          }
+
+          // Divider line before Tags
+          val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#334155")
+            strokeWidth = 1f * density
+          }
+          canvas.drawLine(cropSel.calloutTagsBtn.left - 8f * density, cropSel.calloutTagsBtn.top + 2f * density, cropSel.calloutTagsBtn.left - 8f * density, cropSel.calloutTagsBtn.bottom - 2f * density, divPaint)
+
+          val tagPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#94A3B8")
+            textSize = 12f * density
+            isFakeBoldText = true
+          }
+          canvas.drawText("Tags", cropSel.calloutTagsBtn.left + 4f * density, cropSel.calloutTagsBtn.centerY() + 4f * density, tagPaint)
         }
-        canvas.drawText(dimText, cropSel.calloutRect.left + 12f * density, cropSel.calloutRect.centerY() + 4f * density, dimPaint)
-
-        canvas.drawRoundRect(cropSel.calloutExcerptBtn, 6f * density, 6f * density, calloutPrimaryBtnPaint)
-        canvas.drawText("+ Excerpt", cropSel.calloutExcerptBtn.left + 10f * density, cropSel.calloutExcerptBtn.centerY() + 4f * density, calloutTextPaint)
-
-        canvas.drawText("✕", cropSel.calloutCloseBtn.left + 8f * density, cropSel.calloutCloseBtn.centerY() + 5f * density, closeBtnTextPaint)
       }
 
       // Floating Squeeze Tab on the right edge of the PDF document (§10 of spec / screenshot)
@@ -2457,8 +2845,24 @@ class ThinkspaceView : View {
 
       // Card Background & Border
       canvas.drawRoundRect(cardRect, 10f, 10f, cardBgPaint)
-      cardBorderPaint.color = if (card.id == selectedCardId || isSnapTarget) card.color else Color.parseColor("#CBD5E1")
+      cardBorderPaint.color = if (card.id == selectedCardId) Color.parseColor("#2563EB") else if (isSnapTarget) card.color else Color.parseColor("#CBD5E1")
+      cardBorderPaint.strokeWidth = if (card.id == selectedCardId) 2.2f else 1.2f
       canvas.drawRoundRect(cardRect, 10f, 10f, cardBorderPaint)
+
+      // LiquidText selection corner resize indicator on bottom-right (matching Screenshot 1 & 2)
+      if (card.id == selectedCardId) {
+        val bracketPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#64748B")
+          strokeWidth = 2.4f
+          style = Paint.Style.STROKE
+          strokeCap = Paint.Cap.ROUND
+        }
+        val brX = cardRect.right + 3f
+        val brY = cardRect.bottom + 3f
+        val brLen = 12f
+        canvas.drawLine(brX - brLen, brY, brX, brY, bracketPaint)
+        canvas.drawLine(brX, brY - brLen, brX, brY, bracketPaint)
+      }
 
       // Left Accent Strip
       cardAccentPaint.color = card.color
@@ -2612,16 +3016,57 @@ class ThinkspaceView : View {
             canvas.drawText("📷 Figure (Page ${card.pageNumber})", cardRect.left + 20f, cardRect.top + 70f, textPaint)
           }
         } else {
+          val cardTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = card.textColor
+            textSize = (card.fontSize * 1.8f).coerceAtLeast(18f)
+            if (card.isBold && card.isItalic) {
+              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
+            } else if (card.isBold) {
+              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            } else if (card.isItalic) {
+              typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+            } else {
+              typeface = Typeface.DEFAULT
+            }
+            isUnderlineText = card.isUnderline
+            isStrikeThruText = card.isStrikethrough
+          }
+
           val preview = card.text
           val textW = Math.max(20, (card.width - 28f).toInt())
+          val textToDraw = if (preview.isEmpty() && card.id == editingCardId) "Type text here..." else preview
           val layout = android.text.StaticLayout.Builder
-            .obtain(preview, 0, preview.length, textPaint, textW)
+            .obtain(textToDraw, 0, textToDraw.length, cardTextPaint, textW)
             .setAlignment(android.text.Layout.Alignment.ALIGN_NORMAL)
             .build()
 
           canvas.save()
           canvas.translate(card.x + 14f, card.y + 36f)
           layout.draw(canvas)
+
+          // If this card is actively being edited, draw the blinking cursor
+          if (card.id == editingCardId && layout.lineCount > 0) {
+            val now = System.currentTimeMillis()
+            if (now - lastCursorBlinkTime > 500) {
+              isCursorBlinkVisible = !isCursorBlinkVisible
+              lastCursorBlinkTime = now
+            }
+            if (isCursorBlinkVisible) {
+              val cPos = cursorPosition.coerceIn(0, preview.length)
+              val line = layout.getLineForOffset(cPos)
+              val lineTop = layout.getLineTop(line).toFloat()
+              val lineBottom = layout.getLineBottom(line).toFloat()
+              val curX = layout.getPrimaryHorizontal(cPos)
+              val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#2563EB")
+                strokeWidth = 2.5f
+                style = Paint.Style.STROKE
+              }
+              canvas.drawLine(curX, lineTop, curX, lineBottom, cursorPaint)
+            }
+            postInvalidateOnAnimation()
+          }
+
           canvas.restore()
         }
       }
@@ -2819,12 +3264,389 @@ class ThinkspaceView : View {
         canvas.restore()
       }
 
+      // -------------------------------------------------------------------------
+      // 6. LIQUIDTEXT EXCERPT CARD ACTION BAR, TYPOGRAPHY BAR & STYLE POPOVER
+      // -------------------------------------------------------------------------
+      val selCard = if (selectedCardId != null && !isLiftingExcerpt) cards.find { it.id == selectedCardId } else null
+      if (selCard != null) {
+        drawCardActionBar(canvas, selCard, viewW, viewH, canvasTopY)
+        if (isTypographyBarVisible) {
+          drawTypographyBar(canvas, selCard, viewW, viewH)
+          if (isStyleSheetOpen) {
+            drawStyleSheetPopover(canvas, selCard, viewW, viewH)
+          }
+          if (isTypoTextColorPaletteOpen) {
+            drawTypoTextColorPalette(canvas, selCard)
+          }
+        }
+        if (isCardColorPaletteOpen) {
+          drawCardColorPalette(canvas, selCard)
+        }
+      }
+
       // Draw bottom floating toast matching video
       hudToast.draw(canvas, viewW, viewH - 64f * density)
       if (hudToast.isShowing) {
         postInvalidateOnAnimation()
       }
     }
+
+  private fun drawCardActionBar(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float, canvasTopY: Float) {
+    val abW = min(viewW - 24f * density, 340f * density)
+    val abH = 36f * density
+    val (scLeft, scTop) = canvasWorldToScreen(card.x, card.y, canvasTopY)
+    val (scRight, _) = canvasWorldToScreen(card.x + card.width, card.y + card.getHeight(), canvasTopY)
+
+    val abLeft = (scLeft + (scRight - scLeft) / 2f - abW / 2f).coerceIn(12f * density, viewW - abW - 12f * density)
+    val abTop = (scTop - abH - 12f * density).coerceIn(canvasTopY + 8f * density, viewH - abH - 48f * density)
+    cardActionBarRect.set(abLeft, abTop, abLeft + abW, abTop + abH)
+
+    val abBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#475569")
+      style = Paint.Style.FILL
+      alpha = 245
+    }
+    val abBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#94A3B8")
+      strokeWidth = 1f * density
+      style = Paint.Style.STROKE
+    }
+    canvas.drawRoundRect(cardActionBarRect, 18f * density, 18f * density, abBgPaint)
+    canvas.drawRoundRect(cardActionBarRect, 18f * density, 18f * density, abBorderPaint)
+
+    val labelPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      textSize = 12f * density
+      isFakeBoldText = true
+    }
+
+    // 1. Comment
+    btnCardCommentRect.set(abLeft + 6f * density, abTop + 4f * density, abLeft + 62f * density, abTop + abH - 4f * density)
+    canvas.drawText("Comment", btnCardCommentRect.left + 4f * density, btnCardCommentRect.centerY() + 4f * density, labelPaint)
+
+    // 2. Edit
+    btnCardEditRect.set(abLeft + 64f * density, abTop + 4f * density, abLeft + 104f * density, abTop + abH - 4f * density)
+    if (editingCardId == card.id) {
+      val editBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#2563EB"); style = Paint.Style.FILL }
+      canvas.drawRoundRect(btnCardEditRect, 6f * density, 6f * density, editBg)
+    }
+    canvas.drawText("Edit", btnCardEditRect.left + 8f * density, btnCardEditRect.centerY() + 4f * density, labelPaint)
+
+    // 3. Copy
+    btnCardCopyRect.set(abLeft + 106f * density, abTop + 4f * density, abLeft + 150f * density, abTop + abH - 4f * density)
+    canvas.drawText("Copy", btnCardCopyRect.left + 6f * density, btnCardCopyRect.centerY() + 4f * density, labelPaint)
+
+    // 4. Delete
+    btnCardDeleteRect.set(abLeft + 152f * density, abTop + 4f * density, abLeft + 204f * density, abTop + abH - 4f * density)
+    canvas.drawText("Delete", btnCardDeleteRect.left + 6f * density, btnCardDeleteRect.centerY() + 4f * density, labelPaint)
+
+    // 5. Tags
+    btnCardTagsRect.set(abLeft + 206f * density, abTop + 4f * density, abLeft + 248f * density, abTop + abH - 4f * density)
+    canvas.drawText("Tags", btnCardTagsRect.left + 6f * density, btnCardTagsRect.centerY() + 4f * density, labelPaint)
+
+    // 6. Color Wheel / Swatch
+    btnCardColorWheelRect.set(abLeft + 252f * density, abTop + 6f * density, abLeft + 276f * density, abTop + abH - 6f * density)
+    val cwCenter = btnCardColorWheelRect.centerX()
+    val cwY = btnCardColorWheelRect.centerY()
+    val cwRad = 10f * density
+    val cwPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = card.color; style = Paint.Style.FILL }
+    canvas.drawCircle(cwCenter, cwY, cwRad, cwPaint)
+    val cwRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      strokeWidth = 1.5f * density
+      style = Paint.Style.STROKE
+    }
+    canvas.drawCircle(cwCenter, cwY, cwRad, cwRing)
+
+    // 7. Divider |
+    val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#94A3B8")
+      strokeWidth = 1f * density
+    }
+    val divX = abLeft + 283f * density
+    canvas.drawLine(divX, abTop + 8f * density, divX, abTop + abH - 8f * density, divPaint)
+
+    // 8. Typography Button [T_T]
+    btnCardTypographyRect.set(abLeft + 289f * density, abTop + 4f * density, abLeft + 332f * density, abTop + abH - 4f * density)
+    if (isTypographyBarVisible) {
+      val typoBtnBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#2563EB"); style = Paint.Style.FILL }
+      canvas.drawRoundRect(btnCardTypographyRect, 6f * density, 6f * density, typoBtnBg)
+    }
+    val typoTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      textSize = 12.5f * density
+      isFakeBoldText = true
+    }
+    canvas.drawText("T\u200CT", btnCardTypographyRect.left + 8f * density, btnCardTypographyRect.centerY() + 4f * density, typoTextPaint)
+  }
+
+  private fun drawTypographyBar(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float) {
+    val typoW = min(viewW - 24f * density, 360f * density)
+    val typoH = 38f * density
+    val typoLeft = cardActionBarRect.left.coerceIn(12f * density, viewW - typoW - 12f * density)
+    val typoTop = (cardActionBarRect.bottom + 6f * density).coerceAtMost(viewH - typoH - 12f * density)
+    typographyBarRect.set(typoLeft, typoTop, typoLeft + typoW, typoTop + typoH)
+
+    val barBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#334155")
+      style = Paint.Style.FILL
+      alpha = 250
+    }
+    val barBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#64748B")
+      strokeWidth = 1f * density
+      style = Paint.Style.STROKE
+    }
+    canvas.drawRoundRect(typographyBarRect, 14f * density, 14f * density, barBg)
+    canvas.drawRoundRect(typographyBarRect, 14f * density, 14f * density, barBorder)
+
+    val itemPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      textSize = 13f * density
+      isFakeBoldText = true
+    }
+    val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#64748B")
+      strokeWidth = 1f * density
+    }
+    val activeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#2563EB")
+      style = Paint.Style.FILL
+    }
+
+    // 1. Undo
+    btnTypoUndoRect.set(typoLeft + 6f * density, typoTop + 4f * density, typoLeft + 34f * density, typoTop + typoH - 4f * density)
+    canvas.drawText("↩", btnTypoUndoRect.left + 6f * density, btnTypoUndoRect.centerY() + 4.5f * density, itemPaint)
+
+    // Divider
+    canvas.drawLine(typoLeft + 38f * density, typoTop + 8f * density, typoLeft + 38f * density, typoTop + typoH - 8f * density, divPaint)
+
+    // 2. Style
+    btnTypoStyleRect.set(typoLeft + 44f * density, typoTop + 4f * density, typoLeft + 104f * density, typoTop + typoH - 4f * density)
+    if (isStyleSheetOpen) {
+      canvas.drawRoundRect(btnTypoStyleRect, 6f * density, 6f * density, activeBg)
+    }
+    val styleLabel = if (card.textStyleName != "Default") card.textStyleName else "Style"
+    canvas.drawText("$styleLabel ▾", btnTypoStyleRect.left + 4f * density, btnTypoStyleRect.centerY() + 4.5f * density, itemPaint)
+
+    // Divider
+    canvas.drawLine(typoLeft + 108f * density, typoTop + 8f * density, typoLeft + 108f * density, typoTop + typoH - 8f * density, divPaint)
+
+    // 3. Bold 'B'
+    btnTypoBoldRect.set(typoLeft + 114f * density, typoTop + 4f * density, typoLeft + 140f * density, typoTop + typoH - 4f * density)
+    if (card.isBold) {
+      canvas.drawRoundRect(btnTypoBoldRect, 5f * density, 5f * density, activeBg)
+    }
+    val boldPaint = TextPaint(itemPaint).apply { isFakeBoldText = true }
+    canvas.drawText("B", btnTypoBoldRect.left + 8f * density, btnTypoBoldRect.centerY() + 4.5f * density, boldPaint)
+
+    // 4. Italic 'I'
+    btnTypoItalicRect.set(typoLeft + 142f * density, typoTop + 4f * density, typoLeft + 168f * density, typoTop + typoH - 4f * density)
+    if (card.isItalic) {
+      canvas.drawRoundRect(btnTypoItalicRect, 5f * density, 5f * density, activeBg)
+    }
+    val italicPaint = TextPaint(itemPaint).apply { textSkewX = -0.25f }
+    canvas.drawText("I", btnTypoItalicRect.left + 10f * density, btnTypoItalicRect.centerY() + 4.5f * density, italicPaint)
+
+    // 5. Underline 'U'
+    btnTypoUnderlineRect.set(typoLeft + 170f * density, typoTop + 4f * density, typoLeft + 196f * density, typoTop + typoH - 4f * density)
+    if (card.isUnderline) {
+      canvas.drawRoundRect(btnTypoUnderlineRect, 5f * density, 5f * density, activeBg)
+    }
+    val ulPaint = TextPaint(itemPaint).apply { isUnderlineText = true }
+    canvas.drawText("U", btnTypoUnderlineRect.left + 7f * density, btnTypoUnderlineRect.centerY() + 4.5f * density, ulPaint)
+
+    // 6. Strikethrough 'S'
+    btnTypoStrikeRect.set(typoLeft + 198f * density, typoTop + 4f * density, typoLeft + 224f * density, typoTop + typoH - 4f * density)
+    if (card.isStrikethrough) {
+      canvas.drawRoundRect(btnTypoStrikeRect, 5f * density, 5f * density, activeBg)
+    }
+    val strikePaint = TextPaint(itemPaint).apply { isStrikeThruText = true }
+    canvas.drawText("S", btnTypoStrikeRect.left + 8f * density, btnTypoStrikeRect.centerY() + 4.5f * density, strikePaint)
+
+    // Divider
+    canvas.drawLine(typoLeft + 228f * density, typoTop + 8f * density, typoLeft + 228f * density, typoTop + typoH - 8f * density, divPaint)
+
+    // 7. Font size indicator
+    btnTypoFontSizeRect.set(typoLeft + 234f * density, typoTop + 4f * density, typoLeft + 266f * density, typoTop + typoH - 4f * density)
+    canvas.drawText("${card.fontSize.toInt()}", btnTypoFontSizeRect.left + 6f * density, btnTypoFontSizeRect.centerY() + 4.5f * density, itemPaint)
+
+    // 8. Text Color A_ (dash a)
+    btnTypoTextColorRect.set(typoLeft + 270f * density, typoTop + 4f * density, typoLeft + 304f * density, typoTop + typoH - 4f * density)
+    if (isTypoTextColorPaletteOpen) {
+      canvas.drawRoundRect(btnTypoTextColorRect, 5f * density, 5f * density, activeBg)
+    }
+    canvas.drawText("A", btnTypoTextColorRect.left + 10f * density, btnTypoTextColorRect.centerY() + 3f * density, itemPaint)
+    val colorBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = card.textColor
+      strokeWidth = 3f * density
+      style = Paint.Style.STROKE
+    }
+    val barY = btnTypoTextColorRect.bottom - 4f * density
+    canvas.drawLine(btnTypoTextColorRect.left + 6f * density, barY, btnTypoTextColorRect.right - 6f * density, barY, colorBarPaint)
+
+    // 9. More Options ...
+    btnTypoMoreRect.set(typoLeft + 308f * density, typoTop + 4f * density, typoLeft + 344f * density, typoTop + typoH - 4f * density)
+    canvas.drawText("···", btnTypoMoreRect.left + 8f * density, btnTypoMoreRect.centerY() + 3f * density, itemPaint)
+  }
+
+  private fun drawStyleSheetPopover(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float) {
+    val popW = 230f * density
+    val rowH = 38f * density
+    val options = listOf(
+      Pair("Title", 20f),
+      Pair("Subtitle", 16f),
+      Pair("Heading 1", 18f),
+      Pair("Heading 2", 16f),
+      Pair("Heading 3", 14f),
+      Pair("Default Style for New Excerpts", 13f)
+    )
+    val popH = options.size * rowH
+
+    val popLeft = btnTypoStyleRect.left.coerceIn(12f * density, viewW - popW - 12f * density)
+    val popTop = (typographyBarRect.bottom + 4f * density).coerceAtMost(viewH - popH - 12f * density)
+    styleSheetRect.set(popLeft, popTop, popLeft + popW, popTop + popH)
+
+    val cardBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      style = Paint.Style.FILL
+      setShadowLayer(8f * density, 0f, 4f * density, Color.argb(60, 0, 0, 0))
+    }
+    val cardBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#CBD5E1")
+      strokeWidth = 1f * density
+      style = Paint.Style.STROKE
+    }
+    canvas.drawRoundRect(styleSheetRect, 10f * density, 10f * density, cardBg)
+    canvas.drawRoundRect(styleSheetRect, 10f * density, 10f * density, cardBorder)
+
+    styleOptionRects.clear()
+    val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#F1F5F9")
+      strokeWidth = 1f * density
+    }
+    val dotsPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#94A3B8")
+      textSize = 14f * density
+      isFakeBoldText = true
+    }
+
+    for (i in options.indices) {
+      val name = options[i].first
+      val rTop = popTop + i * rowH
+      val rowRect = RectF(popLeft, rTop, popLeft + popW, rTop + rowH)
+      val menuRect = RectF(rowRect.right - 28f * density, rTop, rowRect.right, rTop + rowH)
+      styleOptionRects.add(Triple(rowRect, name, menuRect))
+
+      val isSelected = card.textStyleName == name || (name == "Default Style for New Excerpts" && card.textStyleName == "Default")
+      if (isSelected) {
+        val selRowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#EFF6FF")
+          style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(rowRect, 6f * density, 6f * density, selRowPaint)
+      }
+
+      val rowTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = if (isSelected) Color.parseColor("#2563EB") else Color.parseColor("#0F172A")
+        textSize = when (name) {
+          "Title" -> 18f * density
+          "Subtitle" -> 14.5f * density
+          "Heading 1" -> 16.5f * density
+          "Heading 2" -> 15f * density
+          "Heading 3" -> 13.5f * density
+          else -> 12.5f * density
+        }
+        isFakeBoldText = name != "Subtitle" && name != "Default Style for New Excerpts"
+        if (name == "Subtitle") textSkewX = -0.15f
+      }
+
+      canvas.drawText(name, rowRect.left + 12f * density, rowRect.centerY() + 4.5f * density, rowTextPaint)
+      canvas.drawText("⋮", rowRect.right - 18f * density, rowRect.centerY() + 4.5f * density, dotsPaint)
+
+      if (i < options.size - 1) {
+        canvas.drawLine(popLeft + 8f * density, rowRect.bottom, popLeft + popW - 8f * density, rowRect.bottom, divPaint)
+      }
+    }
+  }
+
+  private fun drawCardColorPalette(canvas: Canvas, card: NativeCard) {
+    val paletteColors = listOf(
+      Color.parseColor("#EAB308"), // Yellow
+      Color.parseColor("#3B82F6"), // Blue
+      Color.parseColor("#22C55E"), // Green
+      Color.parseColor("#8B5CF6"), // Purple
+      Color.parseColor("#EC4899"), // Pink
+      Color.parseColor("#EF4444")  // Red
+    )
+    val swatchSize = 22f * density
+    val spacing = 6f * density
+    val pW = paletteColors.size * (swatchSize + spacing) + 12f * density
+    val pH = swatchSize + 12f * density
+    val pLeft = (btnCardColorWheelRect.centerX() - pW / 2f).coerceIn(12f * density, width - pW - 12f * density)
+    val pTop = (cardActionBarRect.bottom + 6f * density).coerceAtMost(height - pH - 12f * density)
+    val pRect = RectF(pLeft, pTop, pLeft + pW, pTop + pH)
+
+    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#1E293B"); style = Paint.Style.FILL }
+    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#475569"); strokeWidth = 1f * density; style = Paint.Style.STROKE }
+    canvas.drawRoundRect(pRect, 10f * density, 10f * density, bg)
+    canvas.drawRoundRect(pRect, 10f * density, 10f * density, border)
+
+    cardColorPaletteRects.clear()
+    for (i in paletteColors.indices) {
+      val col = paletteColors[i]
+      val sLeft = pLeft + 6f * density + i * (swatchSize + spacing)
+      val sTop = pTop + 6f * density
+      val sRect = RectF(sLeft, sTop, sLeft + swatchSize, sTop + swatchSize)
+      cardColorPaletteRects.add(Pair(sRect, col))
+
+      val sp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = col; style = Paint.Style.FILL }
+      canvas.drawCircle(sRect.centerX(), sRect.centerY(), swatchSize / 2f, sp)
+      if (col == card.color) {
+        val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2f * density; style = Paint.Style.STROKE }
+        canvas.drawCircle(sRect.centerX(), sRect.centerY(), swatchSize / 2f + 2f * density, ring)
+      }
+    }
+  }
+
+  private fun drawTypoTextColorPalette(canvas: Canvas, card: NativeCard) {
+    val textColors = listOf(
+      Color.parseColor("#1E293B"), // Dark Slate
+      Color.parseColor("#000000"), // Black
+      Color.parseColor("#2563EB"), // Blue
+      Color.parseColor("#16A34A"), // Green
+      Color.parseColor("#DC2626"), // Red
+      Color.parseColor("#D97706")  // Amber
+    )
+    val swatchSize = 22f * density
+    val spacing = 6f * density
+    val pW = textColors.size * (swatchSize + spacing) + 12f * density
+    val pH = swatchSize + 12f * density
+    val pLeft = (btnTypoTextColorRect.centerX() - pW / 2f).coerceIn(12f * density, width - pW - 12f * density)
+    val pTop = (typographyBarRect.bottom + 6f * density).coerceAtMost(height - pH - 12f * density)
+    val pRect = RectF(pLeft, pTop, pLeft + pW, pTop + pH)
+
+    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#1E293B"); style = Paint.Style.FILL }
+    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#475569"); strokeWidth = 1f * density; style = Paint.Style.STROKE }
+    canvas.drawRoundRect(pRect, 10f * density, 10f * density, bg)
+    canvas.drawRoundRect(pRect, 10f * density, 10f * density, border)
+
+    typoTextColorPaletteRects.clear()
+    for (i in textColors.indices) {
+      val col = textColors[i]
+      val sLeft = pLeft + 6f * density + i * (swatchSize + spacing)
+      val sTop = pTop + 6f * density
+      val sRect = RectF(sLeft, sTop, sLeft + swatchSize, sTop + swatchSize)
+      typoTextColorPaletteRects.add(Pair(sRect, col))
+
+      val sp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = col; style = Paint.Style.FILL }
+      canvas.drawCircle(sRect.centerX(), sRect.centerY(), swatchSize / 2f, sp)
+      if (col == card.textColor) {
+        val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2f * density; style = Paint.Style.STROKE }
+        canvas.drawCircle(sRect.centerX(), sRect.centerY(), swatchSize / 2f + 2f * density, ring)
+      }
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Touch Handling & Unified Gesture Arbitration
@@ -2891,6 +3713,196 @@ class ThinkspaceView : View {
         lastTouchScreenX = sx
         lastTouchScreenY = sy
         totalDragDistance = 0f
+
+        // 0A. Check LiquidText Style Sheet Popover Clicks (Screenshot 4)
+        if (isStyleSheetOpen && styleSheetRect.contains(sx, sy)) {
+          val selCard = cards.find { it.id == selectedCardId }
+          if (selCard != null) {
+            for (triple in styleOptionRects) {
+              if (triple.first.contains(sx, sy)) {
+                val styleName = triple.second
+                selCard.undoTextStack.addLast(selCard.text)
+                selCard.textStyleName = styleName
+                when (styleName) {
+                  "Title" -> { selCard.fontSize = 20f; selCard.isBold = true; selCard.isItalic = false }
+                  "Subtitle" -> { selCard.fontSize = 16f; selCard.isBold = false; selCard.isItalic = true }
+                  "Heading 1" -> { selCard.fontSize = 18f; selCard.isBold = true; selCard.isItalic = false }
+                  "Heading 2" -> { selCard.fontSize = 16f; selCard.isBold = true; selCard.isItalic = false }
+                  "Heading 3" -> { selCard.fontSize = 14f; selCard.isBold = true; selCard.isItalic = false }
+                  else -> { selCard.fontSize = 13f; selCard.isBold = false; selCard.isItalic = false }
+                }
+                isStyleSheetOpen = false
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                invalidate()
+                return true
+              }
+            }
+          }
+          isStyleSheetOpen = false
+          invalidate()
+          return true
+        }
+
+        // 0B. Check Color Palette Clicks
+        if (isCardColorPaletteOpen) {
+          val tapped = cardColorPaletteRects.find { it.first.contains(sx, sy) }
+          if (tapped != null) {
+            val selCard = cards.find { it.id == selectedCardId }
+            if (selCard != null) {
+              selCard.color = tapped.second
+              selectedColor = tapped.second
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            }
+            isCardColorPaletteOpen = false
+            invalidate()
+            return true
+          }
+          isCardColorPaletteOpen = false
+          invalidate()
+        }
+
+        if (isTypoTextColorPaletteOpen) {
+          val tapped = typoTextColorPaletteRects.find { it.first.contains(sx, sy) }
+          if (tapped != null) {
+            val selCard = cards.find { it.id == selectedCardId }
+            if (selCard != null) {
+              selCard.textColor = tapped.second
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            }
+            isTypoTextColorPaletteOpen = false
+            invalidate()
+            return true
+          }
+          isTypoTextColorPaletteOpen = false
+          invalidate()
+        }
+
+        // 0C. Check Typography Bar Clicks (Screenshots 2 & 3)
+        if (isTypographyBarVisible && selectedCardId != null && typographyBarRect.contains(sx, sy)) {
+          val selCard = cards.find { it.id == selectedCardId }
+          if (selCard != null) {
+            if (btnTypoUndoRect.contains(sx, sy)) {
+              if (selCard.undoTextStack.isNotEmpty()) {
+                selCard.text = selCard.undoTextStack.removeLast()
+                cursorPosition = selCard.text.length
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                hudToast.show("↩ Undone")
+                invalidate()
+                return true
+              }
+            }
+            if (btnTypoStyleRect.contains(sx, sy)) {
+              isStyleSheetOpen = !isStyleSheetOpen
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnTypoBoldRect.contains(sx, sy)) {
+              selCard.isBold = !selCard.isBold
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnTypoItalicRect.contains(sx, sy)) {
+              selCard.isItalic = !selCard.isItalic
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnTypoUnderlineRect.contains(sx, sy)) {
+              selCard.isUnderline = !selCard.isUnderline
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnTypoStrikeRect.contains(sx, sy)) {
+              selCard.isStrikethrough = !selCard.isStrikethrough
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnTypoFontSizeRect.contains(sx, sy)) {
+              val sizes = listOf(12f, 14f, 16f, 18f, 20f, 24f)
+              val curIdx = sizes.indexOfFirst { it >= selCard.fontSize }.let { if (it == -1) 0 else it }
+              val nextSize = sizes[(curIdx + 1) % sizes.size]
+              selCard.fontSize = nextSize
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              hudToast.show("Font size: ${nextSize.toInt()}pt")
+              invalidate()
+              return true
+            }
+            if (btnTypoTextColorRect.contains(sx, sy)) {
+              isTypoTextColorPaletteOpen = !isTypoTextColorPaletteOpen
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnTypoMoreRect.contains(sx, sy)) {
+              hudToast.show("Typography: ${selCard.textStyleName} (${selCard.fontSize.toInt()}pt)")
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+          }
+          return true
+        }
+
+        // 0D. Check Primary Excerpt Action Bar Clicks (Screenshot 1)
+        if (selectedCardId != null && cardActionBarRect.contains(sx, sy)) {
+          val selCard = cards.find { it.id == selectedCardId }
+          if (selCard != null) {
+            if (btnCardCommentRect.contains(sx, sy)) {
+              hudToast.show("Comment mode for excerpt")
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnCardEditRect.contains(sx, sy)) {
+              startEditingCard(selCard)
+              hudToast.show("✏️ Editing text...")
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnCardCopyRect.contains(sx, sy)) {
+              copyToClipboard(selCard.text)
+              hudToast.show("✓ Copied to clipboard")
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnCardDeleteRect.contains(sx, sy)) {
+              cards.remove(selCard)
+              selectedCardId = null
+              editingCardId = null
+              isTypographyBarVisible = false
+              isStyleSheetOpen = false
+              hudToast.show("🗑️ Excerpt deleted")
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              invalidate()
+              return true
+            }
+            if (btnCardTagsRect.contains(sx, sy)) {
+              hudToast.show("Tags: #keypoint #research")
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnCardColorWheelRect.contains(sx, sy)) {
+              isCardColorPaletteOpen = !isCardColorPaletteOpen
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            if (btnCardTypographyRect.contains(sx, sy)) {
+              isTypographyBarVisible = !isTypographyBarVisible
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+          }
+          return true
+        }
 
         // 0. Check Floating Search HUD clicks if active
         if (isSearchActive && searchHudRect.contains(sx, sy)) {
@@ -2963,15 +3975,12 @@ class ThinkspaceView : View {
                 val excerptBtn = RectF(cLeft + 8f * density, cTop + 4f * density, cLeft + cW - 44f * density, cTop + cH - 4f * density)
                 val closeBtn = RectF(cLeft + cW - 40f * density, cTop + 4f * density, cLeft + cW - 4f * density, cTop + cH - 4f * density)
 
-                activeCropSelection = NativeCropSelection(
+                activeCropSelection = createCropSelection(
                   pageIndex = curPl.pageIndex,
+                  sRect = sRect,
                   pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
-                  screenRect = sRect,
-                  calloutRect = calloutR,
-                  calloutExcerptBtn = excerptBtn,
-                  calloutCloseBtn = closeBtn,
-                  dimensionsText = "Page ${curPl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)",
-                  holdAndDragRect = RectF(sRect.left, sRect.top - 26f * density, sRect.left + 96f * density, sRect.top - 4f * density)
+                  color = selectedColor,
+                  dimensionsText = "Page ${curPl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)"
                 )
               }
             } else {
@@ -3229,22 +4238,98 @@ class ThinkspaceView : View {
             }
           }
 
-          // Check Crop Callout Clicks
+          // Check Crop Callout Clicks, Handles, & Direct Workspace Drag-and-Drop
           val cropSel = activeCropSelection
-          if (cropSel != null && cropSel.calloutRect.contains(sx, sy)) {
-            if (cropSel.calloutExcerptBtn.contains(sx, sy)) {
-              extractCropToCanvas(cropSel)
-              activeCropSelection = null
-              docMode = "text"
-              invalidate()
+          if (cropSel != null) {
+            // 1. Toolbar clicks
+            if (cropSel.calloutRect.contains(sx, sy)) {
+              if (cropSel.calloutHighlightBtn.contains(sx, sy)) {
+                val colorToUse = if (cropSel.color == Color.WHITE) Color.parseColor("#EAB308") else cropSel.color
+                val r = RectF(cropSel.pageBounds.left, cropSel.pageBounds.top, cropSel.pageBounds.right, cropSel.pageBounds.bottom)
+                addAnnotation(cropSel.dimensionsText.ifEmpty { "Highlighted Region" }, cropSel.pageIndex + 1, colorToUse, listOf(r))
+                hudToast.show("Highlighted on Page ${cropSel.pageIndex + 1}")
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                activeCropSelection = null
+                invalidate()
+                return true
+              }
+              if (cropSel.calloutExcerptBtn.contains(sx, sy)) {
+                extractCropToCanvas(cropSel)
+                activeCropSelection = null
+                docMode = "text"
+                invalidate()
+                return true
+              }
+              if (cropSel.calloutCloseBtn.contains(sx, sy)) {
+                activeCropSelection = null
+                docMode = "text"
+                invalidate()
+                return true
+              }
+              if (cropSel.calloutCommentBtn.contains(sx, sy)) {
+                hudToast.show("Comment added to excerpt")
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                invalidate()
+                return true
+              }
+              if (cropSel.calloutBookmarkBtn.contains(sx, sy)) {
+                hudToast.show("Bookmark saved on page ${cropSel.pageIndex + 1}")
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                invalidate()
+                return true
+              }
+              val clickedColorPair = cropSel.calloutColorBtns.find { it.first.contains(sx, sy) }
+              if (clickedColorPair != null) {
+                val colorToUse = if (clickedColorPair.second == Color.WHITE) Color.parseColor("#EAB308") else clickedColorPair.second
+                selectedColor = colorToUse
+                cropSel.color = colorToUse
+                val r = RectF(cropSel.pageBounds.left, cropSel.pageBounds.top, cropSel.pageBounds.right, cropSel.pageBounds.bottom)
+                addAnnotation(cropSel.dimensionsText.ifEmpty { "Highlighted Region" }, cropSel.pageIndex + 1, colorToUse, listOf(r))
+                hudToast.show("Highlighted on Page ${cropSel.pageIndex + 1}")
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                activeCropSelection = null
+                invalidate()
+                return true
+              }
               return true
             }
-            if (cropSel.calloutCloseBtn.contains(sx, sy)) {
-              activeCropSelection = null
-              docMode = "text"
-              invalidate()
+
+            // 2. Check Diagonal Corner Handles (Top-Left & Bottom-Right)
+            val distTL = hypot(sx - cropSel.screenRect.left, sy - cropSel.screenRect.top)
+            val distBR = hypot(sx - cropSel.screenRect.right, sy - cropSel.screenRect.bottom)
+            val handleHitRadius = 34f * density
+
+            if (distTL <= handleHitRadius) {
+              isDraggingCropTopLeftHandle = true
+              isDraggingCropBottomRightHandle = false
+              isScrollingDoc = false
+              parent?.requestDisallowInterceptTouchEvent(true)
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              return true
+            } else if (distBR <= handleHitRadius) {
+              isDraggingCropBottomRightHandle = true
+              isDraggingCropTopLeftHandle = false
+              isScrollingDoc = false
+              parent?.requestDisallowInterceptTouchEvent(true)
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
               return true
             }
+
+            // 3. Check Body Hit -> LiquidText Move / Reposition or Drag into Workspace!
+            if (cropSel.screenRect.contains(sx, sy)) {
+              isMovingCropSelection = true
+              cropDragOffsetDocX = sx - cropSel.screenRect.left
+              cropDragOffsetDocY = sy - cropSel.screenRect.top
+              isScrollingDoc = false
+              parent?.requestDisallowInterceptTouchEvent(true)
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              return true
+            }
+
+            // If tapped outside toolbar, handles, and selection body:
+            // Dismiss selection and allow normal document scrolling
+            activeCropSelection = null
+            invalidate()
           }
 
           // Check Folded Accordion Pleat Tap -> Expand
@@ -3324,6 +4409,27 @@ class ThinkspaceView : View {
               hudToast.show("Navigating to Page ${clickedCard.pageNumber}...")
             }
 
+            // Update cursor position if actively editing this card
+            if (editingCardId == clickedCard.id && !clickedCard.isImage && !clickedCard.isTable && clickedCard.text.isNotEmpty()) {
+              val cardTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = (clickedCard.fontSize * 1.8f).coerceAtLeast(18f)
+                if (clickedCard.isBold) typeface = Typeface.DEFAULT_BOLD
+              }
+              val textW = Math.max(20, (clickedCard.width - 28f).toInt())
+              val layout = android.text.StaticLayout.Builder
+                .obtain(clickedCard.text, 0, clickedCard.text.length, cardTextPaint, textW)
+                .setAlignment(android.text.Layout.Alignment.ALIGN_NORMAL)
+                .build()
+              val relX = wx - (clickedCard.x + 14f)
+              val relY = wy - (clickedCard.y + 36f)
+              if (relY >= 0 && relY <= layout.height && layout.lineCount > 0) {
+                val line = layout.getLineForVertical(relY.toInt())
+                cursorPosition = layout.getOffsetForHorizontal(line, relX).coerceIn(0, clickedCard.text.length)
+                isCursorBlinkVisible = true
+                lastCursorBlinkTime = System.currentTimeMillis()
+              }
+            }
+
             draggingCard = clickedCard
             dragOffsetWorldX = wx - clickedCard.x
             dragOffsetWorldY = wy - clickedCard.y
@@ -3334,6 +4440,11 @@ class ThinkspaceView : View {
           }
 
           selectedCardId = null
+          stopEditingCard()
+          isTypographyBarVisible = false
+          isStyleSheetOpen = false
+          isCardColorPaletteOpen = false
+          isTypoTextColorPaletteOpen = false
 
           // 2. Pan tool or Inking
           if (activeTool == "pan" || activeTool == "select") {
@@ -3467,7 +4578,124 @@ class ThinkspaceView : View {
           return true
         }
 
-        // Dragging Crop Rectangle
+        // Moving / Repositioning Area Excerpt Box or Pulling across into Workspace Canvas
+        if (isMovingCropSelection && activeCropSelection != null) {
+          val sel = activeCropSelection!!
+          val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
+
+          // If dragged across into the workspace canvas: Snap off and lift into workspace!
+          if (sy >= splitY - 8f) {
+            isMovingCropSelection = false
+            isLiftingExcerpt = true
+            liftCandidateText = "[Photo Excerpt]"
+            liftCandidatePage = sel.pageIndex + 1
+            liftCandidateColor = sel.color
+            liftCandidateIsImage = true
+            val cropBmp = generateCropBitmap(sel.pageIndex, sel.pageBounds)
+            val p = if (cropBmp != null) saveCropToFile(cropBmp) else null
+            if (cropBmp != null && p != null) {
+              cardBitmapCache.put(p, cropBmp)
+            }
+            liftCandidateImagePath = p
+            liftCandidateBitmap = cropBmp
+            liftCandidateSourceRects = listOf(RectF(sel.pageBounds.left, sel.pageBounds.top, sel.pageBounds.right, sel.pageBounds.bottom))
+
+            liftAnchorScreenX = sel.screenRect.centerX()
+            liftAnchorScreenY = sel.screenRect.centerY()
+            liftGhostX = sx
+            liftGhostY = sy
+
+            activeCropSelection = null
+            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            invalidate()
+            return true
+          }
+
+          // Otherwise, smoothly move/reposition the selection box within the document pane
+          val pl = pageLayouts.find { it.pageIndex == sel.pageIndex }
+          val leftBound = pl?.boundsOnScreen?.left ?: 8f
+          val rightBound = pl?.boundsOnScreen?.right ?: (width - 8f)
+          val topBound = pl?.boundsOnScreen?.top ?: subheaderH
+          val bottomBound = pl?.boundsOnScreen?.bottom ?: (splitY - 14f)
+
+          val w = sel.screenRect.width()
+          val h = sel.screenRect.height()
+          val newLeft = (sx - cropDragOffsetDocX).coerceIn(leftBound, (rightBound - w).coerceAtLeast(leftBound))
+          val newTop = (sy - cropDragOffsetDocY).coerceIn(topBound, (bottomBound - h).coerceAtLeast(topBound))
+
+          sel.screenRect.set(newLeft, newTop, newLeft + w, newTop + h)
+
+          if (pl != null) {
+            val pW = pl.pageSize.width
+            val pH = pl.pageSize.height
+            val pageLeft = (sel.screenRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageTop = (sel.screenRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            val pageRight = (sel.screenRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageBottom = (sel.screenRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            sel.pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom))
+          }
+          recomputeCropCalloutRects(sel)
+          invalidate()
+          return true
+        }
+
+        // Dragging Top-Left Handle of Area Excerpt
+        if (isDraggingCropTopLeftHandle && activeCropSelection != null) {
+          val sel = activeCropSelection!!
+          val pl = pageLayouts.find { it.pageIndex == sel.pageIndex }
+          val leftBound = pl?.boundsOnScreen?.left ?: 12f
+          val rightBound = sel.screenRect.right - 48f * density
+          val topBound = pl?.boundsOnScreen?.top ?: subheaderH
+          val bottomBound = sel.screenRect.bottom - 48f * density
+
+          val newLeft = sx.coerceIn(leftBound, rightBound)
+          val newTop = sy.coerceIn(topBound, bottomBound)
+          sel.screenRect.left = newLeft
+          sel.screenRect.top = newTop
+
+          if (pl != null) {
+            val pW = pl.pageSize.width
+            val pH = pl.pageSize.height
+            val pageLeft = (sel.screenRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageTop = (sel.screenRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            val pageRight = (sel.screenRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageBottom = (sel.screenRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            sel.pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom))
+          }
+          recomputeCropCalloutRects(sel)
+          invalidate()
+          return true
+        }
+
+        // Dragging Bottom-Right Handle of Area Excerpt
+        if (isDraggingCropBottomRightHandle && activeCropSelection != null) {
+          val sel = activeCropSelection!!
+          val pl = pageLayouts.find { it.pageIndex == sel.pageIndex }
+          val leftBound = sel.screenRect.left + 48f * density
+          val rightBound = pl?.boundsOnScreen?.right ?: (width - 12f)
+          val topBound = sel.screenRect.top + 48f * density
+          val bottomBound = pl?.boundsOnScreen?.bottom ?: (splitY - 14f)
+
+          val newRight = sx.coerceIn(leftBound, rightBound)
+          val newBottom = sy.coerceIn(topBound, bottomBound)
+          sel.screenRect.right = newRight
+          sel.screenRect.bottom = newBottom
+
+          if (pl != null) {
+            val pW = pl.pageSize.width
+            val pH = pl.pageSize.height
+            val pageLeft = (sel.screenRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageTop = (sel.screenRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            val pageRight = (sel.screenRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageBottom = (sel.screenRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            sel.pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom))
+          }
+          recomputeCropCalloutRects(sel)
+          invalidate()
+          return true
+        }
+
+        // Dragging Crop Rectangle dynamically to enclose content
         if (isDraggingCrop) {
           val pl = pageLayouts.find { it.pageIndex == cropPageIndex }
           val leftBound = pl?.boundsOnScreen?.left ?: 16f
@@ -3475,24 +4703,24 @@ class ThinkspaceView : View {
           val topBound = pl?.boundsOnScreen?.top ?: 46f
           val bottomBound = pl?.boundsOnScreen?.bottom ?: (splitY - 14f)
 
-          val left = min(cropStartX, sx).coerceIn(leftBound, rightBound)
-          val top = min(cropStartY, sy).coerceIn(topBound, bottomBound)
-          val right = max(cropStartX, sx).coerceIn(leftBound, rightBound)
-          val bottom = max(cropStartY, sy).coerceIn(topBound, bottomBound)
+          val l = min(cropStartX, sx).coerceIn(leftBound, rightBound)
+          val t = min(cropStartY, sy).coerceIn(topBound, bottomBound)
+          val r = max(cropStartX, sx).coerceIn(leftBound, rightBound)
+          val b = max(cropStartY, sy).coerceIn(topBound, bottomBound)
 
-          val sRect = RectF(left, top, right, bottom)
+          val sRect = RectF(l, t, max(l + 6f * density, r), max(t + 6f * density, b))
           val pW = pl?.pageSize?.width ?: 612f
           val pH = pl?.pageSize?.height ?: 792f
-          val pageLeft = if (pl != null) (left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW else 0f
-          val pageTop = if (pl != null) (top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH else 0f
-          val pageRight = if (pl != null) (right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW else pW
-          val pageBottom = if (pl != null) (bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH else pH
+          val pageLeft = if (pl != null) (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW else 0f
+          val pageTop = if (pl != null) (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH else 0f
+          val pageRight = if (pl != null) (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW else pW
+          val pageBottom = if (pl != null) (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH else pH
 
           // If user dragged crop box across into the canvas zone, seamlessly convert to lift & excerpt!
           if (sy > splitY + 16f) {
             isDraggingCrop = false
             isLiftingExcerpt = true
-            liftCandidateText = "[Figure Crop]"
+            liftCandidateText = "[Photo Excerpt]"
             liftCandidatePage = cropPageIndex + 1
             liftCandidateColor = selectedColor
             liftCandidateIsImage = true
@@ -3517,21 +4745,12 @@ class ThinkspaceView : View {
             return true
           }
 
-          val cW = 160f
-          val cH = 38f
-          val cLeft = sRect.centerX() - cW / 2f
-          val cTop = if (sRect.top - cH - 10f > 50f) sRect.top - cH - 10f else sRect.bottom + 10f
-          val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
-          val excerptBtn = RectF(cLeft + 6f, cTop + 4f, cLeft + 124f, cTop + cH - 4f)
-          val closeBtn = RectF(cLeft + 128f, cTop + 4f, cLeft + cW - 6f, cTop + cH - 4f)
-
-          activeCropSelection = NativeCropSelection(
+          activeCropSelection = createCropSelection(
             pageIndex = cropPageIndex,
+            sRect = sRect,
             pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
-            screenRect = sRect,
-            calloutRect = calloutR,
-            calloutExcerptBtn = excerptBtn,
-            calloutCloseBtn = closeBtn
+            color = selectedColor,
+            dimensionsText = "Page ${cropPageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)"
           )
           invalidate()
           return true
@@ -3614,8 +4833,44 @@ class ThinkspaceView : View {
           pendingLongPressRunnable = null
         }
 
+        if (isDraggingCrop) {
+          isDraggingCrop = false
+          val sel = activeCropSelection
+          if (sel != null && (sel.screenRect.width() < 24f * density || sel.screenRect.height() < 24f * density)) {
+            val pl = pageLayouts.find { it.pageIndex == sel.pageIndex }
+            if (pl != null) {
+              val defW = min(pl.boundsOnScreen.width() * 0.70f, 240f * density)
+              val defH = min(pl.boundsOnScreen.height() * 0.35f, 160f * density)
+              val sRect = RectF(
+                (cropStartX - defW / 2f).coerceIn(pl.boundsOnScreen.left + 8f * density, pl.boundsOnScreen.right - defW - 8f * density),
+                (cropStartY - defH / 2f).coerceIn(pl.boundsOnScreen.top + 8f * density, pl.boundsOnScreen.bottom - defH - 8f * density),
+                (cropStartX + defW / 2f).coerceIn(pl.boundsOnScreen.left + defW + 8f * density, pl.boundsOnScreen.right - 8f * density),
+                (cropStartY + defH / 2f).coerceIn(pl.boundsOnScreen.top + defH + 8f * density, pl.boundsOnScreen.bottom - 8f * density)
+              )
+              val pW = pl.pageSize.width
+              val pH = pl.pageSize.height
+              val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+              val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+              val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+              val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+
+              activeCropSelection = createCropSelection(
+                pageIndex = pl.pageIndex,
+                sRect = sRect,
+                pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
+                color = selectedColor,
+                dimensionsText = "Page ${pl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)"
+              )
+            }
+          }
+          invalidate()
+        }
+
         isDraggingStartHandle = false
         isDraggingEndHandle = false
+        isDraggingCropTopLeftHandle = false
+        isDraggingCropBottomRightHandle = false
+        isMovingCropSelection = false
         isDraggingDivider = false
         isPanningCanvas = false
         isSelectingPdfText = false
@@ -3868,13 +5123,12 @@ class ThinkspaceView : View {
             val excerptBtn = RectF(cLeft + 8f * density, cTop + 4f * density, cLeft + cW - 44f * density, cTop + cH - 4f * density)
             val closeBtn = RectF(cLeft + cW - 40f * density, cTop + 4f * density, cLeft + cW - 4f * density, cTop + cH - 4f * density)
 
-            activeCropSelection = NativeCropSelection(
+            activeCropSelection = createCropSelection(
               pageIndex = pl.pageIndex,
+              sRect = sRect,
               pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
-              screenRect = sRect,
-              calloutRect = calloutR,
-              calloutExcerptBtn = excerptBtn,
-              calloutCloseBtn = closeBtn
+              color = selectedColor,
+              dimensionsText = "Page ${pl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)"
             )
             activePdfSelection = null
             performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -4134,8 +5388,8 @@ class ThinkspaceView : View {
       x = resolved.x,
       y = resolved.y,
       width = cardW,
-      text = "[Figure Excerpt]",
-      color = selectedColor,
+      text = "[Photo Excerpt]",
+      color = cropSel.color,
       pageNumber = cropSel.pageIndex + 1,
       comment = null,
       clusterId = null,
@@ -4153,8 +5407,8 @@ class ThinkspaceView : View {
     activeCropSelection = null
     docMode = "text"
 
-    links.add(NativeLink("link-${System.currentTimeMillis()}", newId, selectedColor))
-    triggerShockwave(resolved.x + cardW / 2f, resolved.y + cardH / 2f, selectedColor)
+    links.add(NativeLink("link-${System.currentTimeMillis()}", newId, cropSel.color))
+    triggerShockwave(resolved.x + cardW / 2f, resolved.y + cardH / 2f, cropSel.color)
     performHapticFeedback(HapticFeedbackConstants.CONFIRM)
     dispatchExtractExcerptEvent(
       text = card.text,
