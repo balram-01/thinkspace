@@ -94,4 +94,5 @@ example/dist/
 
 # Video / Prompt material
 prompt_mtrl/
+promt_mtl/
 *.mp4

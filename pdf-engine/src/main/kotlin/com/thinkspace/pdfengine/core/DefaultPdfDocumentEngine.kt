@@ -56,6 +56,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -483,11 +484,10 @@ class DefaultPdfDocumentEngine(
         }
 
         var unionBounds = selectedWords.first().bounds
-        val quads = mutableListOf<Quad>()
         for (w in selectedWords) {
             unionBounds = unionBounds.union(w.bounds)
-            quads.add(w.bounds.toQuad())
         }
+        val quads = clusterWordsIntoLineBounds(selectedWords).map { it.toQuad() }
 
         return PageTextSelection(
             pageIndex = pageIndex,
@@ -498,17 +498,60 @@ class DefaultPdfDocumentEngine(
         )
     }
 
+    private fun clusterWordsIntoLineBounds(selectedWords: List<TextWord>): List<BoundingBox> {
+        if (selectedWords.isEmpty()) return emptyList()
+        val lineGroups = mutableListOf<MutableList<TextWord>>()
+        for (word in selectedWords) {
+            if (lineGroups.isEmpty()) {
+                lineGroups.add(mutableListOf(word))
+            } else {
+                val currentGroup = lineGroups.last()
+                val prev = currentGroup.last()
+
+                val overlapTop = max(prev.bounds.top, word.bounds.top)
+                val overlapBottom = min(prev.bounds.bottom, word.bounds.bottom)
+                val overlapH = overlapBottom - overlapTop
+                val minH = min(prev.bounds.height, word.bounds.height)
+
+                val baselineMatch = if (prev.baseline > 0f && word.baseline > 0f) {
+                    abs(prev.baseline - word.baseline) <= max(prev.fontSize, word.fontSize) * 0.45f
+                } else false
+
+                val isSameLine = baselineMatch ||
+                    (minH > 0f && overlapH >= minH * 0.45f) ||
+                    (abs(prev.bounds.top - word.bounds.top) <= max(prev.bounds.height, word.bounds.height) * 0.35f)
+
+                if (isSameLine) {
+                    currentGroup.add(word)
+                } else {
+                    lineGroups.add(mutableListOf(word))
+                }
+            }
+        }
+
+        val result = mutableListOf<BoundingBox>()
+        for (group in lineGroups) {
+            if (group.isEmpty()) continue
+            val sorted = group.sortedBy { it.bounds.left }
+            val left = sorted.minOf { it.bounds.left }
+            val right = sorted.maxOf { it.bounds.right }
+            val top = sorted.minOf { it.bounds.top }
+            val bottom = sorted.maxOf { it.bounds.bottom }
+            result.add(BoundingBox(left, top, right, bottom))
+        }
+        return result
+    }
+
     private fun buildSelectionFromWords(pageIndex: Int, selectedWords: List<TextWord>): TextSelection {
         if (selectedWords.isEmpty()) {
             return emptySelection(pageIndex, pageIndex)
         }
 
         var unionBounds = selectedWords.first().bounds
-        val quads = mutableListOf<Quad>()
         for (w in selectedWords) {
             unionBounds = unionBounds.union(w.bounds)
-            quads.add(w.bounds.toQuad())
         }
+        val quads = clusterWordsIntoLineBounds(selectedWords).map { it.toQuad() }
 
         val pageSel = PageTextSelection(
             pageIndex = pageIndex,
