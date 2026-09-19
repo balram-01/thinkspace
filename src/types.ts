@@ -208,6 +208,8 @@ export interface ThinkspaceViewRef {
   prevMatch: () => void;
   undo: () => void;
   redo: () => void;
+  zoomToFit: () => void;
+  zoomOut: () => void;
 }
 
 export interface DocumentViewerProps {

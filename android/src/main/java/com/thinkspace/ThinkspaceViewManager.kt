@@ -133,6 +133,19 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
     return map
   }
 
+  override fun getCommandsMap(): Map<String, Int> {
+    return mapOf(
+      "openSearch" to 1,
+      "closeSearch" to 2,
+      "nextMatch" to 3,
+      "prevMatch" to 4,
+      "undo" to 5,
+      "redo" to 6,
+      "zoomToFit" to 7,
+      "zoomOut" to 7
+    )
+  }
+
   override fun receiveCommand(root: ThinkspaceView, commandId: String, args: com.facebook.react.bridge.ReadableArray?) {
     when (commandId) {
       "openSearch", "1" -> root.promptSearchDialog()
@@ -141,6 +154,7 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "prevMatch", "4" -> root.goToPreviousMatch()
       "undo", "5" -> root.undo()
       "redo", "6" -> root.redo()
+      "zoomToFit", "zoomOut", "7" -> root.zoomToFitCards()
     }
   }
 
@@ -152,6 +166,7 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       4 -> root.goToPreviousMatch()
       5 -> root.undo()
       6 -> root.redo()
+      7 -> root.zoomToFitCards()
     }
   }
 

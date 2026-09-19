@@ -544,11 +544,17 @@ class ThinkspaceView : View {
   private val density: Float get() = context.resources.displayMetrics.density
   private val subheaderH: Float get() = 48f * density
 
+  // LiquidText Real PDF Document Compression Engine
+  val compressionEngine by lazy { DocumentCompressionEngine(density) }
+
   // Dedicated LiquidText Long-Press Lift Engine
   private val longPressHandler = Handler(Looper.getMainLooper())
   private var pendingLongPressRunnable: Runnable? = null
   private var longPressStartX = 0f
   private var longPressStartY = 0f
+  private var docPinchInitialSpan = 0f
+  private var docPinchInitialDistY = 0f
+  private var isDocTwoFingerPinching = false
 
   // Drag & Note editing tracking
   private var dragCardStartX = 0f
@@ -991,36 +997,26 @@ class ThinkspaceView : View {
     }
 
     override fun onScale(detector: ScaleGestureDetector): Boolean {
+      if (compressionEngine.isManualPinching) {
+        return true
+      }
       val fy = detector.focusY
       val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
       if (fy < splitY) {
-        // Pinching inside document zone -> LiquidText accordion squeeze or Pinch-to-Zoom
-        // Also reset canvas focal tracking since this gesture is in doc zone
+        // Document zone zoom (when not two-finger pinch-compressing)
         prevCanvasFocusX = Float.NaN
         prevCanvasFocusY = Float.NaN
-        if (detector.scaleFactor < 0.88f && !isSqueezed && pdfScaleFactor <= 1.05f) {
-          isSqueezed = true
-          performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-          dispatchToggleSqueezeEvent(true)
-          invalidate()
-        } else if (detector.scaleFactor > 1.12f && isSqueezed) {
-          isSqueezed = false
-          performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-          dispatchToggleSqueezeEvent(false)
-          invalidate()
-        } else if (!isSqueezed) {
-          val prevScale = pdfScaleFactor
-          pdfScaleFactor *= detector.scaleFactor
-          pdfScaleFactor = max(1.0f, min(pdfScaleFactor, 5.0f))
-          
-          val scaleChange = pdfScaleFactor / prevScale
-          val focusDocX = detector.focusX + docScrollX
-          val focusDocY = detector.focusY + docScrollY
-          
-          docScrollX = (focusDocX * scaleChange - detector.focusX).coerceAtLeast(0f)
-          docScrollY = (focusDocY * scaleChange - detector.focusY).coerceAtLeast(0f)
-          invalidate()
-        }
+        val prevScale = pdfScaleFactor
+        pdfScaleFactor *= detector.scaleFactor
+        pdfScaleFactor = max(1.0f, min(pdfScaleFactor, 5.0f))
+        
+        val scaleChange = pdfScaleFactor / prevScale
+        val focusDocX = detector.focusX + docScrollX
+        val focusDocY = detector.focusY + docScrollY
+        
+        docScrollX = (focusDocX * scaleChange - detector.focusX).coerceAtLeast(0f)
+        docScrollY = (focusDocY * scaleChange - detector.focusY).coerceAtLeast(0f)
+        invalidate()
         return true
       }
 
@@ -2015,23 +2011,30 @@ class ThinkspaceView : View {
       if (activePdfDoc != null) {
         val pdf = activePdfDoc!!
         val pCount = pdf.pageCount
+        compressionEngine.ensurePageCount(pCount)
+        val annotatedPageIndices = (annotations.map { it.pageNumber - 1 } + cards.map { it.pageNumber - 1 }).toSet()
+        val colorsByPage = annotations.groupBy({ it.pageNumber - 1 }, { it.color })
+        compressionEngine.updateAnnotationData(annotatedPageIndices, colorsByPage)
+
         val standardPageH = paperW * 1.294f
-        val pageStride = if (isSqueezed) (32f + 6f) else (standardPageH + 18f * pdfScaleFactor)
-        val totalDocH = pCount * pageStride
+        val standardGap = 16f * pdfScaleFactor
+        val totalDocH = compressionEngine.getTotalDocHeight(standardPageH, standardGap)
         maxDocScrollY = max(0f, totalDocH - (docBottomY - subheaderH) + 60f)
         maxDocScrollX = max(0f, paperW - basePaperW)
+        if (docScrollY > maxDocScrollY) {
+          docScrollY = maxDocScrollY
+        }
 
-        val firstIdx = max(0, ((docScrollY - 400f) / pageStride).toInt())
-        val lastIdx = min(pCount - 1, ((docScrollY + (docBottomY - subheaderH) + 400f) / pageStride).toInt() + 1)
-
-        for (pageIdx in firstIdx..lastIdx) {
+        var accumDocY = 0f
+        for (pageIdx in 0 until pCount) {
           val pageNum = pageIdx + 1
-          val hasAnnotation = annotations.any { it.pageNumber == pageNum } || cards.any { it.pageNumber == pageNum }
-          val isFolded = isSqueezed && !hasAnnotation
-
-          val pageH = if (isFolded) 32f else standardPageH
-          val pageTopY = subheaderH + 16f - docScrollY + pageIdx * pageStride
+          val pageH = compressionEngine.getDisplayedPageHeight(pageIdx, standardPageH)
+          val pageGap = compressionEngine.getPageGap(pageIdx, standardGap)
+          val pageTopY = subheaderH + 16f - docScrollY + accumDocY
           val screenRect = RectF(paperX, pageTopY, paperX + paperW, pageTopY + pageH)
+          accumDocY += pageH + pageGap
+
+          val isCompressed = compressionEngine.isPageCompressed(pageIdx)
 
           pageLayouts.add(
             PdfPageLayout(
@@ -2040,92 +2043,98 @@ class ThinkspaceView : View {
               pageSize = PageSize.LETTER,
               topY = pageTopY,
               height = pageH,
-              isFolded = isFolded,
+              isFolded = isCompressed,
               boundsOnScreen = screenRect
             )
           )
 
           // Viewport culling: only draw pages touching the visible area
           if (screenRect.bottom >= subheaderH && screenRect.top <= docBottomY) {
-            if (isFolded) {
-              // Accordion folded ribbon
-              canvas.drawRoundRect(screenRect, 8f, 8f, dividerHandlePaint)
-              canvas.drawRoundRect(screenRect, 8f, 8f, dividerBorderPaint)
-              canvas.drawText(
-                "─── Page $pageNum (Folded) • Tap to expand ───",
-                paperX + 24f,
-                screenRect.top + 21f,
-                commentPaint
-              )
-            } else {
-              // Standard PDF Page Paper Background
-              canvas.drawRoundRect(screenRect, 6f, 6f, docPageBgPaint)
-              canvas.drawRoundRect(screenRect, 6f, 6f, docPageBorderPaint)
+            // Standard PDF Page Paper Background
+            canvas.drawRoundRect(screenRect, 4f * density, 4f * density, docPageBgPaint)
+            canvas.drawRoundRect(screenRect, 4f * density, 4f * density, docPageBorderPaint)
 
-              // Check if page bitmap is cached
-              val bmp = pageBitmaps.get(pageIdx)
-              if (bmp != null && !bmp.isRecycled) {
-                canvas.drawBitmap(bmp, null, screenRect, null)
-              } else {
-                // Page loading placeholder
-                val skeletonPaint = Paint().apply { color = Color.parseColor("#F1F5F9") }
-                canvas.drawRoundRect(screenRect, 6f, 6f, skeletonPaint)
+            // Real PDF Page Bitmap rendering!
+            val bmp = pageBitmaps.get(pageIdx)
+            if (bmp != null && !bmp.isRecycled) {
+              canvas.drawBitmap(bmp, null, screenRect, null)
+            } else {
+              // Page loading placeholder
+              val skeletonPaint = Paint().apply { color = Color.parseColor("#F1F5F9") }
+              canvas.drawRoundRect(screenRect, 4f * density, 4f * density, skeletonPaint)
+              if (!isCompressed) {
                 canvas.drawText(
                   "Rendering Page $pageNum...",
                   screenRect.centerX() - 80f,
                   screenRect.centerY(),
                   commentPaint
                 )
+              }
+              // Trigger background render
+              if (!renderingPages.contains(pageIdx)) {
+                renderingPages.add(pageIdx)
+                renderScope.launch(Dispatchers.IO) {
+                  try {
+                    var pageBmp: Bitmap? = null
 
-                // Trigger background render
-                if (!renderingPages.contains(pageIdx)) {
-                  renderingPages.add(pageIdx)
-                  renderScope.launch(Dispatchers.IO) {
-                    try {
-                      var pageBmp: Bitmap? = null
-
-                      // 1. Primary: Try high-speed native C++ Android PdfRenderer (Google Skia)
-                      val wrapper = pdf as? com.thinkspace.pdfengine.parser.PdfBoxDocumentWrapper
-                      if (wrapper != null && wrapper.file.exists()) {
-                        try {
-                          val pfd = ParcelFileDescriptor.open(wrapper.file, ParcelFileDescriptor.MODE_READ_ONLY)
-                          pfd.use { desc ->
-                            val nativeRenderer = android.graphics.pdf.PdfRenderer(desc)
-                            val page = nativeRenderer.openPage(pageIdx)
-                            val scale = 1.6f
-                            val targetW = max(1, (page.width * scale).toInt())
-                            val targetH = max(1, (page.height * scale).toInt())
-                            val bmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-                            bmp.eraseColor(Color.WHITE)
-                            page.render(bmp, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                            page.close()
-                            nativeRenderer.close()
-                            pageBmp = bmp
-                          }
-                        } catch (t: Throwable) {
-                          t.printStackTrace()
+                    // 1. Primary: Try high-speed native C++ Android PdfRenderer (Google Skia)
+                    val wrapper = pdf as? com.thinkspace.pdfengine.parser.PdfBoxDocumentWrapper
+                    if (wrapper != null && wrapper.file.exists()) {
+                      try {
+                        val pfd = ParcelFileDescriptor.open(wrapper.file, ParcelFileDescriptor.MODE_READ_ONLY)
+                        pfd.use { desc ->
+                          val nativeRenderer = android.graphics.pdf.PdfRenderer(desc)
+                          val page = nativeRenderer.openPage(pageIdx)
+                          val scale = 1.6f
+                          val targetW = max(1, (page.width * scale).toInt())
+                          val targetH = max(1, (page.height * scale).toInt())
+                          val b = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                          b.eraseColor(Color.WHITE)
+                          page.render(b, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                          page.close()
+                          nativeRenderer.close()
+                          pageBmp = b
                         }
+                      } catch (t: Throwable) {
+                        t.printStackTrace()
                       }
-
-                      // 2. Secondary fallback: Use DefaultPdfDocumentEngine.renderPage
-                      if (pageBmp == null) {
-                        val engine = PdfEngineModule.getOrCreateEngine(context)
-                        val rendered = engine.renderPage(pdf, pageIdx, RenderOptions(scale = 1.6f))
-                        pageBmp = rendered.bitmap
-                      }
-
-                      if (pageBmp != null) {
-                        pageBitmaps.put(pageIdx, pageBmp)
-                        postInvalidateOnAnimation()
-                      }
-                    } catch (e: Exception) {
-                      e.printStackTrace()
-                    } finally {
-                      renderingPages.remove(pageIdx)
                     }
+
+                    // 2. Secondary fallback: Use DefaultPdfDocumentEngine.renderPage
+                    if (pageBmp == null) {
+                      val engine = PdfEngineModule.getOrCreateEngine(context)
+                      val rendered = engine.renderPage(pdf, pageIdx, RenderOptions(scale = 1.6f))
+                      pageBmp = rendered.bitmap
+                    }
+
+                    if (pageBmp != null) {
+                      pageBitmaps.put(pageIdx, pageBmp)
+                      postInvalidate()
+                    }
+                  } catch (e: Exception) {
+                    e.printStackTrace()
+                  } finally {
+                    renderingPages.remove(pageIdx)
                   }
                 }
               }
+            }
+
+            // If page is compressed, draw subtle paper compression tint & page number on left margin (matching reference image!)
+            if (isCompressed) {
+              val compressTint = Paint().apply {
+                color = Color.parseColor("#0F172A")
+                alpha = 25
+                style = Paint.Style.FILL
+              }
+              canvas.drawRoundRect(screenRect, 4f * density, 4f * density, compressTint)
+              val pLabelPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#64748B")
+                textSize = 10.5f * density
+                isFakeBoldText = true
+              }
+              canvas.drawText("P $pageNum", screenRect.left + 8f * density, screenRect.centerY() + 3.5f * density, pLabelPaint)
+            }
 
               // Extract text words if not already cached
               if (!pageWordsCache.containsKey(pageIdx) && !extractingWords.contains(pageIdx)) {
@@ -2151,30 +2160,47 @@ class ThinkspaceView : View {
               for (ann in pageAnns) {
                 val baseColor = ann.color
                 highlightBgPaint.color = baseColor
-                highlightBgPaint.alpha = 85
+                highlightBgPaint.alpha = if (isCompressed) 215 else 85
                 highlightBorderPaint.color = baseColor
-                highlightBorderPaint.alpha = 180
-                highlightBorderPaint.strokeWidth = 1.5f * density
+                highlightBorderPaint.alpha = if (isCompressed) 240 else 180
+                highlightBorderPaint.strokeWidth = if (isCompressed) 2.5f * density else 1.5f * density
                 if (ann.rects.isNotEmpty()) {
                   for (r in ann.rects) {
                     val l = screenRect.left + (r.left / pageWidth) * screenRect.width()
                     val t = screenRect.top + (r.top / pageHeight) * screenRect.height()
                     val right = screenRect.left + (r.right / pageWidth) * screenRect.width()
                     val b = screenRect.top + (r.bottom / pageHeight) * screenRect.height()
-                    val hRect = RectF(l, t, right, b)
+                    val effectiveB = if (isCompressed) max(t + 4f * density, b) else b
+                    val hRect = RectF(l, t, right, effectiveB)
                     canvas.drawRoundRect(hRect, 3f * density, 3f * density, highlightBgPaint)
-                    if (hRect.width() > 30f * density && hRect.height() > 24f * density) {
+                    if (hRect.width() > 24f * density && hRect.height() > 8f * density) {
                       canvas.drawRoundRect(hRect, 3f * density, 3f * density, highlightBorderPaint)
                     }
                   }
                 } else {
                   canvas.drawRect(
                     screenRect.left + 20f,
-                    screenRect.top + 20f,
+                    screenRect.top + 10f,
                     screenRect.right - 20f,
-                    screenRect.top + 50f,
+                    screenRect.top + if (isCompressed) 20f else 50f,
                     highlightBgPaint
                   )
+                }
+              }
+
+              // LiquidText-style color pills on right margin of compressed pages showing what colors are highlighted
+              if (isCompressed && pageAnns.isNotEmpty()) {
+                val uniqueColors = pageAnns.map { it.color }.distinct()
+                var pillRight = screenRect.right - 10f * density
+                val pillH = min(screenRect.height() - 8f * density, 11f * density)
+                val pillW = 20f * density
+                val pillY = screenRect.centerY() - pillH / 2f
+                val pillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+                for (col in uniqueColors) {
+                  pillPaint.color = col
+                  val pillRect = RectF(pillRight - pillW, pillY, pillRight, pillY + pillH)
+                  canvas.drawRoundRect(pillRect, pillH / 2f, pillH / 2f, pillPaint)
+                  pillRight -= pillW + 4f * density
                 }
               }
 
@@ -2243,8 +2269,7 @@ class ThinkspaceView : View {
               }
             }
           }
-        }
-      } else if (activeDocument != null) {
+        } else if (activeDocument != null) {
         // Fallback Structured Text Sections rendered as a clean resume sheet matching screenshot
         val doc = activeDocument!!
         paragraphLayouts.clear()
@@ -2388,16 +2413,18 @@ class ThinkspaceView : View {
       if (curSel != null && activePdfDoc != null) {
         val selPl = pageLayouts.firstOrNull { it.pageIndex == curSel.pageIndex } ?: run {
           val standardPageH = paperW * 1.294f
-          val pageStride = if (isSqueezed) (32f + 6f) else (standardPageH + 18f * pdfScaleFactor)
-          val pageTopY = subheaderH + 16f - docScrollY + curSel.pageIndex * pageStride
-          val screenRect = RectF(paperX, pageTopY, paperX + paperW, pageTopY + standardPageH)
+          val standardGap = 16f * pdfScaleFactor
+          val pageTopDocY = compressionEngine.getPageTopDocY(curSel.pageIndex, standardPageH, standardGap)
+          val pH = compressionEngine.getDisplayedPageHeight(curSel.pageIndex, standardPageH)
+          val pageTopY = subheaderH + 16f - docScrollY + pageTopDocY
+          val screenRect = RectF(paperX, pageTopY, paperX + paperW, pageTopY + pH)
           PdfPageLayout(
             pageIndex = curSel.pageIndex,
             pageNumber = curSel.pageIndex + 1,
             pageSize = PageSize.LETTER,
             topY = pageTopY,
-            height = standardPageH,
-            isFolded = false,
+            height = pH,
+            isFolded = compressionEngine.isPageCompressed(curSel.pageIndex),
             boundsOnScreen = screenRect
           )
         }
@@ -2408,16 +2435,18 @@ class ThinkspaceView : View {
       if (curCrop != null && activePdfDoc != null) {
         val cropPl = pageLayouts.firstOrNull { it.pageIndex == curCrop.pageIndex } ?: run {
           val standardPageH = paperW * 1.294f
-          val pageStride = if (isSqueezed) (32f + 6f) else (standardPageH + 18f * pdfScaleFactor)
-          val pageTopY = subheaderH + 16f - docScrollY + curCrop.pageIndex * pageStride
-          val screenRect = RectF(paperX, pageTopY, paperX + paperW, pageTopY + standardPageH)
+          val standardGap = 16f * pdfScaleFactor
+          val pageTopDocY = compressionEngine.getPageTopDocY(curCrop.pageIndex, standardPageH, standardGap)
+          val pH = compressionEngine.getDisplayedPageHeight(curCrop.pageIndex, standardPageH)
+          val pageTopY = subheaderH + 16f - docScrollY + pageTopDocY
+          val screenRect = RectF(paperX, pageTopY, paperX + paperW, pageTopY + pH)
           PdfPageLayout(
             pageIndex = curCrop.pageIndex,
             pageNumber = curCrop.pageIndex + 1,
             pageSize = PageSize.LETTER,
             topY = pageTopY,
-            height = standardPageH,
-            isFolded = false,
+            height = pH,
+            isFolded = compressionEngine.isPageCompressed(curCrop.pageIndex),
             boundsOnScreen = screenRect
           )
         }
@@ -4210,8 +4239,21 @@ class ThinkspaceView : View {
     val sy = event.y
 
     val inDivider = hasDoc && (sy in (splitY - 30f)..(splitY + 30f))
+    val midMultiY = if (event.pointerCount >= 2) (event.getY(0) + event.getY(1)) / 2f else sy
     val inDocZone = hasDoc && (sy < splitY - 14f)
+    val inDocZoneMulti = hasDoc && (midMultiY < splitY - 10f)
     val inCanvasZone = sy >= canvasTopY
+
+    if (event.pointerCount >= 2) {
+      // Deterministic gesture arbitration: CANCEL long-press, selection, and handles immediately!
+      pendingLongPressRunnable?.let { longPressHandler.removeCallbacks(it) }
+      pendingLongPressRunnable = null
+      isSelectingPdfText = false
+      isDraggingCrop = false
+      activePdfSelection = null
+      activePoints.clear()
+      activePath.reset()
+    }
 
     if (event.actionMasked == MotionEvent.ACTION_DOWN) {
       if (!docScroller.isFinished) {
@@ -4224,29 +4266,95 @@ class ThinkspaceView : View {
       velocityTracker?.addMovement(event)
     }
 
-    gestureDetector.onTouchEvent(event)
-    scaleGestureDetector.onTouchEvent(event)
+    // Only pass single-touch events to gestureDetector to prevent accidental long-press/selection during pinch
+    if (event.pointerCount == 1 && !compressionEngine.isManualPinching) {
+      gestureDetector.onTouchEvent(event)
+    }
 
-    // 1. Two or more fingers -> Canvas Pan & Zoom or Document Pan & Zoom
-    // NOTE: Canvas pinch zoom + pan are fully handled in ScaleGestureDetector.onScale
-    // to avoid focal point drift. Only doc zone 2-finger panning is handled here.
+    // Only pass events to scaleGestureDetector when NOT performing document compression
+    val shouldRouteToScaleDetector = if (event.pointerCount >= 2 && inDocZoneMulti) {
+      pdfScaleFactor > 1.25f && !compressionEngine.isManualPinching
+    } else {
+      !compressionEngine.isManualPinching
+    }
+    if (shouldRouteToScaleDetector) {
+      scaleGestureDetector.onTouchEvent(event)
+    }
+
+    // 1. Two or more fingers -> Canvas Pan & Zoom or Document Pinch Compression / Pan
     if (event.pointerCount >= 2) {
-      if (inDocZone) {
+      if (inDocZoneMulti) {
         when (event.actionMasked) {
-          MotionEvent.ACTION_MOVE -> {
-            val midX = (event.getX(0) + event.getX(1)) / 2f
-            val midY = (event.getY(0) + event.getY(1)) / 2f
-            if (lastTouchScreenX != 0f && lastTouchScreenY != 0f) {
-              val deltaX = lastTouchScreenX - midX
-              val deltaY = lastTouchScreenY - midY
-              docScrollX = Math.max(0f, Math.min(docScrollX + deltaX, maxDocScrollX))
-              docScrollY = Math.max(0f, Math.min(docScrollY + deltaY, maxDocScrollY))
-              invalidate()
+          MotionEvent.ACTION_POINTER_DOWN -> {
+            if (event.pointerCount == 2) {
+              val y0 = event.getY(0)
+              val y1 = event.getY(1)
+              val x0 = event.getX(0)
+              val x1 = event.getX(1)
+              docPinchInitialSpan = hypot(x0 - x1, y0 - y1)
+              docPinchInitialDistY = abs(y0 - y1)
+              lastTouchScreenX = (x0 + x1) / 2f
+              lastTouchScreenY = (y0 + y1) / 2f
+
+              if (pdfScaleFactor <= 1.15f) {
+                val pageBounds = pageLayouts.map { it.boundsOnScreen }
+                val pageIndices = pageLayouts.map { it.pageIndex }
+                val annotatedPages = (annotations.map { it.pageNumber - 1 } + cards.map { it.pageNumber - 1 }).toSet()
+                compressionEngine.onManualPinchBegin(y0, y1, pageBounds, pageIndices, annotatedPages)
+              }
             }
-            lastTouchScreenX = midX
-            lastTouchScreenY = midY
           }
-          MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+          MotionEvent.ACTION_MOVE -> {
+            val y0 = event.getY(0)
+            val y1 = event.getY(1)
+            val x0 = event.getX(0)
+            val x1 = event.getX(1)
+            val currentDistY = abs(y0 - y1)
+            val currentSpan = hypot(x0 - x1, y0 - y1)
+
+            if (!compressionEngine.isManualPinching && pdfScaleFactor <= 1.15f) {
+              val spanDelta = docPinchInitialSpan - currentSpan
+              val distYDelta = docPinchInitialDistY - currentDistY
+              val isPinchingInward = spanDelta > 8f * density || distYDelta > 8f * density
+              val isVerticalPinch = currentDistY > 24f * density
+
+              if (isPinchingInward || isVerticalPinch) {
+                val pageBounds = pageLayouts.map { it.boundsOnScreen }
+                val pageIndices = pageLayouts.map { it.pageIndex }
+                val annotatedPages = (annotations.map { it.pageNumber - 1 } + cards.map { it.pageNumber - 1 }).toSet()
+                compressionEngine.onManualPinchBegin(y0, y1, pageBounds, pageIndices, annotatedPages)
+              }
+            }
+
+            if (compressionEngine.isManualPinching) {
+              val handled = compressionEngine.onManualPinchMove(y0, y1)
+              if (handled) {
+                invalidate()
+                return true
+              }
+            } else {
+              val midX = (x0 + x1) / 2f
+              val midY = (y0 + y1) / 2f
+              if (lastTouchScreenX != 0f && lastTouchScreenY != 0f) {
+                val deltaX = lastTouchScreenX - midX
+                val deltaY = lastTouchScreenY - midY
+                docScrollX = (docScrollX + deltaX).coerceIn(0f, maxDocScrollX)
+                docScrollY = (docScrollY + deltaY).coerceIn(0f, maxDocScrollY)
+                invalidate()
+              }
+              lastTouchScreenX = midX
+              lastTouchScreenY = midY
+            }
+          }
+          MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_UP -> {
+            if (compressionEngine.isManualPinching) {
+              compressionEngine.onManualPinchEnd(
+                onUpdate = { invalidate() },
+                onHaptic = { performHapticFeedback(HapticFeedbackConstants.CONFIRM) }
+              )
+            }
+            docPinchInitialSpan = 0f
+            docPinchInitialDistY = 0f
             lastTouchScreenX = 0f
             lastTouchScreenY = 0f
           }
@@ -4600,9 +4708,26 @@ class ThinkspaceView : View {
             return true
           }
           if (rightSqueezeTabRect.contains(sx, sy) || headerSqueezeRect.contains(sx, sy)) {
-            isSqueezed = !isSqueezed
-            dispatchToggleSqueezeEvent(isSqueezed)
-            hudToast.show(if (isSqueezed) "Document Squeezed" else "Document Expanded")
+            if (isSearchActive && searchMatches.isNotEmpty()) {
+              if (compressionEngine.isAnyPageCompressed()) {
+                compressionEngine.resetAllToNormal(animate = true) { invalidate() }
+                hudToast.show("Search Results Expanded")
+              } else {
+                val matchingPages = searchMatches.map { it.pageIndex }.toSet()
+                compressionEngine.applySearchMatches(matchingPages, animate = true) { invalidate() }
+                hudToast.show("Non-Matching Pages Compressed")
+              }
+            } else {
+              if (compressionEngine.isAnyPageCompressed()) {
+                compressionEngine.resetAllToNormal(animate = true) { invalidate() }
+                hudToast.show("Document Expanded")
+              } else {
+                val annotatedPages = annotations.map { it.pageNumber - 1 }.toSet() + cards.map { it.pageNumber - 1 }.toSet()
+                compressionEngine.applySearchMatches(annotatedPages, animate = true) { invalidate() }
+                hudToast.show("Document Compressed")
+              }
+            }
+            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
             invalidate()
             return true
           }
@@ -4626,12 +4751,7 @@ class ThinkspaceView : View {
             }
           }
           if (resetCanvasBtnRect.contains(sx, sy)) {
-            panX = 0f
-            panY = 0f
-            scaleFactor = 1f
-            dispatchTransformEvent()
-            hudToast.show("Canvas Centered")
-            invalidate()
+            zoomToFitCards()
             return true
           }
           return true
@@ -4949,11 +5069,11 @@ class ThinkspaceView : View {
             invalidate()
           }
 
-          // Check Folded Accordion Pleat Tap -> Expand
+          // Check if tapped on a compressed page -> Expand it!
           for (pl in pageLayouts) {
             if (pl.isFolded && pl.boundsOnScreen.contains(sx, sy)) {
-              isSqueezed = false
-              dispatchToggleSqueezeEvent(false)
+              compressionEngine.expandPage(pl.pageIndex, animate = true) { invalidate() }
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
               invalidate()
               return true
             }
@@ -5769,7 +5889,12 @@ class ThinkspaceView : View {
     // 1. Real PDF Word Selection
     if (activePdfDoc != null) {
       for (pl in pageLayouts) {
-        if (!pl.isFolded && pl.boundsOnScreen.contains(tapX, tapY)) {
+        if (pl.boundsOnScreen.contains(tapX, tapY)) {
+          if (pl.isFolded) {
+            compressionEngine.expandPage(pl.pageIndex, animate = true) { invalidate() }
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            return
+          }
           val words = pageWordsCache[pl.pageIndex]
           if (words != null && words.isNotEmpty()) {
             val px = (tapX - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
@@ -6408,6 +6533,7 @@ class ThinkspaceView : View {
 
   private var docScrollAnimator: ValueAnimator? = null
   private var pulseAnimator: ValueAnimator? = null
+  private var canvasAnimator: ValueAnimator? = null
 
   private fun scrollToDocumentPage(targetPageNum: Int, sourceRects: List<RectF> = emptyList()) {
     val viewW = width.toFloat().coerceAtLeast(100f)
@@ -6427,18 +6553,19 @@ class ThinkspaceView : View {
       val basePaperW = viewW - paperMargin * 2f
       val paperW = basePaperW * pdfScaleFactor
       val standardPageH = paperW * 1.294f
-      val pageStride = if (isSqueezed) (32f + 6f) else (standardPageH + 18f * pdfScaleFactor)
-      val totalDocH = pCount * pageStride
+      val standardGap = 16f * pdfScaleFactor
+      val totalDocH = compressionEngine.getTotalDocHeight(standardPageH, standardGap)
       val maxScroll = max(0f, totalDocH - (docBottomY - subheaderH) + 60f)
 
-      val pageTopDocY = pageIdx * pageStride
+      val pageTopDocY = compressionEngine.getPageTopDocY(pageIdx, standardPageH, standardGap)
+      val displayedH = compressionEngine.getDisplayedPageHeight(pageIdx, standardPageH)
 
       targetScrollY = if (sourceRects.isNotEmpty()) {
         val minY = sourceRects.minOf { it.top }
         val maxY = sourceRects.maxOf { it.bottom }
         val centerPdfY = (minY + maxY) / 2f
         val pdfH = com.thinkspace.pdfengine.model.PageSize.LETTER.height
-        val scale = if (pdfH > 0f) standardPageH / pdfH else 1f
+        val scale = if (pdfH > 0f) displayedH / pdfH else 1f
         val sourceOffset = centerPdfY * scale
         val sourceDocY = pageTopDocY + sourceOffset
         (sourceDocY - viewportH / 2f + 16f).coerceIn(0f, maxScroll)
@@ -6512,9 +6639,18 @@ class ThinkspaceView : View {
     isSearching = false
     searchMatches.clear()
     currentSearchIndex = 0
+    compressionEngine.resetAllToNormal(animate = true) { invalidate() }
     // Remove native overlay panel if visible
     removeSearchOverlay()
     invalidate()
+  }
+
+  fun triggerSearchCollapse() {
+    if (activePdfDoc == null || searchMatches.isEmpty()) return
+    val matchingPages = searchMatches.map { it.pageIndex }.toSet()
+    compressionEngine.applySearchMatches(matchingPages, animate = true) {
+      invalidate()
+    }
   }
 
   private fun removeSearchOverlay() {
@@ -6636,6 +6772,11 @@ class ThinkspaceView : View {
             updateSearchCounter()
             if (searchMatches.isEmpty()) {
               hudToast.show("No matches for \"$q\"")
+            } else {
+              val matchingPages = searchMatches.map { it.pageIndex }.toSet()
+              compressionEngine.applySearchMatches(matchingPages, animate = true) {
+                invalidate()
+              }
             }
             invalidate()
           }
@@ -6670,6 +6811,10 @@ class ThinkspaceView : View {
               currentSearchIndex = 0
               updateSearchCounter()
               if (searchMatches.isNotEmpty()) {
+                val matchingPages = searchMatches.map { it.pageIndex }.toSet()
+                compressionEngine.applySearchMatches(matchingPages, animate = true) {
+                  invalidate()
+                }
                 scrollToCurrentMatch()
               } else {
                 hudToast.show("No matches for \"$q\"")
@@ -7119,6 +7264,97 @@ class ThinkspaceView : View {
       putString("id", strokeId)
     }
     eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topEraseStroke", data))
+  }
+
+  fun zoomToFitCards() {
+    if (width <= 0 || height <= 0) {
+      post { zoomToFitCards() }
+      return
+    }
+
+    val viewW = width.toFloat()
+    val viewH = height.toFloat()
+    val hasDoc = activePdfDoc != null || activeDocument != null
+    val splitY = if (hasDoc) viewH * effectiveSplitRatio else 0f
+    val canvasTopY = if (hasDoc && effectiveSplitRatio > 0f) splitY + 14f else 0f
+    val viewportH = (viewH - canvasTopY).coerceAtLeast(100f)
+    val viewportW = viewW.coerceAtLeast(100f)
+
+    var minX = Float.MAX_VALUE
+    var maxX = -Float.MAX_VALUE
+    var minY = Float.MAX_VALUE
+    var maxY = -Float.MAX_VALUE
+    var hasContent = false
+
+    for (c in cards) {
+      minX = minOf(minX, c.x)
+      maxX = maxOf(maxX, c.x + c.width)
+      minY = minOf(minY, c.y)
+      maxY = maxOf(maxY, c.y + c.getHeight())
+      hasContent = true
+    }
+
+    for (s in strokes) {
+      for (p in s.points) {
+        minX = minOf(minX, p.x)
+        maxX = maxOf(maxX, p.x)
+        minY = minOf(minY, p.y)
+        maxY = maxOf(maxY, p.y)
+        hasContent = true
+      }
+    }
+
+    val targetPanX: Float
+    val targetPanY: Float
+    val targetScale: Float
+
+    if (!hasContent) {
+      targetPanX = 0f
+      targetPanY = 0f
+      targetScale = 1.0f
+    } else {
+      val contentW = (maxX - minX).coerceAtLeast(80f)
+      val contentH = (maxY - minY).coerceAtLeast(80f)
+      val contentCenterX = (minX + maxX) / 2f
+      val contentCenterY = (minY + maxY) / 2f
+
+      val padding = 56f * density
+      val availW = (viewportW - 2 * padding).coerceAtLeast(80f)
+      val availH = (viewportH - 2 * padding).coerceAtLeast(80f)
+
+      val fitScale = minOf(availW / contentW, availH / contentH)
+      targetScale = fitScale.coerceIn(camera.minScale, 1.05f)
+
+      targetPanX = (viewportW / 2f) - (contentCenterX * targetScale)
+      targetPanY = (viewportH / 2f) - (contentCenterY * targetScale)
+    }
+
+    val startPanX = panX
+    val startPanY = panY
+    val startScale = scaleFactor
+
+    canvasAnimator?.cancel()
+    val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+      duration = 380
+      interpolator = DecelerateInterpolator()
+      addUpdateListener { animator ->
+        val fraction = animator.animatedFraction
+        panX = startPanX + (targetPanX - startPanX) * fraction
+        panY = startPanY + (targetPanY - startPanY) * fraction
+        scaleFactor = startScale + (targetScale - startScale) * fraction
+        dispatchTransformEvent()
+        invalidate()
+      }
+    }
+    canvasAnimator = anim
+    anim.start()
+
+    performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+    if (hasContent) {
+      hudToast.show("Zoomed to Cards")
+    } else {
+      hudToast.show("Workspace Centered")
+    }
   }
 
   fun undo(): Boolean {

@@ -89,6 +89,18 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         (UIManager as any).dispatchViewManagerCommand(handle, 'redo', []);
       }
     },
+    zoomToFit: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        (UIManager as any).dispatchViewManagerCommand(handle, 'zoomToFit', []);
+      }
+    },
+    zoomOut: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        (UIManager as any).dispatchViewManagerCommand(handle, 'zoomToFit', []);
+      }
+    },
   }));
 
   const documentJson = useMemo(

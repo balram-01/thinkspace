@@ -370,8 +370,7 @@ export default function App() {
           style={styles.toolItem}
           activeOpacity={0.7}
           onPress={() => {
-            // Zoom out canvas view
-            setTool('select');
+            thinkspaceRef.current?.zoomToFit?.();
           }}
         >
           <Text style={styles.toolIcon}>⊝</Text>

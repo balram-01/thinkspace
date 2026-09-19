@@ -321,6 +321,14 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
         onUndoStateChange?.(true, redoStack.current.length > 0);
       }
     },
+    zoomToFit: () => {
+      setScale(1);
+      setPan({ x: 0, y: 0 });
+    },
+    zoomOut: () => {
+      setScale(1);
+      setPan({ x: 0, y: 0 });
+    },
   }));
 
   const [splitRatio, setSplitRatio] = useState(propSplitRatio);
