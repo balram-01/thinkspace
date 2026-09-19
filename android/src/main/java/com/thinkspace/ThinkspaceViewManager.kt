@@ -124,7 +124,8 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "topTransformChange" to "onTransformChange",
       "topSplitRatioChange" to "onSplitRatioChange",
       "topExtractExcerpt" to "onExtractExcerpt",
-      "topToggleSqueeze" to "onToggleSqueeze"
+      "topToggleSqueeze" to "onToggleSqueeze",
+      "topUndoStateChange" to "onUndoStateChange"
     )
     for ((top, on) in events) {
       map[top] = mapOf("registrationName" to on)
@@ -138,6 +139,8 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "closeSearch", "2" -> root.closeSearch()
       "nextMatch", "3" -> root.goToNextMatch()
       "prevMatch", "4" -> root.goToPreviousMatch()
+      "undo", "5" -> root.undo()
+      "redo", "6" -> root.redo()
     }
   }
 
@@ -147,6 +150,8 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       2 -> root.closeSearch()
       3 -> root.goToNextMatch()
       4 -> root.goToPreviousMatch()
+      5 -> root.undo()
+      6 -> root.redo()
     }
   }
 

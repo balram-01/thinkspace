@@ -264,6 +264,9 @@ class ThinkspaceView : View {
     defStyleAttr
   )
 
+  // Undo/Redo Engine
+  val undoRedoManager = UndoRedoManager()
+
   init {
     isFocusable = true
     isFocusableInTouchMode = true
@@ -283,6 +286,10 @@ class ThinkspaceView : View {
         postInvalidateOnAnimation()
       }
       insets
+    }
+
+    undoRedoManager.onStateChanged = { canUndo, canRedo ->
+      dispatchUndoStateChangeEvent(canUndo, canRedo)
     }
   }
 
@@ -390,6 +397,10 @@ class ThinkspaceView : View {
   }
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+    if (event != null && (event.isCtrlPressed || event.isMetaPressed) && keyCode == KeyEvent.KEYCODE_Z) {
+      if (event.isShiftPressed) redo() else undo()
+      return true
+    }
     if (editingCardId != null) {
       if (keyCode == KeyEvent.KEYCODE_BACK) {
         stopEditingCard()
@@ -427,6 +438,14 @@ class ThinkspaceView : View {
   }
 
   private fun startEditingCard(card: NativeCard) {
+    editCardInitialText = card.text
+    editCardInitialFontSize = card.fontSize
+    editCardInitialBold = card.isBold
+    editCardInitialItalic = card.isItalic
+    editCardInitialUnderline = card.isUnderline
+    editCardInitialStrike = card.isStrikethrough
+    editCardInitialTextColor = card.textColor
+    editCardInitialStyleName = card.textStyleName
     editingCardId = card.id
     selectedCardId = card.id
     cursorPosition = card.text.length
@@ -443,6 +462,33 @@ class ThinkspaceView : View {
 
   private fun stopEditingCard() {
     if (editingCardId != null) {
+      val card = cards.find { it.id == editingCardId }
+      if (card != null && (card.text != editCardInitialText || card.fontSize != editCardInitialFontSize ||
+          card.isBold != editCardInitialBold || card.isItalic != editCardInitialItalic ||
+          card.isUnderline != editCardInitialUnderline || card.isStrikethrough != editCardInitialStrike ||
+          card.textColor != editCardInitialTextColor || card.textStyleName != editCardInitialStyleName)) {
+        undoRedoManager.record(EditCardTextAction(
+          cardId = card.id,
+          prevText = editCardInitialText,
+          newText = card.text,
+          prevFontSize = editCardInitialFontSize,
+          newFontSize = card.fontSize,
+          prevBold = editCardInitialBold,
+          newBold = card.isBold,
+          prevItalic = editCardInitialItalic,
+          newItalic = card.isItalic,
+          prevUnderline = editCardInitialUnderline,
+          newUnderline = card.isUnderline,
+          prevStrike = editCardInitialStrike,
+          newStrike = card.isStrikethrough,
+          prevTextColor = editCardInitialTextColor,
+          newTextColor = card.textColor,
+          prevStyleName = editCardInitialStyleName,
+          newStyleName = card.textStyleName,
+          cardsList = cards,
+          onTextChanged = { _, _ -> invalidate() }
+        ))
+      }
       editingCardId = null
       isTypographyBarVisible = false
       isStyleSheetOpen = false
@@ -503,6 +549,18 @@ class ThinkspaceView : View {
   private var pendingLongPressRunnable: Runnable? = null
   private var longPressStartX = 0f
   private var longPressStartY = 0f
+
+  // Drag & Note editing tracking
+  private var dragCardStartX = 0f
+  private var dragCardStartY = 0f
+  private var editCardInitialText: String = ""
+  private var editCardInitialFontSize: Float = 13f
+  private var editCardInitialBold: Boolean = false
+  private var editCardInitialItalic: Boolean = false
+  private var editCardInitialUnderline: Boolean = false
+  private var editCardInitialStrike: Boolean = false
+  private var editCardInitialTextColor: Int = Color.parseColor("#1E293B")
+  private var editCardInitialStyleName: String = "Default"
 
   // Canvas Collections
   private val strokes = mutableListOf<NativeStroke>()
@@ -1582,13 +1640,15 @@ class ThinkspaceView : View {
   }
 
   fun setAnnotationsFromJson(json: String?) {
-    annotations.clear()
     if (json.isNullOrEmpty()) {
-      invalidate()
       return
     }
     try {
       val arr = JSONArray(json)
+      if (arr.length() == 0 && annotations.isNotEmpty()) {
+        return
+      }
+      val incoming = mutableListOf<NativeAnnotation>()
       for (i in 0 until arr.length()) {
         val obj = arr.getJSONObject(i)
         val id = obj.optString("id", "ann-$i")
@@ -1611,8 +1671,13 @@ class ThinkspaceView : View {
             ))
           }
         }
-        annotations.add(NativeAnnotation(id, sectionId, pIdx, pageNumber, color, text, rects))
+        incoming.add(NativeAnnotation(id, sectionId, pIdx, pageNumber, color, text, rects))
       }
+      val incomingIds = incoming.map { it.id }.toSet()
+      val localOnly = annotations.filter { !incomingIds.contains(it.id) }
+      annotations.clear()
+      annotations.addAll(incoming)
+      annotations.addAll(localOnly)
     } catch (e: Exception) {
       e.printStackTrace()
     }
@@ -4232,8 +4297,21 @@ class ThinkspaceView : View {
           if (tapped != null) {
             val selCard = cards.find { it.id == selectedCardId }
             if (selCard != null) {
-              selCard.color = tapped.second
-              selectedColor = tapped.second
+              val prevCol = selCard.color
+              val newCol = tapped.second
+              selCard.color = newCol
+              selectedColor = newCol
+              undoRedoManager.record(ChangeCardColorAction(
+                cardId = selCard.id,
+                prevColor = prevCol,
+                newColor = newCol,
+                cardsList = cards,
+                onColorChanged = { id, col ->
+                  dispatchChangeCardColorEvent(id, col)
+                  invalidate()
+                }
+              ))
+              dispatchChangeCardColorEvent(selCard.id, newCol)
               performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             }
             isCardColorPaletteOpen = false
@@ -4271,6 +4349,9 @@ class ThinkspaceView : View {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 hudToast.show("↩ Undone")
                 invalidate()
+                return true
+              } else {
+                undo()
                 return true
               }
             }
@@ -4361,7 +4442,34 @@ class ThinkspaceView : View {
               return true
             }
             if (btnCardDeleteRect.contains(sx, sy)) {
+              val associatedLinks = links.filter { it.sourceExcerptId == selCard.id }
               cards.remove(selCard)
+              links.removeAll(associatedLinks)
+              undoRedoManager.record(DeleteCardAction(
+                card = selCard,
+                associatedLinks = associatedLinks,
+                cardsList = cards,
+                linksList = links,
+                onUndoDispatched = { restoredCard, restoredLinks ->
+                  dispatchExtractExcerptEvent(
+                    restoredCard.text,
+                    restoredCard.pageNumber,
+                    restoredCard.color,
+                    restoredCard.isImage,
+                    restoredCard.imageUrl,
+                    restoredCard.x,
+                    restoredCard.y,
+                    restoredCard.id,
+                    restoredCard.sourceRects
+                  )
+                  invalidate()
+                },
+                onRedoDispatched = { c ->
+                  dispatchCardDeleteEvent(c.id)
+                  invalidate()
+                }
+              ))
+              dispatchCardDeleteEvent(selCard.id)
               selectedCardId = null
               editingCardId = null
               isTypographyBarVisible = false
@@ -4537,6 +4645,13 @@ class ThinkspaceView : View {
 
         // Document Zone Gestures
         if (inDocZone) {
+          // Eraser on PDF Annotations
+          if (activeTool == "eraser") {
+            if (eraseAnnotationNear(sx, sy)) {
+              return true
+            }
+          }
+
           val pdfSel = activePdfSelection
           
           // 1. Check Precise Selection Handles First (CLOSEST PIN WINS - fixes single-word selection bug)
@@ -4933,6 +5048,8 @@ class ThinkspaceView : View {
             }
 
             draggingCard = clickedCard
+            dragCardStartX = clickedCard.x
+            dragCardStartY = clickedCard.y
             dragOffsetWorldX = wx - clickedCard.x
             dragOffsetWorldY = wy - clickedCard.y
             dispatchExcerptPressEvent(clickedCard.id)
@@ -5275,6 +5392,12 @@ class ThinkspaceView : View {
           return true
         }
 
+        // Erasing in Document Zone
+        if (activeTool == "eraser" && inDocZone) {
+          eraseAnnotationNear(sx, sy)
+          return true
+        }
+
         // Scrolling Document
         if (isScrollingDoc) {
           docScrollX = (docScrollX - dx).coerceIn(0f, maxDocScrollX)
@@ -5469,7 +5592,24 @@ class ThinkspaceView : View {
               )
               cards.add(card)
 
-              links.add(NativeLink("link-${System.currentTimeMillis()}", newId, liftCandidateColor))
+              val newLink = NativeLink("link-${System.currentTimeMillis()}", newId, liftCandidateColor)
+              links.add(newLink)
+              undoRedoManager.record(CreateCardAction(
+                card = card,
+                link = newLink,
+                cardsList = cards,
+                linksList = links,
+                onUndoDispatched = { c ->
+                  dispatchCardDeleteEvent(c.id)
+                  invalidate()
+                },
+                onRedoDispatched = { c, _ ->
+                  dispatchExtractExcerptEvent(
+                    c.text, c.pageNumber, c.color, c.isImage, c.imageUrl, c.x, c.y, c.id, c.sourceRects
+                  )
+                  invalidate()
+                }
+              ))
               triggerShockwave(resolvedPos.x + cardW / 2f, resolvedPos.y + cardH / 2f, liftCandidateColor)
               performHapticFeedback(HapticFeedbackConstants.CONFIRM)
               dispatchExtractExcerptEvent(
@@ -5509,6 +5649,7 @@ class ThinkspaceView : View {
           val card = draggingCard!!
           val snapTarget = if (magneticTargetCardId != null) cards.find { it.id == magneticTargetCardId && it.id != card.id } else null
           if (snapTarget != null) {
+            val prevLink = links.find { it.sourceExcerptId == card.id }
             val newExcerpt = GroupedExcerpt(
               id = card.id,
               text = card.text,
@@ -5520,10 +5661,56 @@ class ThinkspaceView : View {
             MagneticStackingEngine.stackIntoCard(snapTarget, newExcerpt)
             cards.remove(card)
             links.removeIf { it.sourceExcerptId == card.id }
-            links.add(NativeLink("link-${System.currentTimeMillis()}", snapTarget.id, card.color))
+            val newLink = NativeLink("link-${System.currentTimeMillis()}", snapTarget.id, card.color)
+            links.add(newLink)
+            undoRedoManager.record(StackCardAction(
+              targetCardId = snapTarget.id,
+              stackedItem = newExcerpt,
+              originalCard = card,
+              previousLink = prevLink,
+              cardsList = cards,
+              linksList = links,
+              onUndoDispatched = { restoredCard, restoredLink ->
+                dispatchExtractExcerptEvent(
+                  restoredCard.text,
+                  restoredCard.pageNumber,
+                  restoredCard.color,
+                  restoredCard.isImage,
+                  restoredCard.imageUrl,
+                  restoredCard.x,
+                  restoredCard.y,
+                  restoredCard.id,
+                  restoredCard.sourceRects
+                )
+                invalidate()
+              },
+              onRedoDispatched = { _, _ ->
+                dispatchCardDeleteEvent(card.id)
+                invalidate()
+              }
+            ))
             performHapticFeedback(HapticFeedbackConstants.CONFIRM)
             hudToast.show("Magnetically stacked with nearby card!")
           } else {
+            val dist = hypot(card.x - dragCardStartX, card.y - dragCardStartY)
+            if (dist > 2f) {
+              val startX = dragCardStartX
+              val startY = dragCardStartY
+              val endX = card.x
+              val endY = card.y
+              undoRedoManager.record(MoveCardAction(
+                cardId = card.id,
+                prevX = startX,
+                prevY = startY,
+                newX = endX,
+                newY = endY,
+                cardsList = cards,
+                onPositionChanged = { id, x, y ->
+                  dispatchExcerptMoveEndEvent(id, x, y)
+                  invalidate()
+                }
+              ))
+            }
             dispatchExcerptMoveEndEvent(card.id, card.x, card.y)
           }
           draggingCard = null
@@ -5542,6 +5729,18 @@ class ThinkspaceView : View {
             isHighlighter = activeTool == "highlighter"
           )
           strokes.add(newStroke)
+          undoRedoManager.record(AddStrokeAction(
+            stroke = newStroke,
+            strokesList = strokes,
+            onUndoDispatched = { s ->
+              dispatchEraseStrokeEvent(s.id)
+              invalidate()
+            },
+            onRedoDispatched = { s ->
+              dispatchAddStrokeEvent(s)
+              invalidate()
+            }
+          ))
           dispatchAddStrokeEvent(newStroke)
           activePoints.clear()
           activePath.reset()
@@ -5957,28 +6156,44 @@ class ThinkspaceView : View {
       existingCards = cards
     )
 
-    cards.add(
-      NativeCard(
-        id = newId,
-        x = resolved.x,
-        y = resolved.y,
-        width = cardW,
-        text = text,
-        color = color,
-        pageNumber = pageNumber,
-        comment = null,
-        clusterId = null,
-        stackCount = 1,
-        isImage = false,
-        imageUrl = null,
-        isTable = false,
-        tableRows = null,
-        groupedItems = null,
-        sourceRects = pdfRects
-      )
+    val card = NativeCard(
+      id = newId,
+      x = resolved.x,
+      y = resolved.y,
+      width = cardW,
+      text = text,
+      color = color,
+      pageNumber = pageNumber,
+      comment = null,
+      clusterId = null,
+      stackCount = 1,
+      isImage = false,
+      imageUrl = null,
+      isTable = false,
+      tableRows = null,
+      groupedItems = null,
+      sourceRects = pdfRects
     )
+    cards.add(card)
 
-    links.add(NativeLink("link-${System.currentTimeMillis()}", newId, color))
+    val newLink = NativeLink("link-${System.currentTimeMillis()}", newId, color)
+    links.add(newLink)
+    undoRedoManager.record(CreateCardAction(
+      card = card,
+      link = newLink,
+      cardsList = cards,
+      linksList = links,
+      onUndoDispatched = { c ->
+        dispatchCardDeleteEvent(c.id)
+        invalidate()
+      },
+      onRedoDispatched = { c, _ ->
+        dispatchExtractExcerptEvent(
+          c.text, c.pageNumber, c.color, c.isImage, c.imageUrl, c.x, c.y, c.id, c.sourceRects
+        )
+        invalidate()
+      }
+    ))
     triggerShockwave(resolved.x + cardW / 2f, resolved.y + cardH / 2f, color)
     performHapticFeedback(HapticFeedbackConstants.CONFIRM)
     dispatchExtractExcerptEvent(
@@ -6043,7 +6258,24 @@ class ThinkspaceView : View {
     activeCropSelection = null
     docMode = "text"
 
-    links.add(NativeLink("link-${System.currentTimeMillis()}", newId, cropSel.color))
+    val newLink = NativeLink("link-${System.currentTimeMillis()}", newId, cropSel.color)
+    links.add(newLink)
+    undoRedoManager.record(CreateCardAction(
+      card = card,
+      link = newLink,
+      cardsList = cards,
+      linksList = links,
+      onUndoDispatched = { c ->
+        dispatchCardDeleteEvent(c.id)
+        invalidate()
+      },
+      onRedoDispatched = { c, _ ->
+        dispatchExtractExcerptEvent(
+          c.text, c.pageNumber, c.color, c.isImage, c.imageUrl, c.x, c.y, c.id, c.sourceRects
+        )
+        invalidate()
+      }
+    ))
     triggerShockwave(resolved.x + cardW / 2f, resolved.y + cardH / 2f, cropSel.color)
     performHapticFeedback(HapticFeedbackConstants.CONFIRM)
     dispatchExtractExcerptEvent(
@@ -6085,8 +6317,51 @@ class ThinkspaceView : View {
 
   private fun addAnnotation(text: String, pageNumber: Int, color: Int, rects: List<RectF> = emptyList()) {
     val annId = "ann-${System.currentTimeMillis()}"
-    annotations.add(NativeAnnotation(annId, "page-$pageNumber", 0, pageNumber, color, text, rects))
+    val ann = NativeAnnotation(annId, "page-$pageNumber", 0, pageNumber, color, text, rects)
+    annotations.add(ann)
+    undoRedoManager.record(AddAnnotationAction(
+      annotation = ann,
+      annotationsList = annotations,
+      onUndoDispatched = { invalidate() },
+      onRedoDispatched = { invalidate() }
+    ))
     invalidate()
+  }
+
+  private fun eraseAnnotationNear(sx: Float, sy: Float): Boolean {
+    val threshold = 28f * density
+    val targetAnn = annotations.findLast { ann ->
+      val pl = pageLayouts.find { it.pageNumber == ann.pageNumber }
+      if (pl != null && !pl.isFolded) {
+        val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
+          ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+        val pW = pSize.width
+        val pH = pSize.height
+        ann.rects.any { r ->
+          val l = pl.boundsOnScreen.left + (r.left / pW) * pl.boundsOnScreen.width()
+          val t = pl.boundsOnScreen.top + (r.top / pH) * pl.boundsOnScreen.height()
+          val right = pl.boundsOnScreen.left + (r.right / pW) * pl.boundsOnScreen.width()
+          val b = pl.boundsOnScreen.top + (r.bottom / pH) * pl.boundsOnScreen.height()
+          val hRect = RectF(l - threshold, t - threshold, right + threshold, b + threshold)
+          hRect.contains(sx, sy)
+        }
+      } else false
+    }
+
+    if (targetAnn != null) {
+      annotations.remove(targetAnn)
+      undoRedoManager.record(DeleteAnnotationAction(
+        annotation = targetAnn,
+        annotationsList = annotations,
+        onUndoDispatched = { invalidate() },
+        onRedoDispatched = { invalidate() }
+      ))
+      hudToast.show("🗑️ Highlight erased")
+      performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+      invalidate()
+      return true
+    }
+    return false
   }
 
   private fun copyToClipboard(text: String) {
@@ -6108,6 +6383,22 @@ class ThinkspaceView : View {
     }
     if (toRemove.isNotEmpty()) {
       strokes.removeAll(toRemove)
+      undoRedoManager.record(EraseStrokesAction(
+        erasedStrokes = toRemove,
+        strokesList = strokes,
+        onUndoDispatched = { restored ->
+          for (s in restored) {
+            dispatchAddStrokeEvent(s)
+          }
+          invalidate()
+        },
+        onRedoDispatched = { removed ->
+          for (s in removed) {
+            dispatchEraseStrokeEvent(s.id)
+          }
+          invalidate()
+        }
+      ))
       for (s in toRemove) {
         dispatchEraseStrokeEvent(s.id)
       }
@@ -6828,5 +7119,63 @@ class ThinkspaceView : View {
       putString("id", strokeId)
     }
     eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topEraseStroke", data))
+  }
+
+  fun undo(): Boolean {
+    val action = undoRedoManager.undo()
+    if (action != null) {
+      hudToast.show("↩ Undone: ${action.description}")
+      performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+      invalidate()
+      return true
+    } else {
+      hudToast.show("Nothing to undo")
+      return false
+    }
+  }
+
+  fun redo(): Boolean {
+    val action = undoRedoManager.redo()
+    if (action != null) {
+      hudToast.show("↪ Redone: ${action.description}")
+      performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+      invalidate()
+      return true
+    } else {
+      hudToast.show("Nothing to redo")
+      return false
+    }
+  }
+
+  fun canUndo(): Boolean = undoRedoManager.canUndo
+  fun canRedo(): Boolean = undoRedoManager.canRedo
+
+  private fun dispatchUndoStateChangeEvent(canUndo: Boolean, canRedo: Boolean) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putBoolean("canUndo", canUndo)
+      putBoolean("canRedo", canRedo)
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topUndoStateChange", data))
+  }
+
+  private fun dispatchCardDeleteEvent(cardId: String) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("id", cardId)
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topCardDelete", data))
+  }
+
+  private fun dispatchChangeCardColorEvent(cardId: String, color: Int) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("id", cardId)
+      putString("color", String.format("#%06X", 0xFFFFFF and color))
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topChangeCardColor", data))
   }
 }

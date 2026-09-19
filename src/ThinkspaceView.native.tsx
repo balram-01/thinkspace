@@ -8,6 +8,8 @@ export interface ThinkspaceViewRef {
   closeSearch: () => void;
   nextMatch: () => void;
   prevMatch: () => void;
+  undo: () => void;
+  redo: () => void;
 }
 
 export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
@@ -41,6 +43,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     onSplitRatioChange,
     onExtractExcerpt,
     onToggleSqueeze,
+    onUndoStateChange,
   } = props;
 
   const nativeRef = useRef<any>(null);
@@ -72,6 +75,18 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
       const handle = findNodeHandle(nativeRef.current);
       if (handle) {
         (UIManager as any).dispatchViewManagerCommand(handle, 'prevMatch', []);
+      }
+    },
+    undo: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        (UIManager as any).dispatchViewManagerCommand(handle, 'undo', []);
+      }
+    },
+    redo: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        (UIManager as any).dispatchViewManagerCommand(handle, 'redo', []);
       }
     },
   }));
@@ -219,6 +234,13 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         onToggleSqueeze
           ? (e: any) => {
               onToggleSqueeze(e.nativeEvent.isSqueezed);
+            }
+          : undefined
+      }
+      onUndoStateChange={
+        onUndoStateChange
+          ? (e: any) => {
+              onUndoStateChange(e.nativeEvent.canUndo, e.nativeEvent.canRedo);
             }
           : undefined
       }

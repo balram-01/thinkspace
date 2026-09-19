@@ -68,6 +68,11 @@ export type ToggleSqueezeEvent = Readonly<{
   isSqueezed: boolean;
 }>;
 
+export type UndoStateChangeEvent = Readonly<{
+  canUndo: boolean;
+  canRedo: boolean;
+}>;
+
 export interface NativeProps extends ViewProps {
   documentJson?: string;
   annotationsJson?: string;
@@ -94,6 +99,7 @@ export interface NativeProps extends ViewProps {
   onSplitRatioChange?: DirectEventHandler<SplitRatioChangeEvent>;
   onExtractExcerpt?: DirectEventHandler<ExtractExcerptEvent>;
   onToggleSqueeze?: DirectEventHandler<ToggleSqueezeEvent>;
+  onUndoStateChange?: DirectEventHandler<UndoStateChangeEvent>;
 }
 
 export default codegenNativeComponent<NativeProps>('ThinkspaceView');

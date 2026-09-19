@@ -293,8 +293,35 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
     onSelectText,
     onCopyText,
     onHighlightText,
+    onUndoStateChange,
   } = props;
   const canvasRef = useRef<any>(null);
+
+  const historyStack = useRef<{ undo: () => void; redo: () => void }[]>([]);
+  const redoStack = useRef<{ undo: () => void; redo: () => void }[]>([]);
+
+  React.useImperativeHandle(_ref, () => ({
+    openSearch: () => {},
+    closeSearch: () => {},
+    nextMatch: () => {},
+    prevMatch: () => {},
+    undo: () => {
+      if (historyStack.current.length > 0) {
+        const action = historyStack.current.pop()!;
+        action.undo();
+        redoStack.current.push(action);
+        onUndoStateChange?.(historyStack.current.length > 0, true);
+      }
+    },
+    redo: () => {
+      if (redoStack.current.length > 0) {
+        const action = redoStack.current.pop()!;
+        action.redo();
+        historyStack.current.push(action);
+        onUndoStateChange?.(true, redoStack.current.length > 0);
+      }
+    },
+  }));
 
   const [splitRatio, setSplitRatio] = useState(propSplitRatio);
   const [pan, setPan] = useState({ x: propPanX, y: propPanY });

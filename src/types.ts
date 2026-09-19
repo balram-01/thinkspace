@@ -198,6 +198,16 @@ export interface ThinkspaceViewProps {
     sectionId: string,
     pIdx: number
   ) => void;
+  onUndoStateChange?: (canUndo: boolean, canRedo: boolean) => void;
+}
+
+export interface ThinkspaceViewRef {
+  openSearch: () => void;
+  closeSearch: () => void;
+  nextMatch: () => void;
+  prevMatch: () => void;
+  undo: () => void;
+  redo: () => void;
 }
 
 export interface DocumentViewerProps {

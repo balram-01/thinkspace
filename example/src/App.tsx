@@ -78,20 +78,17 @@ export default function App() {
     }
   }, [pdfDoc]);
 
-  // ── Undo Action ───────────────────────────────────────────────────────────
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  // ── Undo / Redo Actions ───────────────────────────────────────────────────
   const handleUndo = useCallback(() => {
-    if (strokes.length > 0) {
-      setStrokes((prev) => prev.slice(0, prev.length - 1));
-    } else if (excerpts.length > 0) {
-      const last = excerpts[excerpts.length - 1];
-      setExcerpts((prev) => prev.slice(0, prev.length - 1));
-      if (last) {
-        setInkLinks((prev) =>
-          prev.filter((l) => l.sourceExcerptId !== last.id)
-        );
-      }
-    }
-  }, [strokes.length, excerpts]);
+    thinkspaceRef.current?.undo?.();
+  }, []);
+
+  const handleRedo = useCallback(() => {
+    thinkspaceRef.current?.redo?.();
+  }, []);
 
   // ── Toggle Accordion Squeeze ───────────────────────────────────────────────
   const handleToggleSqueeze = useCallback(() => {
@@ -197,11 +194,26 @@ export default function App() {
             <Text style={styles.headerIcon}>📄</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={styles.iconBtn}
+            style={[styles.iconBtn, !canUndo && styles.iconBtnDisabled]}
             activeOpacity={0.7}
             onPress={handleUndo}
           >
-            <Text style={styles.headerIcon}>↶</Text>
+            <Text
+              style={[styles.headerIcon, !canUndo && styles.headerIconDisabled]}
+            >
+              ↶
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.iconBtn, !canRedo && styles.iconBtnDisabled]}
+            activeOpacity={0.7}
+            onPress={handleRedo}
+          >
+            <Text
+              style={[styles.headerIcon, !canRedo && styles.headerIconDisabled]}
+            >
+              ↷
+            </Text>
           </TouchableOpacity>
         </View>
 
@@ -295,6 +307,10 @@ export default function App() {
           }}
           onToggleSqueeze={(sq) => {
             setIsSqueezed(sq);
+          }}
+          onUndoStateChange={(u, r) => {
+            setCanUndo(u);
+            setCanRedo(r);
           }}
         />
       </View>
@@ -469,6 +485,12 @@ const styles = StyleSheet.create({
     color: '#E2E8F0',
     fontSize: 22,
     fontWeight: '500',
+  },
+  iconBtnDisabled: {
+    opacity: 0.35,
+  },
+  headerIconDisabled: {
+    color: '#64748B',
   },
   workspaceWrapper: {
     flex: 1,
