@@ -66,7 +66,16 @@ class ThinkspaceEvent(
   override fun getEventData(): WritableMap = eventData
 }
 
-data class NativePoint(val x: Float, val y: Float)
+data class NativePoint(val x: Float, val y: Float, val pressure: Float = 1.0f)
+
+data class PdfPageStroke(
+  val id: String,
+  val pageIndex: Int,
+  val points: List<NativePoint>,
+  val color: Int,
+  val strokeWidth: Float,
+  val isHighlighter: Boolean
+)
 
 data class ParagraphLayoutInfo(
   val secId: String,
@@ -572,6 +581,15 @@ class ThinkspaceView : View {
   private val strokes = mutableListOf<NativeStroke>()
   private val cards = mutableListOf<NativeCard>()
   private val links = mutableListOf<NativeLink>()
+
+  // Document Page Inking Collection (pageIndex -> list of strokes in page-relative coords)
+  val pageStrokes = ConcurrentHashMap<Int, MutableList<PdfPageStroke>>()
+  private var activeDocStrokePageIndex: Int = -1
+  private val activeDocPoints = mutableListOf<NativePoint>()
+  private val activeDocPath = Path()
+  private var activeDocStrokePageW: Float = 612f
+  private var activeDocStrokePageH: Float = 792f
+  private var isDrawingOnDoc: Boolean = false
 
   // Active inking state
   private val activePoints = mutableListOf<NativePoint>()
@@ -2016,7 +2034,13 @@ class ThinkspaceView : View {
         val colorsByPage = annotations.groupBy({ it.pageNumber - 1 }, { it.color })
         compressionEngine.updateAnnotationData(annotatedPageIndices, colorsByPage)
 
-        val standardPageH = paperW * 1.294f
+        val firstPageSize = runCatching { pdf.getPage(0).size }.getOrNull()
+        val docAspectRatio = if (firstPageSize != null && firstPageSize.width > 0f) {
+          firstPageSize.height / firstPageSize.width
+        } else {
+          1.294f
+        }
+        val standardPageH = paperW * docAspectRatio
         val standardGap = 16f * pdfScaleFactor
         val totalDocH = compressionEngine.getTotalDocHeight(standardPageH, standardGap)
         maxDocScrollY = max(0f, totalDocH - (docBottomY - subheaderH) + 60f)
@@ -2028,7 +2052,9 @@ class ThinkspaceView : View {
         var accumDocY = 0f
         for (pageIdx in 0 until pCount) {
           val pageNum = pageIdx + 1
-          val pageH = compressionEngine.getDisplayedPageHeight(pageIdx, standardPageH)
+          val pSize = runCatching { pdf.getPage(pageIdx).size }.getOrNull() ?: PageSize.LETTER
+          val pageBaseH = if (pSize.width > 0f) paperW * (pSize.height / pSize.width) else standardPageH
+          val pageH = compressionEngine.getDisplayedPageHeight(pageIdx, pageBaseH)
           val pageGap = compressionEngine.getPageGap(pageIdx, standardGap)
           val pageTopY = subheaderH + 16f - docScrollY + accumDocY
           val screenRect = RectF(paperX, pageTopY, paperX + paperW, pageTopY + pageH)
@@ -2040,7 +2066,7 @@ class ThinkspaceView : View {
             PdfPageLayout(
               pageIndex = pageIdx,
               pageNumber = pageNum,
-              pageSize = PageSize.LETTER,
+              pageSize = pSize,
               topY = pageTopY,
               height = pageH,
               isFolded = isCompressed,
@@ -2232,11 +2258,62 @@ class ThinkspaceView : View {
                 }
               }
 
+              // Draw persistent and active PDF page inking strokes
+              val pStrokes = pageStrokes[pageIdx]
+              val hasActiveOnThisPage = (activeDocStrokePageIndex == pageIdx && activeDocPoints.isNotEmpty())
+              if (!pStrokes.isNullOrEmpty() || hasActiveOnThisPage) {
+                canvas.save()
+                canvas.clipRect(screenRect)
+                val scaleX = screenRect.width() / pageWidth
+                val scaleY = screenRect.height() / pageHeight
+                canvas.translate(screenRect.left, screenRect.top)
+                canvas.scale(scaleX, scaleY)
+
+                if (!pStrokes.isNullOrEmpty()) {
+                  for (ps in pStrokes) {
+                    if (ps.points.isEmpty()) continue
+                    val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      color = ps.color
+                      style = Paint.Style.STROKE
+                      strokeCap = Paint.Cap.ROUND
+                      strokeJoin = Paint.Join.ROUND
+                      strokeWidth = ps.strokeWidth
+                      if (ps.isHighlighter) {
+                        alpha = 115
+                        strokeWidth = max(ps.strokeWidth, 18f)
+                      }
+                    }
+                    val path = Path()
+                    path.moveTo(ps.points[0].x, ps.points[0].y)
+                    for (i in 1 until ps.points.size) {
+                      val pt = ps.points[i]
+                      path.lineTo(pt.x, pt.y)
+                    }
+                    canvas.drawPath(path, strokePaint)
+                  }
+                }
+
+                if (hasActiveOnThisPage) {
+                  val isHl = activeTool == "highlighter"
+                  val activePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = selectedColor
+                    style = Paint.Style.STROKE
+                    strokeCap = Paint.Cap.ROUND
+                    strokeJoin = Paint.Join.ROUND
+                    strokeWidth = if (isHl) 18f else 3.0f
+                    if (isHl) alpha = 115
+                  }
+                  canvas.drawPath(activeDocPath, activePaint)
+                }
+
+                canvas.restore()
+              }
+
               // Flash bidirectional navigation pulse if active
               if (pulsePageNumber == pageNum && pulseAlpha > 0) {
                 if (pulseSourceRects.isNotEmpty()) {
-                  val pageWidth = com.thinkspace.pdfengine.model.PageSize.LETTER.width
-                  val pageHeight = com.thinkspace.pdfengine.model.PageSize.LETTER.height
+                  val pageWidth = pSize.width
+                  val pageHeight = pSize.height
                   val pulseFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                     color = Color.parseColor("#F59E0B")
                     style = Paint.Style.FILL
@@ -2412,7 +2489,9 @@ class ThinkspaceView : View {
       val curSel = activePdfSelection
       if (curSel != null && activePdfDoc != null) {
         val selPl = pageLayouts.firstOrNull { it.pageIndex == curSel.pageIndex } ?: run {
-          val standardPageH = paperW * 1.294f
+          val pSize = runCatching { activePdfDoc?.getPage(curSel.pageIndex)?.size }.getOrNull() ?: PageSize.LETTER
+          val pageAspectRatio = if (pSize.width > 0f) pSize.height / pSize.width else 1.294f
+          val standardPageH = paperW * pageAspectRatio
           val standardGap = 16f * pdfScaleFactor
           val pageTopDocY = compressionEngine.getPageTopDocY(curSel.pageIndex, standardPageH, standardGap)
           val pH = compressionEngine.getDisplayedPageHeight(curSel.pageIndex, standardPageH)
@@ -2421,7 +2500,7 @@ class ThinkspaceView : View {
           PdfPageLayout(
             pageIndex = curSel.pageIndex,
             pageNumber = curSel.pageIndex + 1,
-            pageSize = PageSize.LETTER,
+            pageSize = pSize,
             topY = pageTopY,
             height = pH,
             isFolded = compressionEngine.isPageCompressed(curSel.pageIndex),
@@ -2434,7 +2513,9 @@ class ThinkspaceView : View {
       val curCrop = activeCropSelection
       if (curCrop != null && activePdfDoc != null) {
         val cropPl = pageLayouts.firstOrNull { it.pageIndex == curCrop.pageIndex } ?: run {
-          val standardPageH = paperW * 1.294f
+          val pSize = runCatching { activePdfDoc?.getPage(curCrop.pageIndex)?.size }.getOrNull() ?: PageSize.LETTER
+          val pageAspectRatio = if (pSize.width > 0f) pSize.height / pSize.width else 1.294f
+          val standardPageH = paperW * pageAspectRatio
           val standardGap = 16f * pdfScaleFactor
           val pageTopDocY = compressionEngine.getPageTopDocY(curCrop.pageIndex, standardPageH, standardGap)
           val pH = compressionEngine.getDisplayedPageHeight(curCrop.pageIndex, standardPageH)
@@ -2443,7 +2524,7 @@ class ThinkspaceView : View {
           PdfPageLayout(
             pageIndex = curCrop.pageIndex,
             pageNumber = curCrop.pageIndex + 1,
-            pageSize = PageSize.LETTER,
+            pageSize = pSize,
             topY = pageTopY,
             height = pH,
             isFolded = compressionEngine.isPageCompressed(curCrop.pageIndex),
@@ -4253,6 +4334,10 @@ class ThinkspaceView : View {
       activePdfSelection = null
       activePoints.clear()
       activePath.reset()
+      activeDocPoints.clear()
+      activeDocPath.reset()
+      activeDocStrokePageIndex = -1
+      isDrawingOnDoc = false
     }
 
     if (event.actionMasked == MotionEvent.ACTION_DOWN) {
@@ -4765,9 +4850,43 @@ class ThinkspaceView : View {
 
         // Document Zone Gestures
         if (inDocZone) {
-          // Eraser on PDF Annotations
+          // Eraser on PDF Annotations and Strokes
           if (activeTool == "eraser") {
-            if (eraseAnnotationNear(sx, sy)) {
+            if (eraseDocStrokesNear(sx, sy)) return true
+            if (eraseAnnotationNear(sx, sy)) return true
+            return true
+          }
+
+          // Document Inking with Pen / Highlighter
+          if (activeTool == "pen" || activeTool == "highlighter") {
+            val pl = pageLayouts.find { it.boundsOnScreen.contains(sx, sy) }
+            if (pl != null) {
+              val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
+                ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+              val pW = pSize.width
+              val pH = pSize.height
+              val px = ((sx - pl.boundsOnScreen.left) / pl.boundsOnScreen.width()) * pW
+              val py = ((sy - pl.boundsOnScreen.top) / pl.boundsOnScreen.height()) * pH
+
+              val pressure = event.pressure.takeIf { it > 0f } ?: 1.0f
+
+              activeDocStrokePageIndex = pl.pageIndex
+              activeDocStrokePageW = pW
+              activeDocStrokePageH = pH
+              isDrawingOnDoc = true
+
+              activeDocPoints.clear()
+              activeDocPoints.add(NativePoint(px, py, pressure))
+              activeDocPath.reset()
+              activeDocPath.moveTo(px, py)
+
+              isScrollingDoc = false
+              isSelectingPdfText = false
+              isDraggingCrop = false
+              pendingLongPressRunnable?.let { longPressHandler.removeCallbacks(it) }
+              pendingLongPressRunnable = null
+
+              invalidate()
               return true
             }
           }
@@ -5123,6 +5242,21 @@ class ThinkspaceView : View {
         // Canvas Zone Gestures
         if (inCanvasZone) {
           val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+
+          if (activeTool == "pen" || activeTool == "highlighter") {
+            val pressure = event.pressure.takeIf { it > 0f } ?: 1.0f
+            activePoints.clear()
+            activePoints.add(NativePoint(wx, wy, pressure))
+            activePath.reset()
+            activePath.moveTo(wx, wy)
+            invalidate()
+            return true
+          }
+
+          if (activeTool == "eraser") {
+            eraseStrokesNear(wx, wy)
+            return true
+          }
 
           // 1. Check Excerpt Card Clicks
           val clickedCard = cards.findLast { c ->
@@ -5514,6 +5648,7 @@ class ThinkspaceView : View {
 
         // Erasing in Document Zone
         if (activeTool == "eraser" && inDocZone) {
+          eraseDocStrokesNear(sx, sy)
           eraseAnnotationNear(sx, sy)
           return true
         }
@@ -5551,12 +5686,28 @@ class ThinkspaceView : View {
           return true
         }
 
-        // Inking
+        // Document Page Inking
+        if (isDrawingOnDoc && activeDocPoints.isNotEmpty() && activeDocStrokePageIndex >= 0) {
+          val pl = pageLayouts.find { it.pageIndex == activeDocStrokePageIndex }
+          if (pl != null) {
+            val px = ((sx - pl.boundsOnScreen.left) / pl.boundsOnScreen.width()) * activeDocStrokePageW
+            val py = ((sy - pl.boundsOnScreen.top) / pl.boundsOnScreen.height()) * activeDocStrokePageH
+            val pressure = event.pressure.takeIf { it > 0f } ?: 1.0f
+            val lastPt = activeDocPoints.last()
+            activeDocPath.quadTo(lastPt.x, lastPt.y, (lastPt.x + px) / 2f, (lastPt.y + py) / 2f)
+            activeDocPoints.add(NativePoint(px, py, pressure))
+            invalidate()
+            return true
+          }
+        }
+
+        // Canvas Inking
         if (activePoints.isNotEmpty()) {
           val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          val pressure = event.pressure.takeIf { it > 0f } ?: 1.0f
           val lastPt = activePoints.last()
           activePath.quadTo(lastPt.x, lastPt.y, (lastPt.x + wx) / 2f, (lastPt.y + wy) / 2f)
-          activePoints.add(NativePoint(wx, wy))
+          activePoints.add(NativePoint(wx, wy, pressure))
           invalidate()
           return true
         }
@@ -5839,7 +5990,36 @@ class ThinkspaceView : View {
           return true
         }
 
-        // Finalize Inking Stroke
+        // Finalize Document Inking Stroke
+        if (isDrawingOnDoc && activeDocPoints.isNotEmpty() && activeDocStrokePageIndex >= 0) {
+          val isHl = activeTool == "highlighter"
+          val newPageStroke = PdfPageStroke(
+            id = "doc-stroke-${System.currentTimeMillis()}",
+            pageIndex = activeDocStrokePageIndex,
+            points = activeDocPoints.toList(),
+            color = selectedColor,
+            strokeWidth = if (isHl) 18f else 3.0f,
+            isHighlighter = isHl
+          )
+          val list = pageStrokes.getOrPut(activeDocStrokePageIndex) { mutableListOf() }
+          list.add(newPageStroke)
+
+          undoRedoManager.record(AddPageStrokeAction(
+            stroke = newPageStroke,
+            pageStrokesMap = pageStrokes,
+            onUndoDispatched = { invalidate() },
+            onRedoDispatched = { invalidate() }
+          ))
+
+          activeDocPoints.clear()
+          activeDocPath.reset()
+          activeDocStrokePageIndex = -1
+          isDrawingOnDoc = false
+          invalidate()
+          return true
+        }
+
+        // Finalize Canvas Inking Stroke
         if (activePoints.isNotEmpty()) {
           val newStroke = NativeStroke(
             id = "stroke-${System.currentTimeMillis()}",
@@ -6093,10 +6273,13 @@ class ThinkspaceView : View {
       val pRect = RectF(lineLeft, lineTop, lineRight, lineBottom)
       pdfRects.add(pRect)
 
-      val l = pl.boundsOnScreen.left + (lineLeft / pl.pageSize.width) * pl.boundsOnScreen.width()
-      val t = pl.boundsOnScreen.top + (lineTop / pl.pageSize.height) * pl.boundsOnScreen.height()
-      val r = pl.boundsOnScreen.left + (lineRight / pl.pageSize.width) * pl.boundsOnScreen.width()
-      val b = pl.boundsOnScreen.top + (lineBottom / pl.pageSize.height) * pl.boundsOnScreen.height()
+      val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull() ?: pl.pageSize
+      val pW = pSize.width
+      val pH = pSize.height
+      val l = pl.boundsOnScreen.left + (lineLeft / pW) * pl.boundsOnScreen.width()
+      val t = pl.boundsOnScreen.top + (lineTop / pH) * pl.boundsOnScreen.height()
+      val r = pl.boundsOnScreen.left + (lineRight / pW) * pl.boundsOnScreen.width()
+      val b = pl.boundsOnScreen.top + (lineBottom / pH) * pl.boundsOnScreen.height()
       screenRects.add(RectF(l, t, r, b))
     }
 
@@ -6190,8 +6373,9 @@ class ThinkspaceView : View {
     }
 
     // Fallback projection using sel.pdfRects directly
-    val pW = pl.pageSize.width
-    val pH = pl.pageSize.height
+    val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull() ?: pl.pageSize
+    val pW = pSize.width
+    val pH = pSize.height
     val screenRects = sel.pdfRects.map { pRect ->
       val l = pl.boundsOnScreen.left + (pRect.left / pW) * pl.boundsOnScreen.width()
       val t = pl.boundsOnScreen.top + (pRect.top / pH) * pl.boundsOnScreen.height()
@@ -6531,6 +6715,37 @@ class ThinkspaceView : View {
     }
   }
 
+  private fun eraseDocStrokesNear(sx: Float, sy: Float): Boolean {
+    var erasedAny = false
+    for (pl in pageLayouts) {
+      if (!pl.boundsOnScreen.contains(sx, sy)) continue
+      val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
+        ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+      val pW = pSize.width
+      val pH = pSize.height
+      val px = ((sx - pl.boundsOnScreen.left) / pl.boundsOnScreen.width()) * pW
+      val py = ((sy - pl.boundsOnScreen.top) / pl.boundsOnScreen.height()) * pH
+
+      val list = pageStrokes[pl.pageIndex] ?: continue
+      val threshold = 28f * (pW / pl.boundsOnScreen.width().coerceAtLeast(1f))
+      val toRemove = list.filter { s ->
+        s.points.any { hypot(it.x - px, it.y - py) <= threshold }
+      }
+      if (toRemove.isNotEmpty()) {
+        list.removeAll(toRemove)
+        undoRedoManager.record(ErasePageStrokesAction(
+          erasedStrokes = toRemove,
+          pageStrokesMap = pageStrokes,
+          onUndoDispatched = { invalidate() },
+          onRedoDispatched = { invalidate() }
+        ))
+        erasedAny = true
+        invalidate()
+      }
+    }
+    return erasedAny
+  }
+
   private var docScrollAnimator: ValueAnimator? = null
   private var pulseAnimator: ValueAnimator? = null
   private var canvasAnimator: ValueAnimator? = null
@@ -6552,7 +6767,9 @@ class ThinkspaceView : View {
       val paperMargin = 10f * density
       val basePaperW = viewW - paperMargin * 2f
       val paperW = basePaperW * pdfScaleFactor
-      val standardPageH = paperW * 1.294f
+      val pSize = runCatching { activePdfDoc?.getPage(pageIdx)?.size }.getOrNull() ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+      val docAspectRatio = if (pSize.width > 0f) pSize.height / pSize.width else 1.294f
+      val standardPageH = paperW * docAspectRatio
       val standardGap = 16f * pdfScaleFactor
       val totalDocH = compressionEngine.getTotalDocHeight(standardPageH, standardGap)
       val maxScroll = max(0f, totalDocH - (docBottomY - subheaderH) + 60f)
@@ -6564,7 +6781,7 @@ class ThinkspaceView : View {
         val minY = sourceRects.minOf { it.top }
         val maxY = sourceRects.maxOf { it.bottom }
         val centerPdfY = (minY + maxY) / 2f
-        val pdfH = com.thinkspace.pdfengine.model.PageSize.LETTER.height
+        val pdfH = pSize.height
         val scale = if (pdfH > 0f) displayedH / pdfH else 1f
         val sourceOffset = centerPdfY * scale
         val sourceDocY = pageTopDocY + sourceOffset
@@ -6615,7 +6832,8 @@ class ThinkspaceView : View {
       val minX = sourceRects.minOf { it.left }
       val maxX = sourceRects.maxOf { it.right }
       val centerPdfX = (minX + maxX) / 2f
-      val pdfW = com.thinkspace.pdfengine.model.PageSize.LETTER.width
+      val pSize = runCatching { activePdfDoc?.getPage(safePageNum - 1)?.size }.getOrNull() ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+      val pdfW = pSize.width
       val paperMargin = 10f * density
       val basePaperW = viewW - paperMargin * 2f
       val paperW = basePaperW * pdfScaleFactor

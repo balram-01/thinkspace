@@ -143,7 +143,7 @@ class PdfBoxTextExtractor(
             val x = text.xDirAdj
             val y = text.yDirAdj
             val width = text.widthDirAdj
-            val fontSize = text.fontSizeInPt
+            val effectiveFontSize = abs(text.yScale).takeIf { it > 0f } ?: text.fontSizeInPt
 
             val font = text.font
             val fontName = font?.name ?: "Unknown"
@@ -151,15 +151,15 @@ class PdfBoxTextExtractor(
 
             // Direct glyph ascent/descent metrics (§6 of specification)
             val ascent = if (descriptor != null && descriptor.ascent > 0f) {
-                (descriptor.ascent / 1000f * fontSize).coerceAtLeast(fontSize * 0.70f)
+                (descriptor.ascent / 1000f * effectiveFontSize).coerceAtLeast(effectiveFontSize * 0.70f)
             } else {
-                fontSize * 0.80f
+                effectiveFontSize * 0.80f
             }
 
             val descent = if (descriptor != null && descriptor.descent != 0f) {
-                abs(descriptor.descent / 1000f * fontSize).coerceAtLeast(fontSize * 0.15f)
+                abs(descriptor.descent / 1000f * effectiveFontSize).coerceAtLeast(effectiveFontSize * 0.15f)
             } else {
-                fontSize * 0.20f
+                effectiveFontSize * 0.20f
             }
 
             val left = min(x, x + width)
@@ -196,7 +196,7 @@ class PdfBoxTextExtractor(
                         char = c,
                         pageIndex = pageIndex,
                         bounds = bounds,
-                        fontSize = text.fontSizeInPt,
+                        fontSize = effectiveFontSize,
                         fontName = fontName,
                         fontStyle = style,
                         baseline = y,

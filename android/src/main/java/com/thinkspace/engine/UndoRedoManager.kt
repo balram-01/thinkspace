@@ -4,7 +4,9 @@ import com.thinkspace.NativeAnnotation
 import com.thinkspace.NativeCard
 import com.thinkspace.NativeLink
 import com.thinkspace.NativeStroke
+import com.thinkspace.PdfPageStroke
 import java.util.ArrayDeque
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Reversible workspace action interface matching LiquidText's command pattern.
@@ -62,6 +64,62 @@ class EraseStrokesAction(
   override fun redo() {
     val ids = erasedStrokes.map { it.id }.toSet()
     strokesList.removeAll { ids.contains(it.id) }
+    onRedoDispatched?.invoke(erasedStrokes)
+  }
+}
+
+/**
+ * Adding a freehand ink stroke directly on a PDF page.
+ */
+class AddPageStrokeAction(
+  val stroke: PdfPageStroke,
+  private val pageStrokesMap: ConcurrentHashMap<Int, MutableList<PdfPageStroke>>,
+  private val onUndoDispatched: ((PdfPageStroke) -> Unit)? = null,
+  private val onRedoDispatched: ((PdfPageStroke) -> Unit)? = null
+) : UndoableAction {
+  override val description: String = if (stroke.isHighlighter) "Highlight on p. ${stroke.pageIndex + 1}" else "Ink on p. ${stroke.pageIndex + 1}"
+
+  override fun undo() {
+    val list = pageStrokesMap[stroke.pageIndex]
+    list?.removeAll { it.id == stroke.id }
+    onUndoDispatched?.invoke(stroke)
+  }
+
+  override fun redo() {
+    val list = pageStrokesMap.getOrPut(stroke.pageIndex) { mutableListOf() }
+    if (list.none { it.id == stroke.id }) {
+      list.add(stroke)
+    }
+    onRedoDispatched?.invoke(stroke)
+  }
+}
+
+/**
+ * Erasing one or more ink strokes from PDF pages.
+ */
+class ErasePageStrokesAction(
+  val erasedStrokes: List<PdfPageStroke>,
+  private val pageStrokesMap: ConcurrentHashMap<Int, MutableList<PdfPageStroke>>,
+  private val onUndoDispatched: ((List<PdfPageStroke>) -> Unit)? = null,
+  private val onRedoDispatched: ((List<PdfPageStroke>) -> Unit)? = null
+) : UndoableAction {
+  override val description: String = if (erasedStrokes.size == 1) "Erase PDF stroke" else "Erase ${erasedStrokes.size} PDF strokes"
+
+  override fun undo() {
+    for (s in erasedStrokes) {
+      val list = pageStrokesMap.getOrPut(s.pageIndex) { mutableListOf() }
+      if (list.none { it.id == s.id }) {
+        list.add(s)
+      }
+    }
+    onUndoDispatched?.invoke(erasedStrokes)
+  }
+
+  override fun redo() {
+    for (s in erasedStrokes) {
+      val list = pageStrokesMap[s.pageIndex]
+      list?.removeAll { it.id == s.id }
+    }
     onRedoDispatched?.invoke(erasedStrokes)
   }
 }
