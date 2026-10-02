@@ -96,6 +96,27 @@ export interface WorkspaceDocument {
   sections?: DocumentSection[];
 }
 
+export type NotebookPageStyle =
+  | 'blank'
+  | 'ruled'
+  | 'grid'
+  | 'dotted'
+  | 'sketch'
+  | 'cornell'
+  | 'squared'
+  | 'custom';
+
+export interface NotebookPageModel {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  pageStyle?: NotebookPageStyle;
+  title?: string;
+  backgroundColor?: string;
+}
+
 export interface ExcerptModel {
   id: string;
   documentId?: string;
@@ -157,6 +178,7 @@ export interface ThinkspaceViewProps {
   strokes?: InkStroke[];
   excerpts?: ExcerptModel[];
   inkLinks?: InkLink[];
+  notebookPages?: NotebookPageModel[];
   panX?: number;
   panY?: number;
   scale?: number;
@@ -190,6 +212,9 @@ export interface ThinkspaceViewProps {
     }[];
   }) => void;
   onToggleSqueeze?: (isSqueezed: boolean) => void;
+  onNotebookPageAdded?: (page: NotebookPageModel) => void;
+  onNotebookPageMoved?: (id: string, x: number, y: number) => void;
+  onNotebookPageDeleted?: (id: string) => void;
   onSelectText?: (selection: DocumentSelection | null) => void;
   onCopyText?: (text: string) => void;
   onHighlightText?: (
@@ -210,6 +235,7 @@ export interface ThinkspaceViewRef {
   redo: () => void;
   zoomToFit: () => void;
   zoomOut: () => void;
+  addNotebookPage: (style?: NotebookPageStyle, title?: string) => void;
 }
 
 export interface DocumentViewerProps {

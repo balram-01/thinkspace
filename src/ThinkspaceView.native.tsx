@@ -10,6 +10,9 @@ export interface ThinkspaceViewRef {
   prevMatch: () => void;
   undo: () => void;
   redo: () => void;
+  zoomToFit: () => void;
+  zoomOut: () => void;
+  addNotebookPage: (style?: string, title?: string) => void;
 }
 
 export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
@@ -28,6 +31,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     strokes = [],
     excerpts = [],
     inkLinks = [],
+    notebookPages = [],
     panX = 0,
     panY = 0,
     scale = 1,
@@ -44,6 +48,9 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     onExtractExcerpt,
     onToggleSqueeze,
     onUndoStateChange,
+    onNotebookPageAdded,
+    onNotebookPageMoved,
+    onNotebookPageDeleted,
   } = props;
 
   const nativeRef = useRef<any>(null);
@@ -101,6 +108,18 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         (UIManager as any).dispatchViewManagerCommand(handle, 'zoomToFit', []);
       }
     },
+    addNotebookPage: (style?: string, title?: string) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.addNotebookPage ?? 8;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [
+          style ?? 'ruled',
+          title ?? '',
+        ]);
+      }
+    },
   }));
 
   const documentJson = useMemo(
@@ -114,6 +133,10 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
   const strokesJson = useMemo(() => JSON.stringify(strokes), [strokes]);
   const excerptsJson = useMemo(() => JSON.stringify(excerpts), [excerpts]);
   const inkLinksJson = useMemo(() => JSON.stringify(inkLinks), [inkLinks]);
+  const notebookPagesJson = useMemo(
+    () => JSON.stringify(notebookPages),
+    [notebookPages]
+  );
 
   return (
     <ThinkspaceViewNativeComponent
@@ -253,6 +276,29 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         onUndoStateChange
           ? (e: any) => {
               onUndoStateChange(e.nativeEvent.canUndo, e.nativeEvent.canRedo);
+            }
+          : undefined
+      }
+      notebookPagesJson={notebookPagesJson}
+      onNotebookPageAdded={
+        onNotebookPageAdded
+          ? (e: any) => {
+              onNotebookPageAdded(e.nativeEvent);
+            }
+          : undefined
+      }
+      onNotebookPageMoved={
+        onNotebookPageMoved
+          ? (e: any) => {
+              const { id, x, y } = e.nativeEvent;
+              onNotebookPageMoved(id, x, y);
+            }
+          : undefined
+      }
+      onNotebookPageDeleted={
+        onNotebookPageDeleted
+          ? (e: any) => {
+              onNotebookPageDeleted(e.nativeEvent.id);
             }
           : undefined
       }

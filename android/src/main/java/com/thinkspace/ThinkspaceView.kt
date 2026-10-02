@@ -39,6 +39,7 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.uimanager.UIManagerHelper
 import com.facebook.react.uimanager.events.Event
+import com.facebook.react.uimanager.events.EventDispatcher
 import com.thinkspace.pdfengine.api.PdfDocument
 import com.thinkspace.pdfengine.api.RenderOptions
 import com.thinkspace.pdfengine.model.BoundingBox
@@ -107,7 +108,7 @@ data class NativeSearchMatch(
 
 data class NativeStroke(
   val id: String,
-  val points: List<NativePoint>,
+  var points: List<NativePoint>,
   val color: Int,
   val strokeWidth: Float,
   val isHighlighter: Boolean
@@ -244,7 +245,29 @@ data class NativePdfSelection(
   val calloutAddWordRightBtn: RectF = RectF(),
   val calloutSelectAllBtn: RectF = RectF(),
   val charCountText: String = "",
-  val calloutColorBtns: List<Pair<RectF, Int>> = emptyList()
+  val calloutColorBtns: List<Pair<RectF, Int>> = emptyList(),
+  val calloutMoreBtn: RectF = RectF(),
+  val calloutTagsBtn: RectF = RectF(),
+  val calloutSubCardRect: RectF = RectF(),
+  val calloutMainCardRect: RectF = RectF(),
+  val calloutRainbowBtn: RectF = RectF()
+)
+
+data class CalloutLayoutResult(
+  val calloutRect: RectF,
+  val closeBtn: RectF,
+  val excerptBtn: RectF,
+  val copyBtn: RectF,
+  val highlightBtn: RectF,
+  val addWordLeftBtn: RectF,
+  val addWordRightBtn: RectF,
+  val selectAllBtn: RectF,
+  val colorBtns: List<Pair<RectF, Int>>,
+  val moreBtn: RectF = RectF(),
+  val tagsBtn: RectF = RectF(),
+  val subCardRect: RectF = RectF(),
+  val mainCardRect: RectF = RectF(),
+  val rainbowBtn: RectF = RectF()
 )
 
 data class NativeCropSelection(
@@ -262,6 +285,21 @@ data class NativeCropSelection(
   val dimensionsText: String = "",
   val holdAndDragRect: RectF = RectF(),
   val calloutColorBtns: MutableList<Pair<RectF, Int>> = mutableListOf()
+)
+
+/**
+ * A Notebook Page — a movable, resizable paper-like object on the infinite canvas workspace.
+ * Like a physical sheet placed on the canvas; cards, strokes, and drawings can sit on top of it.
+ */
+data class NativeNotebookPage(
+  val id: String,
+  var x: Float,
+  var y: Float,
+  var width: Float,
+  var height: Float,
+  var pageStyle: String = "ruled",       // "blank", "ruled", "grid", "dotted", "sketch"
+  var title: String = "Notebook Page",
+  var backgroundColor: Int = Color.parseColor("#FFFEF0")
 )
 
 class ThinkspaceView : View {
@@ -300,6 +338,8 @@ class ThinkspaceView : View {
     undoRedoManager.onStateChanged = { canUndo, canRedo ->
       dispatchUndoStateChangeEvent(canUndo, canRedo)
     }
+
+    post { loadPersistedNotebookPages() }
   }
 
   val effectiveSplitRatio: Float
@@ -581,6 +621,38 @@ class ThinkspaceView : View {
   private val strokes = mutableListOf<NativeStroke>()
   private val cards = mutableListOf<NativeCard>()
   private val links = mutableListOf<NativeLink>()
+
+  // ── Notebook Pages ──────────────────────────────────────────────────────────
+  /** All notebook page objects currently on the canvas (world-space). */
+  private val notebookPages = mutableListOf<NativeNotebookPage>()
+  /** ID of the currently-selected notebook page (null = none selected). */
+  private var selectedNotebookPageId: String? = null
+  /** The page currently being dragged (finger down on page body). */
+  private var draggingNotebookPage: NativeNotebookPage? = null
+  private var nbPageDragOffsetWorldX: Float = 0f
+  private var nbPageDragOffsetWorldY: Float = 0f
+  private var nbPageDragStartX: Float = 0f
+  private var nbPageDragStartY: Float = 0f
+  /** The page currently being resized (finger on bottom-right handle). */
+  private var resizingNotebookPage: NativeNotebookPage? = null
+  private var nbPageResizeStartWidth: Float = 0f
+  private var nbPageResizeStartHeight: Float = 0f
+  private var nbPageResizeStartWorldX: Float = 0f
+  private var nbPageResizeStartWorldY: Float = 0f
+  /** World-space hit rects for per-page controls (keyed by page.id). */
+  private val nbPageDeleteRects = HashMap<String, RectF>()
+  private val nbPageStyleBtnRects = HashMap<String, RectF>()
+  private val nbPageDuplicateRects = HashMap<String, RectF>()
+  private val nbPageResizeRects = HashMap<String, RectF>()
+  private var nbPageAttachedCards: List<NativeCard> = emptyList()
+  private var nbPageAttachedStrokes: List<NativeStroke> = emptyList()
+  private var nbPageAttachedCardStarts: List<Pair<NativeCard, Pair<Float, Float>>> = emptyList()
+  private var nbPageAttachedStrokeStarts: List<Pair<NativeStroke, List<Pair<Float, Float>>>> = emptyList()
+  /** Style picker overlay state. */
+  private var isNotebookStylePickerOpen: Boolean = false
+  private var stylePickerForPageId: String? = null
+  private val nbPageStylePickerRect = RectF()
+  private data class NbStyleOption(val rect: RectF, val style: String, val label: String)
 
   // Document Page Inking Collection (pageIndex -> list of strokes in page-relative coords)
   val pageStrokes = ConcurrentHashMap<Int, MutableList<PdfPageStroke>>()
@@ -940,6 +1012,37 @@ class ThinkspaceView : View {
   private val ripplePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     style = Paint.Style.STROKE
     strokeWidth = 3f
+  }
+  // ── Notebook Page Paints ───────────────────────────────────────────────────
+  private val nbPageShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#40000000"); style = Paint.Style.FILL
+  }
+  private val nbPageSelectedBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#3B82F6"); strokeWidth = 3f; style = Paint.Style.STROKE
+  }
+  private val nbPageNormalBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#C8C5A6"); strokeWidth = 1.5f; style = Paint.Style.STROKE
+  }
+  private val nbPageRuledLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#A8C4E8"); strokeWidth = 0.9f; style = Paint.Style.STROKE
+  }
+  private val nbPageMarginLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#F0A0A0"); strokeWidth = 1.2f; style = Paint.Style.STROKE
+  }
+  private val nbPageGridLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#C8C8C8"); strokeWidth = 0.7f; style = Paint.Style.STROKE
+  }
+  private val nbPageDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#B8B8B8"); style = Paint.Style.FILL
+  }
+  private val nbPageToolbarBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#1E293B"); style = Paint.Style.FILL
+  }
+  private val nbPageToolbarBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#334155"); strokeWidth = 1.2f; style = Paint.Style.STROKE
+  }
+  private val nbPageResizeHandlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = Color.parseColor("#3B82F6"); style = Paint.Style.FILL
   }
   private val selectionFillPaint = Paint().apply {
     color = Color.parseColor("#5900ADB5")
@@ -1325,6 +1428,140 @@ class ThinkspaceView : View {
     updateStructuredSelectionByOffsets(pInfo, start, end)
   }
 
+  private fun computeSelectionCalloutLayout(
+    rects: List<RectF>,
+    customColors: List<Int>? = null
+  ): CalloutLayoutResult {
+    val d = density
+    val colors = customColors ?: listOf(
+      Color.parseColor("#EF4444"), // Red
+      Color.parseColor("#22C55E"), // Green
+      Color.parseColor("#2563EB"), // Blue
+      Color.parseColor("#FACC15"), // Yellow
+      Color.parseColor("#EC4899"), // Magenta / Pink
+      Color.WHITE                  // White
+    )
+
+    val maxAvailW = width - 16f * d
+    val cW = maxAvailW.coerceIn(340f * d, 420f * d)
+    val card1H = 104f * d
+    val subCardH = 46f * d
+    val subCardGap = 8f * d
+    val totalH = card1H + subCardGap + subCardH
+
+    val minX = rects.minOfOrNull { it.left } ?: (width / 2f)
+    val maxX = rects.maxOfOrNull { it.right } ?: (width / 2f)
+    val firstR = rects.firstOrNull() ?: RectF(minX, 100f * d, maxX, 120f * d)
+    val lastR = rects.lastOrNull() ?: firstR
+
+    val idealLeft = (minX + maxX) / 2f - cW / 2f
+    val cLeft = idealLeft.coerceIn(8f * d, max(8f * d, width - cW - 8f * d))
+
+    val gapY = 12f * d
+    val minTop = subheaderH + 4f * d
+    val maxBottom = height * splitRatio - totalH - 8f * d
+    val cTop = (if (firstR.top - totalH - gapY > subheaderH) firstR.top - totalH - gapY else lastR.bottom + gapY).coerceIn(minTop, max(minTop, maxBottom))
+    
+    val mainCardR = RectF(cLeft, cTop, cLeft + cW, cTop + card1H)
+
+    // Row 1: Chevron Down Close Button on top-right
+    val closeHitSize = 30f * d
+    val closeBtn = RectF(cLeft + cW - closeHitSize - 8f * d, cTop + 8f * d, cLeft + cW - 8f * d, cTop + 8f * d + closeHitSize)
+
+    // Row 2: Actions (+ Excerpt, Copy, Highlight) and Aux controls (< Word, Word >, All, •••)
+    val padX = 10f * d
+    val row2Top = cTop + 58f * d
+    val row2H = 36f * d
+    val row2Bottom = row2Top + row2H
+    val innerW = cW - 2 * padX
+
+    // Aux group on the right: divider (1dp), < Word, Word >, All, •••
+    val auxBtnH = 34f * d
+    val auxTop = row2Top + 1f * d
+    val auxBottom = auxTop + auxBtnH
+    
+    val wordBtnW = 40f * d
+    val allBtnW = 28f * d
+    val moreBtnW = 28f * d
+    val btnGap = 4f * d
+    val dividerW = 1f * d
+    val dividerMargin = 6f * d
+    
+    val auxTotalW = dividerMargin + dividerW + dividerMargin + wordBtnW + btnGap + wordBtnW + btnGap + allBtnW + btnGap + moreBtnW
+    
+    // Action group on the left: Excerpt, Copy, Highlight
+    val actionGroupW = innerW - auxTotalW - 6f * d
+    val actGap = 5f * d
+    val remActW = actionGroupW - 2 * actGap
+    val excerptW = remActW * 0.38f
+    val copyW = remActW * 0.28f
+    val hlW = remActW - excerptW - copyW
+
+    val excerptBtn = RectF(cLeft + padX, row2Top, cLeft + padX + excerptW, row2Bottom)
+    val copyBtn = RectF(excerptBtn.right + actGap, row2Top, excerptBtn.right + actGap + copyW, row2Bottom)
+    val hlBtn = RectF(copyBtn.right + actGap, row2Top, copyBtn.right + actGap + hlW, row2Bottom)
+
+    val auxStartX = hlBtn.right + 6f * d + dividerMargin + dividerW + dividerMargin
+    val addWordLeftBtn = RectF(auxStartX, auxTop, auxStartX + wordBtnW, auxBottom)
+    val addWordRightBtn = RectF(addWordLeftBtn.right + btnGap, auxTop, addWordLeftBtn.right + btnGap + wordBtnW, auxBottom)
+    val selectAllBtn = RectF(addWordRightBtn.right + btnGap, auxTop, addWordRightBtn.right + btnGap + allBtnW, auxBottom)
+    val moreBtn = RectF(selectAllBtn.right + btnGap, auxTop, selectAllBtn.right + btnGap + moreBtnW, auxBottom)
+
+    // Card 2: Sub-Card below Highlight
+    val subCardTop = mainCardR.bottom + subCardGap
+    val subCardBottom = subCardTop + subCardH
+    val subCardW = (320f * d).coerceAtMost(cW - 12f * d).coerceAtLeast(290f * d)
+    val idealSubLeft = hlBtn.centerX() - subCardW * 0.46f
+    val subCardLeft = idealSubLeft.coerceIn(cLeft + 6f * d, cLeft + cW - subCardW - 6f * d)
+    val subCardR = RectF(subCardLeft, subCardTop, subCardLeft + subCardW, subCardBottom)
+
+    // Swatches inside sub-card (7 swatches: 6 solid + 1 rainbow)
+    val swatchTouchRadius = 14f * d
+    val swatchRadius = 11f * d
+    val swatchPitch = 28f * d
+    val swatchStartX = subCardLeft + 14f * d + swatchRadius
+    val swatchCenterY = subCardTop + subCardH / 2f
+
+    val colorBtns = mutableListOf<Pair<RectF, Int>>()
+    for (i in colors.indices) {
+      val cx = swatchStartX + i * swatchPitch
+      val touchRect = RectF(cx - swatchTouchRadius, swatchCenterY - swatchTouchRadius, cx + swatchTouchRadius, swatchCenterY + swatchTouchRadius)
+      colorBtns.add(Pair(touchRect, colors[i]))
+    }
+
+    // 7th: Rainbow swatch
+    val rainbowCx = swatchStartX + colors.size * swatchPitch
+    val rainbowBtn = RectF(rainbowCx - swatchTouchRadius, swatchCenterY - swatchTouchRadius, rainbowCx + swatchTouchRadius, swatchCenterY + swatchTouchRadius)
+
+    // Tags button on right side of subCard
+    val tagsBtnLeft = rainbowBtn.right + 12f * d
+    val tagsBtn = RectF(tagsBtnLeft, subCardTop + 6f * d, subCardR.right - 8f * d, subCardBottom - 6f * d)
+
+    val overallCalloutR = RectF(
+      min(mainCardR.left, subCardR.left),
+      mainCardR.top,
+      max(mainCardR.right, subCardR.right),
+      subCardR.bottom + 4f * d
+    )
+
+    return CalloutLayoutResult(
+      calloutRect = overallCalloutR,
+      closeBtn = closeBtn,
+      excerptBtn = excerptBtn,
+      copyBtn = copyBtn,
+      highlightBtn = hlBtn,
+      addWordLeftBtn = addWordLeftBtn,
+      addWordRightBtn = addWordRightBtn,
+      selectAllBtn = selectAllBtn,
+      colorBtns = colorBtns,
+      moreBtn = moreBtn,
+      tagsBtn = tagsBtn,
+      subCardRect = subCardR,
+      mainCardRect = mainCardR,
+      rainbowBtn = rainbowBtn
+    )
+  }
+
   private fun updateStructuredSelectionByOffsets(pInfo: ParagraphLayoutInfo, startOffset: Int, endOffset: Int) {
     val clampedStart = startOffset.coerceIn(0, pInfo.text.length)
     val clampedEnd = max(clampedStart + 1, endOffset).coerceIn(clampedStart, pInfo.text.length)
@@ -1357,34 +1594,7 @@ class ThinkspaceView : View {
     val startHandle = RectF(firstR.left - 14f * density, firstR.bottom - 4f * density, firstR.left + 14f * density, firstR.bottom + 22f * density)
     val endHandle = RectF(lastR.right - 14f * density, lastR.bottom - 4f * density, lastR.right + 14f * density, lastR.bottom + 22f * density)
 
-    val cW = 320f * density
-    val cH = 114f * density
-    val cLeft = ((rects.minOf { it.left } + rects.maxOf { it.right }) / 2f - cW / 2f).coerceIn(10f * density, max(10f * density, width - cW - 10f * density))
-    val cTop = (if (firstR.top - cH - 16f * density > subheaderH) firstR.top - cH - 16f * density else lastR.bottom + 16f * density).coerceIn(subheaderH + 4f * density, max(subheaderH + 4f * density, height * splitRatio - cH - 8f * density))
-    val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
-
-    val closeBtn = RectF(cLeft + cW - 34f * density, cTop + 4f * density, cLeft + cW - 6f * density, cTop + 30f * density)
-    val row2Top = cTop + 34f * density
-    val row2Bottom = cTop + 68f * density
-    val excerptBtn = RectF(cLeft + 8f * density, row2Top, cLeft + 86f * density, row2Bottom)
-    val copyBtn = RectF(cLeft + 90f * density, row2Top, cLeft + 144f * density, row2Bottom)
-    val hlBtn = RectF(cLeft + 148f * density, row2Top, cLeft + 224f * density, row2Bottom)
-    val addWordLeftBtn = RectF(cLeft + 228f * density, row2Top, cLeft + 268f * density, row2Bottom)
-    val addWordRightBtn = RectF(cLeft + 272f * density, row2Top, cLeft + 312f * density, row2Bottom)
-    val selectAllBtn = RectF(cLeft + 316f * density, row2Top, cLeft + cW - 8f * density, row2Bottom)
-
-    val colors = listOf(
-      Color.parseColor("#EF4444"), Color.parseColor("#22C55E"), Color.parseColor("#3B82F6"),
-      Color.parseColor("#EAB308"), Color.parseColor("#EC4899"), Color.WHITE
-    )
-    val colorBtns = mutableListOf<Pair<RectF, Int>>()
-    val row3Top = cTop + 74f * density
-    var cx = cLeft + 16f * density
-    for (color in colors) {
-      val btnTop = row3Top + 6f * density
-      colorBtns.add(Pair(RectF(cx, btnTop, cx + 24f * density, btnTop + 24f * density), color))
-      cx += 36f * density
-    }
+    val layout = computeSelectionCalloutLayout(rects)
 
     activeStructuredPInfo = pInfo
     activeStructuredStartOffset = clampedStart
@@ -1397,18 +1607,23 @@ class ThinkspaceView : View {
       pdfRects = emptyList(),
       startHandle = startHandle,
       endHandle = endHandle,
-      calloutRect = calloutR,
-      calloutExcerptBtn = excerptBtn,
-      calloutCopyBtn = copyBtn,
-      calloutHighlightBtn = hlBtn,
-      calloutCloseBtn = closeBtn,
+      calloutRect = layout.calloutRect,
+      calloutExcerptBtn = layout.excerptBtn,
+      calloutCopyBtn = layout.copyBtn,
+      calloutHighlightBtn = layout.highlightBtn,
+      calloutCloseBtn = layout.closeBtn,
       startWordIndex = 0,
       endWordIndex = 0,
-      calloutAddWordLeftBtn = addWordLeftBtn,
-      calloutAddWordRightBtn = addWordRightBtn,
-      calloutSelectAllBtn = selectAllBtn,
-      charCountText = "${selText.length} chars selected \"${if (selText.length > 20) selText.substring(0, 18) + "..." else selText}\"",
-      calloutColorBtns = colorBtns
+      calloutAddWordLeftBtn = layout.addWordLeftBtn,
+      calloutAddWordRightBtn = layout.addWordRightBtn,
+      calloutSelectAllBtn = layout.selectAllBtn,
+      charCountText = "${selText.length} chars",
+      calloutColorBtns = layout.colorBtns,
+      calloutMoreBtn = layout.moreBtn,
+      calloutTagsBtn = layout.tagsBtn,
+      calloutSubCardRect = layout.subCardRect,
+      calloutMainCardRect = layout.mainCardRect,
+      calloutRainbowBtn = layout.rainbowBtn
     )
     invalidate()
   }
@@ -2577,74 +2792,376 @@ class ThinkspaceView : View {
             canvas.drawCircle(lastR.right + 4f * density, lastR.bottom + 8f * density, 8f * density, pinPaint)
           }
 
-          // Sleek 2-Tier Callout Dock (hidden during active handle dragging for clean feedback)
+          // Premium Apple-grade Floating Text-Selection Contextual Toolbar matching Reference Screenshot
           if (!isDraggingStartHandle && !isDraggingEndHandle) {
-            val cRect = pdfSel.calloutRect
-            canvas.drawRoundRect(cRect, 12f * density, 12f * density, calloutBgPaint)
-          canvas.drawRoundRect(cRect, 12f * density, 12f * density, calloutBorderPaint)
+            val mainCard = if (!pdfSel.calloutMainCardRect.isEmpty) pdfSel.calloutMainCardRect else pdfSel.calloutRect
+            val subCard = pdfSel.calloutSubCardRect
 
-          // Tier 1 Header: Chars Count & Snippet Preview + Close Button
-          val countPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#38BDF8")
-            textSize = 12f * density
-            isFakeBoldText = true
-          }
-          val headerDisplay = if (pdfSel.charCountText.isNotEmpty()) pdfSel.charCountText else "${pdfSel.text.length} chars selected"
-          canvas.drawText(headerDisplay, cRect.left + 12f * density, cRect.top + 20f * density, countPaint)
-          canvas.drawText("✕", pdfSel.calloutCloseBtn.left + 8f * density, cRect.top + 20f * density, closeBtnTextPaint)
+            // 1. Layered ambient drop shadows for Main Card
+            val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+            shadowPaint.color = Color.argb(10, 0, 0, 0)
+            canvas.drawRoundRect(mainCard.left - 2f * density, mainCard.top + 2f * density, mainCard.right + 2f * density, mainCard.bottom + 8f * density, 22f * density, 22f * density, shadowPaint)
+            shadowPaint.color = Color.argb(22, 0, 0, 0)
+            canvas.drawRoundRect(mainCard.left, mainCard.top + 1.5f * density, mainCard.right, mainCard.bottom + 4f * density, 20f * density, 20f * density, shadowPaint)
 
-          // Tier 2 Actions: [+ Excerpt] [Copy] [Highlight] [+Word] [Word+] [All]
-          canvas.drawRoundRect(pdfSel.calloutExcerptBtn, 6f * density, 6f * density, calloutPrimaryBtnPaint)
-          canvas.drawText("+ Excerpt", pdfSel.calloutExcerptBtn.left + 10f * density, pdfSel.calloutExcerptBtn.centerY() + 5f * density, calloutTextPaint)
+            // Main Card Background & Crisp Border
+            val card1BgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.WHITE
+              style = Paint.Style.FILL
+            }
+            val card1BrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#E2E8F0")
+              strokeWidth = 1f * density
+              style = Paint.Style.STROKE
+            }
+            canvas.drawRoundRect(mainCard, 20f * density, 20f * density, card1BgPaint)
+            canvas.drawRoundRect(mainCard, 20f * density, 20f * density, card1BrdPaint)
 
-          canvas.drawRoundRect(pdfSel.calloutCopyBtn, 6f * density, 6f * density, calloutSecondaryBtnPaint)
-          canvas.drawText(copiedToastText ?: "Copy", pdfSel.calloutCopyBtn.left + 10f * density, pdfSel.calloutCopyBtn.centerY() + 5f * density, calloutSecondaryTextPaint)
+            // 2. Row 1: Selection Badge & Multi-line Preview Quote + Chevron Close Button
+            val charCount = pdfSel.text.length
+            val countLabel = "$charCount chars"
+            val countPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#0284C7")
+              textSize = 11f * density
+              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val countFm = countPaint.fontMetrics
+            val countW = countPaint.measureText(countLabel)
+            val badgeW = countW + 16f * density
+            val badgeH = 24f * density
+            val badgeRect = RectF(mainCard.left + 14f * density, mainCard.top + 12f * density, mainCard.left + 14f * density + badgeW, mainCard.top + 12f * density + badgeH)
+            val badgeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#E0F2FE")
+              style = Paint.Style.FILL
+            }
+            canvas.drawRoundRect(badgeRect, 12f * density, 12f * density, badgeBgPaint)
+            canvas.drawText(countLabel, badgeRect.centerX() - countW / 2f, badgeRect.centerY() - (countFm.descent + countFm.ascent) / 2f, countPaint)
 
-          canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 6f * density, 6f * density, calloutHighlightBtnPaint)
-          canvas.drawText("Highlight", pdfSel.calloutHighlightBtn.left + 8f * density, pdfSel.calloutHighlightBtn.centerY() + 5f * density, calloutTextPaint)
+            // Selected text preview
+            val closeBtn = pdfSel.calloutCloseBtn
+            val previewLeft = badgeRect.right + 10f * density
+            val previewRight = closeBtn.left - 8f * density
+            val maxPreviewW = previewRight - previewLeft
+            val cleanSnippet = pdfSel.text.replace('\n', ' ').replace('\r', ' ').trim()
+            val previewStr = "\"$cleanSnippet\""
+            if (maxPreviewW > 24f * density) {
+              val quotePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#334155")
+                textSize = 10.5f * density
+              }
+              val quoteFm = quotePaint.fontMetrics
+              val lineH = quoteFm.descent - quoteFm.ascent + 1f * density
+              val line1 = android.text.TextUtils.ellipsize(previewStr, quotePaint, maxPreviewW, android.text.TextUtils.TruncateAt.END).toString()
+              canvas.drawText(line1, previewLeft, mainCard.top + 20f * density, quotePaint)
+              if (previewStr.length > 36 && line1.endsWith("…")) {
+                val remText = previewStr.substring(min(previewStr.length, 34)).trim()
+                val line2 = android.text.TextUtils.ellipsize(remText, quotePaint, maxPreviewW, android.text.TextUtils.TruncateAt.END).toString()
+                canvas.drawText(line2, previewLeft, mainCard.top + 20f * density + lineH, quotePaint)
+              }
+            }
 
-          // Dynamic Word Boundaries: +Word, Word+, All
-          val auxBtnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#1E293B")
-            style = Paint.Style.FILL
-          }
-          val auxBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#334155")
-            strokeWidth = 1f * density
-            style = Paint.Style.STROKE
-          }
-          val auxTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#E2E8F0")
-            textSize = 11f * density
-            isFakeBoldText = true
-          }
+            // Chevron Down Close Icon
+            val chevPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#475569")
+              strokeWidth = 2f * density
+              strokeCap = Paint.Cap.ROUND
+              strokeJoin = Paint.Join.ROUND
+              style = Paint.Style.STROKE
+            }
+            val chevCx = closeBtn.centerX()
+            val chevCy = badgeRect.centerY()
+            val chevPath = Path().apply {
+              moveTo(chevCx - 5f * density, chevCy - 2.5f * density)
+              lineTo(chevCx, chevCy + 2.5f * density)
+              lineTo(chevCx + 5f * density, chevCy - 2.5f * density)
+            }
+            canvas.drawPath(chevPath, chevPaint)
 
-          canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 5f * density, 5f * density, auxBtnPaint)
-          canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 5f * density, 5f * density, auxBorderPaint)
-          canvas.drawText("+Word", pdfSel.calloutAddWordLeftBtn.left + 4f * density, pdfSel.calloutAddWordLeftBtn.centerY() + 4f * density, auxTextPaint)
+            // Horizontal Divider Line between Row 1 and Row 2
+            val hDivY = mainCard.top + 50f * density
+            val hDivPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#F1F5F9")
+              strokeWidth = 1f * density
+            }
+            canvas.drawLine(mainCard.left + 14f * density, hDivY, mainCard.right - 14f * density, hDivY, hDivPaint)
 
-          canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 5f * density, 5f * density, auxBtnPaint)
-          canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 5f * density, 5f * density, auxBorderPaint)
-          canvas.drawText("Word+", pdfSel.calloutAddWordRightBtn.left + 4f * density, pdfSel.calloutAddWordRightBtn.centerY() + 4f * density, auxTextPaint)
+            // 3. Row 2 Actions: [📄 + Excerpt], [📋 Copy], [✏️ Highlight]
+            // + Excerpt Button
+            val excerptBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#2563EB")
+              style = Paint.Style.FILL
+            }
+            canvas.drawRoundRect(pdfSel.calloutExcerptBtn, 10f * density, 10f * density, excerptBgPaint)
+            val exCy = pdfSel.calloutExcerptBtn.centerY()
+            val exLeft = pdfSel.calloutExcerptBtn.left + 9f * density
+            val docW = 9f * density
+            val docH = 12f * density
+            val docR = RectF(exLeft, exCy - docH / 2f, exLeft + docW, exCy + docH / 2f)
+            val docIconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.WHITE
+              strokeWidth = 1.3f * density
+              style = Paint.Style.STROKE
+            }
+            canvas.drawRoundRect(docR, 1.5f * density, 1.5f * density, docIconPaint)
+            canvas.drawLine(docR.left + 2f * density, docR.top + 3.5f * density, docR.right - 2f * density, docR.top + 3.5f * density, docIconPaint)
+            canvas.drawLine(docR.left + 2f * density, docR.top + 6.5f * density, docR.right - 2f * density, docR.top + 6.5f * density, docIconPaint)
+            val exTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.WHITE
+              textSize = 12f * density
+              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val exFm = exTextPaint.fontMetrics
+            canvas.drawText("+ Excerpt", exLeft + docW + 6f * density, exCy - (exFm.descent + exFm.ascent) / 2f, exTextPaint)
 
-          canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 5f * density, 5f * density, auxBtnPaint)
-          canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 5f * density, 5f * density, auxBorderPaint)
-          canvas.drawText("All", pdfSel.calloutSelectAllBtn.left + 5f * density, pdfSel.calloutSelectAllBtn.centerY() + 4f * density, auxTextPaint)
+            // Copy Button (dynamic state feedback when copied)
+            val isCopied = copiedToastText != null
+            val copyBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = if (isCopied) Color.parseColor("#DCFCE7") else Color.parseColor("#F1F5F9")
+              style = Paint.Style.FILL
+            }
+            canvas.drawRoundRect(pdfSel.calloutCopyBtn, 10f * density, 10f * density, copyBgPaint)
+            val cpCy = pdfSel.calloutCopyBtn.centerY()
+            val cpLeft = pdfSel.calloutCopyBtn.left + 9f * density
+            val cpW = 8f * density
+            val cpH = 10f * density
+            val copyIconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = if (isCopied) Color.parseColor("#15803D") else Color.parseColor("#1E293B")
+              strokeWidth = 1.3f * density
+              style = Paint.Style.STROKE
+            }
+            canvas.drawRoundRect(RectF(cpLeft + 3f * density, cpCy - cpH / 2f - 2f * density, cpLeft + 3f * density + cpW, cpCy + cpH / 2f - 2f * density), 1.5f * density, 1.5f * density, copyIconPaint)
+            val frontR = RectF(cpLeft, cpCy - cpH / 2f + 1f * density, cpLeft + cpW, cpCy + cpH / 2f + 1f * density)
+            canvas.drawRoundRect(frontR, 1.5f * density, 1.5f * density, copyBgPaint)
+            canvas.drawRoundRect(frontR, 1.5f * density, 1.5f * density, copyIconPaint)
+            val copyTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = if (isCopied) Color.parseColor("#15803D") else Color.parseColor("#1E293B")
+              textSize = 12f * density
+              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val cpFm = copyTextPaint.fontMetrics
+            canvas.drawText(copiedToastText ?: "Copy", cpLeft + cpW + 6f * density, cpCy - (cpFm.descent + cpFm.ascent) / 2f, copyTextPaint)
 
-          val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-          val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 2f * density
-            color = Color.parseColor("#CBD5E1")
-          }
-          for (cb in pdfSel.calloutColorBtns) {
-            circlePaint.color = cb.second
-            canvas.drawCircle(cb.first.centerX(), cb.first.centerY(), cb.first.width() / 2f, circlePaint)
-            if (cb.second == Color.WHITE) {
-               canvas.drawCircle(cb.first.centerX(), cb.first.centerY(), cb.first.width() / 2f, strokePaint)
+            // Highlight Button
+            val hlBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#FED7AA") // Warm peach
+              style = Paint.Style.FILL
+            }
+            val hlBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#FB923C") // Orange border
+              strokeWidth = 1.2f * density
+              style = Paint.Style.STROKE
+            }
+            canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 10f * density, 10f * density, hlBgPaint)
+            canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 10f * density, 10f * density, hlBorderPaint)
+
+            // Pencil / marker icon
+            val penPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#1E293B")
+              strokeWidth = 1.4f * density
+              style = Paint.Style.STROKE
+            }
+            val hlCy = pdfSel.calloutHighlightBtn.centerY()
+            val hlLeft = pdfSel.calloutHighlightBtn.left + 9f * density
+            val penPath = Path().apply {
+              moveTo(hlLeft + 2f * density, hlCy + 5f * density)
+              lineTo(hlLeft + 9f * density, hlCy - 5f * density)
+              lineTo(hlLeft + 12f * density, hlCy - 3f * density)
+              lineTo(hlLeft + 4.5f * density, hlCy + 7f * density)
+              close()
+            }
+            canvas.drawPath(penPath, penPaint)
+
+            val hlTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#1E293B")
+              textSize = 12f * density
+              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val hlFm = hlTextPaint.fontMetrics
+            canvas.drawText("Highlight", hlLeft + 16f * density, hlCy - (hlFm.descent + hlFm.ascent) / 2f, hlTextPaint)
+
+            // Vertical Divider line between Highlight and Aux controls
+            val vDivX = pdfSel.calloutHighlightBtn.right + 6f * density
+            val vDivPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#E2E8F0")
+              strokeWidth = 1.2f * density
+            }
+            canvas.drawLine(vDivX, pdfSel.calloutHighlightBtn.centerY() - 11f * density, vDivX, pdfSel.calloutHighlightBtn.centerY() + 11f * density, vDivPaint)
+
+            // 4. Aux Controls (< Word, Word >, All, •••)
+            val auxBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#F8FAFC")
+              style = Paint.Style.FILL
+            }
+            val auxBrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#E2E8F0")
+              strokeWidth = 1f * density
+              style = Paint.Style.STROKE
+            }
+            val auxTxtPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#334155")
+              textSize = 11f * density
+              textAlign = Paint.Align.CENTER
+              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val auxFm = auxTxtPaint.fontMetrics
+            val auxShift = (auxFm.descent + auxFm.ascent) / 2f
+
+            // < Word
+            canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 8f * density, 8f * density, auxBgPaint)
+            canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 8f * density, 8f * density, auxBrdPaint)
+            canvas.drawText("< Word", pdfSel.calloutAddWordLeftBtn.centerX(), pdfSel.calloutAddWordLeftBtn.centerY() - auxShift, auxTxtPaint)
+
+            // Word >
+            canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 8f * density, 8f * density, auxBgPaint)
+            canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 8f * density, 8f * density, auxBrdPaint)
+            canvas.drawText("Word >", pdfSel.calloutAddWordRightBtn.centerX(), pdfSel.calloutAddWordRightBtn.centerY() - auxShift, auxTxtPaint)
+
+            // All
+            canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 8f * density, 8f * density, auxBgPaint)
+            canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 8f * density, 8f * density, auxBrdPaint)
+            canvas.drawText("All", pdfSel.calloutSelectAllBtn.centerX(), pdfSel.calloutSelectAllBtn.centerY() - auxShift, auxTxtPaint)
+
+            // ••• (More)
+            canvas.drawRoundRect(pdfSel.calloutMoreBtn, 8f * density, 8f * density, auxBgPaint)
+            canvas.drawRoundRect(pdfSel.calloutMoreBtn, 8f * density, 8f * density, auxBrdPaint)
+            val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              color = Color.parseColor("#475569")
+              style = Paint.Style.FILL
+            }
+            val moreCx = pdfSel.calloutMoreBtn.centerX()
+            val moreCy = pdfSel.calloutMoreBtn.centerY()
+            val dotR = 1.8f * density
+            val dotSpacing = 4.5f * density
+            canvas.drawCircle(moreCx - dotSpacing, moreCy, dotR, dotPaint)
+            canvas.drawCircle(moreCx, moreCy, dotR, dotPaint)
+            canvas.drawCircle(moreCx + dotSpacing, moreCy, dotR, dotPaint)
+
+            // 5. Card 2: Sub-Card Color Tray below Highlight
+            if (!subCard.isEmpty) {
+              // Triangular Beak connecting Highlight button to Sub-Card
+              val beakCx = pdfSel.calloutHighlightBtn.centerX().coerceIn(subCard.left + 16f * density, subCard.right - 16f * density)
+              val beakPath = Path().apply {
+                moveTo(beakCx - 7f * density, subCard.top)
+                lineTo(beakCx, subCard.top - 6f * density)
+                lineTo(beakCx + 7f * density, subCard.top)
+                close()
+              }
+
+              // Sub-card shadow
+              shadowPaint.color = Color.argb(10, 0, 0, 0)
+              canvas.drawRoundRect(subCard.left - 2f * density, subCard.top + 2f * density, subCard.right + 2f * density, subCard.bottom + 6f * density, 18f * density, 18f * density, shadowPaint)
+              shadowPaint.color = Color.argb(20, 0, 0, 0)
+              canvas.drawRoundRect(subCard.left, subCard.top + 1f * density, subCard.right, subCard.bottom + 3f * density, 16f * density, 16f * density, shadowPaint)
+
+              // Sub-card background and border
+              val subBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                style = Paint.Style.FILL
+              }
+              val subBrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#E2E8F0")
+                strokeWidth = 1f * density
+                style = Paint.Style.STROKE
+              }
+              canvas.drawRoundRect(subCard, 16f * density, 16f * density, subBgPaint)
+              canvas.drawPath(beakPath, subBgPaint)
+              canvas.drawRoundRect(subCard, 16f * density, 16f * density, subBrdPaint)
+              canvas.drawLine(beakCx - 7f * density, subCard.top, beakCx, subCard.top - 6f * density, subBrdPaint)
+              canvas.drawLine(beakCx, subCard.top - 6f * density, beakCx + 7f * density, subCard.top, subBrdPaint)
+
+              // Swatches inside Sub-Card
+              val swatchR = 11f * density
+              val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+              val whiteBrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#CBD5E1")
+                strokeWidth = 1.2f * density
+                style = Paint.Style.STROKE
+              }
+              val activeHaloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#38BDF8")
+                strokeWidth = 2.2f * density
+                style = Paint.Style.STROKE
+              }
+
+              for (cb in pdfSel.calloutColorBtns) {
+                val cx = cb.first.centerX()
+                val cy = cb.first.centerY()
+                val col = cb.second
+                val isSelected = (col == selectedColor) || (col == Color.WHITE && selectedColor == Color.WHITE)
+
+                if (isSelected) {
+                  canvas.drawCircle(cx, cy, swatchR + 3.5f * density, activeHaloPaint)
+                }
+
+                circlePaint.color = col
+                canvas.drawCircle(cx, cy, swatchR, circlePaint)
+                if (col == Color.WHITE) {
+                  canvas.drawCircle(cx, cy, swatchR, whiteBrdPaint)
+                }
+              }
+
+              // 7th: Rainbow Gradient Swatch
+              val rainBtn = pdfSel.calloutRainbowBtn
+              val rainCx = rainBtn.centerX()
+              val rainCy = rainBtn.centerY()
+              val rainbowShader = android.graphics.SweepGradient(
+                rainCx, rainCy,
+                intArrayOf(
+                  Color.parseColor("#EF4444"),
+                  Color.parseColor("#F59E0B"),
+                  Color.parseColor("#10B981"),
+                  Color.parseColor("#3B82F6"),
+                  Color.parseColor("#8B5CF6"),
+                  Color.parseColor("#EC4899"),
+                  Color.parseColor("#EF4444")
+                ),
+                null
+              )
+              val rainbowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = rainbowShader
+                style = Paint.Style.FILL
+              }
+              canvas.drawCircle(rainCx, rainCy, swatchR, rainbowPaint)
+
+              // Vertical Divider inside Sub-Card
+              val subDivX = rainBtn.right + 8f * density
+              canvas.drawLine(subDivX, subCard.centerY() - 10f * density, subDivX, subCard.centerY() + 10f * density, vDivPaint)
+
+              // Tags Button: 🏷️ Tags
+              val tagsBtn = pdfSel.calloutTagsBtn
+              val tagPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#334155")
+                strokeWidth = 1.4f * density
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+                style = Paint.Style.STROKE
+              }
+              val tagCy = tagsBtn.centerY()
+              val tagLeft = tagsBtn.left + 4f * density
+              val tagPath = Path().apply {
+                moveTo(tagLeft + 3f * density, tagCy - 5f * density)
+                lineTo(tagLeft + 9f * density, tagCy - 5f * density)
+                lineTo(tagLeft + 13f * density, tagCy)
+                lineTo(tagLeft + 6.5f * density, tagCy + 6f * density)
+                lineTo(tagLeft + 3f * density, tagCy + 2f * density)
+                close()
+              }
+              canvas.drawPath(tagPath, tagPaint)
+              val tagHole = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#334155")
+                style = Paint.Style.FILL
+              }
+              canvas.drawCircle(tagLeft + 5.5f * density, tagCy - 2f * density, 1f * density, tagHole)
+
+              val tagsTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#334155")
+                textSize = 12f * density
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+              }
+              val tagFm = tagsTextPaint.fontMetrics
+              canvas.drawText("Tags", tagLeft + 17f * density, tagCy - (tagFm.descent + tagFm.ascent) / 2f, tagsTextPaint)
             }
           }
-        }
       }
     }
 
@@ -3024,6 +3541,9 @@ class ThinkspaceView : View {
         })
       }
     }
+
+    // ── Notebook Pages (rendered BELOW strokes and cards so they appear as a paper layer)
+    drawNotebookPages(canvas)
 
     // Shockwave drop ripple
     if (rippleProgress < 1f) {
@@ -4933,27 +5453,55 @@ class ThinkspaceView : View {
             if (pdfSel.calloutExcerptBtn.contains(sx, sy)) {
               extractExcerptToCanvas(pdfSel.text, pdfSel.pageIndex + 1, selectedColor, pdfSel.pdfRects)
               activePdfSelection = null
+              activeStructuredPInfo = null
+              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
               invalidate()
               return true
             }
             if (pdfSel.calloutCopyBtn.contains(sx, sy)) {
               copyToClipboard(pdfSel.text)
+              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
               return true
             }
             if (pdfSel.calloutHighlightBtn.contains(sx, sy)) {
               addAnnotation(pdfSel.text, pdfSel.pageIndex + 1, selectedColor, pdfSel.pdfRects)
               activePdfSelection = null
+              activeStructuredPInfo = null
+              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
               invalidate()
               return true
             }
             for (cb in pdfSel.calloutColorBtns) {
               if (cb.first.contains(sx, sy)) {
                 val colorToUse = if (cb.second == android.graphics.Color.WHITE) android.graphics.Color.parseColor("#F59E0B") else cb.second
+                selectedColor = colorToUse
                 addAnnotation(pdfSel.text, pdfSel.pageIndex + 1, colorToUse, pdfSel.pdfRects)
                 activePdfSelection = null
+                activeStructuredPInfo = null
+                performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
                 invalidate()
                 return true
               }
+            }
+            if (pdfSel.calloutRainbowBtn.contains(sx, sy)) {
+              val colorToUse = android.graphics.Color.parseColor("#8B5CF6")
+              selectedColor = colorToUse
+              addAnnotation(pdfSel.text, pdfSel.pageIndex + 1, colorToUse, pdfSel.pdfRects)
+              activePdfSelection = null
+              activeStructuredPInfo = null
+              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+              invalidate()
+              return true
+            }
+            if (pdfSel.calloutTagsBtn.contains(sx, sy)) {
+              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+              hudToast.show("Tags: #keypoint #research")
+              return true
+            }
+            if (pdfSel.calloutMoreBtn.contains(sx, sy)) {
+              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+              hudToast.show("More options")
+              return true
             }
             if (pdfSel.calloutAddWordLeftBtn.contains(sx, sy)) {
               if (activePdfDoc != null) {
@@ -5019,6 +5567,7 @@ class ThinkspaceView : View {
               invalidate()
               return true
             }
+            return true
           }
 
           // Check if touch hits selection handles (start pin or end pin)
@@ -5258,6 +5807,106 @@ class ThinkspaceView : View {
             return true
           }
 
+          // 0NB. Notebook page: check style picker first if open
+          if (isNotebookStylePickerOpen && stylePickerForPageId != null) {
+            val styles = listOf(
+              NbStyleOption(RectF(), "blank", "Blank"),
+              NbStyleOption(RectF(), "ruled", "Ruled"),
+              NbStyleOption(RectF(), "grid", "Grid"),
+              NbStyleOption(RectF(), "dotted", "Dotted"),
+              NbStyleOption(RectF(), "sketch", "Sketch"),
+              NbStyleOption(RectF(), "cornell", "Cornell"),
+              NbStyleOption(RectF(), "squared", "Squared"),
+              NbStyleOption(RectF(), "custom", "Custom")
+            )
+            val rowH = 34f
+            val popW = 130f
+            val anchor = nbPageStyleBtnRects[stylePickerForPageId]
+            if (anchor != null) {
+              val popLeft = anchor.left
+              val popTop = anchor.bottom + 4f
+              for (i in styles.indices) {
+                val rTop = popTop + i * rowH
+                val optRect = RectF(popLeft, rTop, popLeft + popW, rTop + rowH)
+                if (optRect.contains(wx, wy)) {
+                  val page = notebookPages.find { it.id == stylePickerForPageId }
+                  if (page != null) {
+                    page.pageStyle = styles[i].style
+                    persistNotebookPagesLocally()
+                    hudToast.show("Style: ${styles[i].label}")
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                  }
+                  isNotebookStylePickerOpen = false
+                  stylePickerForPageId = null
+                  invalidate()
+                  return true
+                }
+              }
+            }
+            isNotebookStylePickerOpen = false
+            stylePickerForPageId = null
+            invalidate()
+          }
+
+          // 0NB2. Notebook page: check selected page's controls
+          if (selectedNotebookPageId != null) {
+            // Duplicate button
+            val dupRect = nbPageDuplicateRects[selectedNotebookPageId!!]
+            if (dupRect != null && dupRect.contains(wx, wy)) {
+              duplicateNotebookPage(selectedNotebookPageId!!)
+              return true
+            }
+
+            val delRect = nbPageDeleteRects[selectedNotebookPageId!!]
+            if (delRect != null && delRect.contains(wx, wy)) {
+              val page = notebookPages.find { it.id == selectedNotebookPageId }
+              if (page != null) {
+                notebookPages.remove(page)
+                undoRedoManager.record(DeleteNotebookPageAction(
+                  page = page,
+                  pagesList = notebookPages,
+                  onUndoDispatched = { invalidate() },
+                  onRedoDispatched = { invalidate() }
+                ))
+                dispatchNotebookPageDeletedEvent(page.id)
+                persistNotebookPagesLocally()
+                selectedNotebookPageId = null
+                isNotebookStylePickerOpen = false
+                hudToast.show("🗑 Notebook page deleted")
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              }
+              invalidate()
+              return true
+            }
+
+            // Style button
+            val styleRect = nbPageStyleBtnRects[selectedNotebookPageId!!]
+            if (styleRect != null && styleRect.contains(wx, wy)) {
+              isNotebookStylePickerOpen = !isNotebookStylePickerOpen
+              stylePickerForPageId = if (isNotebookStylePickerOpen) selectedNotebookPageId else null
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+
+            // Resize handle
+            val resizeRect = nbPageResizeRects[selectedNotebookPageId!!]
+            if (resizeRect != null && resizeRect.contains(wx, wy)) {
+              val page = notebookPages.find { it.id == selectedNotebookPageId }
+              if (page != null) {
+                resizingNotebookPage = page
+                nbPageResizeStartWidth = page.width
+                nbPageResizeStartHeight = page.height
+                nbPageResizeStartWorldX = wx
+                nbPageResizeStartWorldY = wy
+                parent?.requestDisallowInterceptTouchEvent(true)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              }
+              invalidate()
+              return true
+            }
+          }
+
           // 1. Check Excerpt Card Clicks
           val clickedCard = cards.findLast { c ->
             val ch = c.getHeight()
@@ -5318,6 +5967,54 @@ class ThinkspaceView : View {
           isStyleSheetOpen = false
           isCardColorPaletteOpen = false
           isTypoTextColorPaletteOpen = false
+
+          // 0NB3. Check notebook page body AFTER cards (cards sit on top of pages)
+          // Only drag page when select or pan tool is active; in pen/highlighter/eraser mode, let touch draw on page!
+          val hitPage = if (activeTool == "select" || activeTool == "pan") {
+            notebookPages.findLast { p ->
+              wx >= p.x && wx <= p.x + p.width && wy >= p.y && wy <= p.y + p.height
+            }
+          } else null
+
+          if (hitPage != null) {
+            val wasDifferentPage = selectedNotebookPageId != hitPage.id
+            selectedNotebookPageId = hitPage.id
+            isNotebookStylePickerOpen = false
+            draggingNotebookPage = hitPage
+            nbPageDragOffsetWorldX = wx - hitPage.x
+            nbPageDragOffsetWorldY = wy - hitPage.y
+            nbPageDragStartX = hitPage.x
+            nbPageDragStartY = hitPage.y
+
+            // Record attached cards and ink strokes to move them synchronously with the page
+            val pageBounds = RectF(hitPage.x, hitPage.y, hitPage.x + hitPage.width, hitPage.y + hitPage.height)
+            nbPageAttachedCards = cards.filter {
+              pageBounds.contains(it.x + it.width / 2f, it.y + it.getHeight() / 2f)
+            }
+            nbPageAttachedCardStarts = nbPageAttachedCards.map { Pair(it, Pair(it.x, it.y)) }
+
+            nbPageAttachedStrokes = strokes.filter { s ->
+              s.points.any { p -> pageBounds.contains(p.x, p.y) }
+            }
+            nbPageAttachedStrokeStarts = nbPageAttachedStrokes.map { s ->
+              Pair(s, s.points.map { Pair(it.x, it.y) })
+            }
+
+            parent?.requestDisallowInterceptTouchEvent(true)
+            if (wasDifferentPage) {
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              hudToast.show("📄 Notebook page selected — drag to move")
+            }
+            invalidate()
+            return true
+          }
+
+          // Tapped empty canvas: deselect notebook page
+          if (selectedNotebookPageId != null) {
+            selectedNotebookPageId = null
+            isNotebookStylePickerOpen = false
+            invalidate()
+          }
 
           // 2. Pan tool or Inking
           if (activeTool == "pan" || activeTool == "select") {
@@ -5670,6 +6367,45 @@ class ThinkspaceView : View {
           return true
         }
 
+        // Dragging Notebook Page (handled before card drag)
+        if (draggingNotebookPage != null) {
+          val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          val newX = wx - nbPageDragOffsetWorldX
+          val newY = wy - nbPageDragOffsetWorldY
+          val totalDx = newX - nbPageDragStartX
+          val totalDy = newY - nbPageDragStartY
+
+          draggingNotebookPage!!.x = newX
+          draggingNotebookPage!!.y = newY
+
+          for (item in nbPageAttachedCardStarts) {
+            val card = item.first
+            val orig = item.second
+            card.x = orig.first + totalDx
+            card.y = orig.second + totalDy
+          }
+
+          for (item in nbPageAttachedStrokeStarts) {
+            val stroke = item.first
+            val origPoints = item.second
+            stroke.points = origPoints.map { NativePoint(it.first + totalDx, it.second + totalDy) }
+          }
+
+          invalidate()
+          return true
+        }
+
+        // Resizing Notebook Page
+        if (resizingNotebookPage != null) {
+          val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          val deltaX = wx - nbPageResizeStartWorldX
+          val deltaY = wy - nbPageResizeStartWorldY
+          resizingNotebookPage!!.width = (nbPageResizeStartWidth + deltaX).coerceAtLeast(120f)
+          resizingNotebookPage!!.height = (nbPageResizeStartHeight + deltaY).coerceAtLeast(160f)
+          invalidate()
+          return true
+        }
+
         // Dragging Excerpt Card with magnetic proximity check
         if (draggingCard != null) {
           val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
@@ -5771,6 +6507,65 @@ class ThinkspaceView : View {
         isPanningCanvas = false
         isSelectingPdfText = false
         isDraggingCrop = false
+
+        // Finalize notebook page drag (record undo with attached cards & strokes) or resize
+        val droppedPage = draggingNotebookPage
+        if (droppedPage != null) {
+          val dist = hypot(droppedPage.x - nbPageDragStartX, droppedPage.y - nbPageDragStartY)
+          if (dist > 2f) {
+            val movedCards = nbPageAttachedCards.toList()
+            val movedStrokes = nbPageAttachedStrokes.toList()
+            val totalDx = droppedPage.x - nbPageDragStartX
+            val totalDy = droppedPage.y - nbPageDragStartY
+
+            undoRedoManager.record(MoveNotebookPageAction(
+              pageId = droppedPage.id,
+              prevX = nbPageDragStartX,
+              prevY = nbPageDragStartY,
+              newX = droppedPage.x,
+              newY = droppedPage.y,
+              pagesList = notebookPages,
+              cardsList = movedCards,
+              strokesList = movedStrokes,
+              deltaX = totalDx,
+              deltaY = totalDy,
+              onPositionChanged = { id, x, y ->
+                dispatchNotebookPageMovedEvent(id, x, y)
+                persistNotebookPagesLocally()
+                invalidate()
+              }
+            ))
+            dispatchNotebookPageMovedEvent(droppedPage.id, droppedPage.x, droppedPage.y)
+            persistNotebookPagesLocally()
+          }
+          draggingNotebookPage = null
+          nbPageAttachedCards = emptyList()
+          nbPageAttachedStrokes = emptyList()
+          nbPageAttachedCardStarts = emptyList()
+          nbPageAttachedStrokeStarts = emptyList()
+        }
+
+        val resizedPage = resizingNotebookPage
+        if (resizedPage != null) {
+          val dw = abs(resizedPage.width - nbPageResizeStartWidth)
+          val dh = abs(resizedPage.height - nbPageResizeStartHeight)
+          if (dw > 2f || dh > 2f) {
+            undoRedoManager.record(ResizeNotebookPageAction(
+              pageId = resizedPage.id,
+              prevWidth = nbPageResizeStartWidth,
+              prevHeight = nbPageResizeStartHeight,
+              newWidth = resizedPage.width,
+              newHeight = resizedPage.height,
+              pagesList = notebookPages,
+              onSizeChanged = { _, _, _ ->
+                persistNotebookPagesLocally()
+                invalidate()
+              }
+            ))
+            persistNotebookPagesLocally()
+          }
+          resizingNotebookPage = null
+        }
 
         // Compute Scroll Fling Inertia for Document
         if (isScrollingDoc) {
@@ -6163,45 +6958,32 @@ class ThinkspaceView : View {
           val hlBottom = pInfo.topY + pInfo.layout.height + 4f
           val highlightR = RectF(hlLeft, hlTop, hlRight, hlBottom)
 
-          val cW = 280f
-          val cH = 80f
-          val cLeft = (hlLeft + hlRight) / 2f - cW / 2f
-          val cTop = if (hlTop - cH - 12f > 50f) hlTop - cH - 12f else hlBottom + 12f
-          val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
-
-          val row2Top = cTop + 4f
-          val row2Bottom = cTop + 38f
-          val excerptBtn = RectF(cLeft + 6f, row2Top, cLeft + 90f, row2Bottom)
-          val copyBtn = RectF(cLeft + 94f, row2Top, cLeft + 168f, row2Bottom)
-          val hlBtn = RectF(cLeft + 172f, row2Top, cLeft + 250f, row2Bottom)
-          val closeBtn = RectF(cLeft + 254f, row2Top, cLeft + cW - 4f, row2Bottom)
-
-          val colors = listOf(
-            Color.parseColor("#EF4444"), Color.parseColor("#22C55E"), Color.parseColor("#3B82F6"),
-            Color.parseColor("#EAB308"), Color.parseColor("#EC4899"), Color.WHITE
-          )
-          val colorBtns = mutableListOf<Pair<RectF, Int>>()
-          val row3Top = cTop + 44f
-          var cx = cLeft + 16f
-          for (color in colors) {
-            val btnTop = row3Top + 4f
-            colorBtns.add(Pair(RectF(cx, btnTop, cx + 24f, btnTop + 24f), color))
-            cx += 36f
-          }
+          val layout = computeSelectionCalloutLayout(listOf(highlightR))
 
           activePdfSelection = NativePdfSelection(
             pageIndex = pInfo.pageNumber - 1,
             text = pInfo.text,
             highlightRects = listOf(highlightR),
             pdfRects = emptyList(),
-            startHandle = RectF(hlLeft - 12f, hlTop - 20f, hlLeft + 12f, hlBottom),
-            endHandle = RectF(hlRight - 12f, hlTop, hlRight + 12f, hlBottom + 20f),
-            calloutRect = calloutR,
-            calloutExcerptBtn = excerptBtn,
-            calloutCopyBtn = copyBtn,
-            calloutHighlightBtn = hlBtn,
-            calloutCloseBtn = closeBtn,
-            calloutColorBtns = colorBtns
+            startHandle = RectF(hlLeft - 12f * density, hlTop - 20f * density, hlLeft + 12f * density, hlBottom),
+            endHandle = RectF(hlRight - 12f * density, hlTop, hlRight + 12f * density, hlBottom + 20f * density),
+            calloutRect = layout.calloutRect,
+            calloutExcerptBtn = layout.excerptBtn,
+            calloutCopyBtn = layout.copyBtn,
+            calloutHighlightBtn = layout.highlightBtn,
+            calloutCloseBtn = layout.closeBtn,
+            startWordIndex = 0,
+            endWordIndex = 0,
+            calloutAddWordLeftBtn = layout.addWordLeftBtn,
+            calloutAddWordRightBtn = layout.addWordRightBtn,
+            calloutSelectAllBtn = layout.selectAllBtn,
+            charCountText = "${pInfo.text.length} chars",
+            calloutColorBtns = layout.colorBtns,
+            calloutMoreBtn = layout.moreBtn,
+            calloutTagsBtn = layout.tagsBtn,
+            calloutSubCardRect = layout.subCardRect,
+            calloutMainCardRect = layout.mainCardRect,
+            calloutRainbowBtn = layout.rainbowBtn
           )
           invalidate()
           return
@@ -6310,35 +7092,7 @@ class ThinkspaceView : View {
     val previewSnippet = if (combinedText.length > 22) combinedText.substring(0, 20) + "..." else combinedText
     val charCountText = "$charCount chars selected \"$previewSnippet\""
 
-    val cW = 340f * density
-    val cH = 114f * density
-    val cLeft = ((rects.minOf { it.left } + rects.maxOf { it.right }) / 2f - cW / 2f).coerceIn(10f * density, max(10f * density, width - cW - 10f * density))
-    val cTop = (if (firstR.top - cH - 16f * density > subheaderH) firstR.top - cH - 16f * density else lastR.bottom + 16f * density).coerceIn(subheaderH + 4f * density, max(subheaderH + 4f * density, height * splitRatio - cH - 8f * density))
-    val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
-
-    val closeBtn = RectF(cLeft + cW - 34f * density, cTop + 4f * density, cLeft + cW - 6f * density, cTop + 30f * density)
-
-    val row2Top = cTop + 34f * density
-    val row2Bottom = cTop + 68f * density
-    val excerptBtn = RectF(cLeft + 8f * density, row2Top, cLeft + 86f * density, row2Bottom)
-    val copyBtn = RectF(cLeft + 90f * density, row2Top, cLeft + 144f * density, row2Bottom)
-    val hlBtn = RectF(cLeft + 148f * density, row2Top, cLeft + 224f * density, row2Bottom)
-    val addWordLeftBtn = RectF(cLeft + 228f * density, row2Top, cLeft + 268f * density, row2Bottom)
-    val addWordRightBtn = RectF(cLeft + 272f * density, row2Top, cLeft + 312f * density, row2Bottom)
-    val selectAllBtn = RectF(cLeft + 316f * density, row2Top, cLeft + cW - 8f * density, row2Bottom)
-
-    val colors = listOf(
-      Color.parseColor("#EF4444"), Color.parseColor("#22C55E"), Color.parseColor("#3B82F6"),
-      Color.parseColor("#EAB308"), Color.parseColor("#EC4899"), Color.WHITE
-    )
-    val colorBtns = mutableListOf<Pair<RectF, Int>>()
-    val row3Top = cTop + 74f * density
-    var cx = cLeft + 16f * density
-    for (color in colors) {
-      val btnTop = row3Top + 6f * density
-      colorBtns.add(Pair(RectF(cx, btnTop, cx + 24f * density, btnTop + 24f * density), color))
-      cx += 36f * density
-    }
+    val layout = computeSelectionCalloutLayout(rects)
 
     return NativePdfSelection(
       pageIndex = pl.pageIndex,
@@ -6347,18 +7101,23 @@ class ThinkspaceView : View {
       pdfRects = pRects,
       startHandle = startHandle,
       endHandle = endHandle,
-      calloutRect = calloutR,
-      calloutExcerptBtn = excerptBtn,
-      calloutCopyBtn = copyBtn,
-      calloutHighlightBtn = hlBtn,
-      calloutCloseBtn = closeBtn,
+      calloutRect = layout.calloutRect,
+      calloutExcerptBtn = layout.excerptBtn,
+      calloutCopyBtn = layout.copyBtn,
+      calloutHighlightBtn = layout.highlightBtn,
+      calloutCloseBtn = layout.closeBtn,
       startWordIndex = clampedStart,
       endWordIndex = clampedEnd,
-      calloutAddWordLeftBtn = addWordLeftBtn,
-      calloutAddWordRightBtn = addWordRightBtn,
-      calloutSelectAllBtn = selectAllBtn,
-      charCountText = charCountText,
-      calloutColorBtns = colorBtns
+      calloutAddWordLeftBtn = layout.addWordLeftBtn,
+      calloutAddWordRightBtn = layout.addWordRightBtn,
+      calloutSelectAllBtn = layout.selectAllBtn,
+      charCountText = "${combinedText.length} chars",
+      calloutColorBtns = layout.colorBtns,
+      calloutMoreBtn = layout.moreBtn,
+      calloutTagsBtn = layout.tagsBtn,
+      calloutSubCardRect = layout.subCardRect,
+      calloutMainCardRect = layout.mainCardRect,
+      calloutRainbowBtn = layout.rainbowBtn
     )
   }
 
@@ -6391,44 +7150,26 @@ class ThinkspaceView : View {
     val startHandle = RectF(firstR.left - 14f * density, firstR.bottom - 4f * density, firstR.left + 14f * density, firstR.bottom + 22f * density)
     val endHandle = RectF(lastR.right - 14f * density, lastR.bottom - 4f * density, lastR.right + 14f * density, lastR.bottom + 22f * density)
 
-    val cW = 340f * density
-    val cH = 114f * density
-    val cLeft = ((screenRects.minOf { it.left } + screenRects.maxOf { it.right }) / 2f - cW / 2f).coerceIn(10f * density, max(10f * density, width - cW - 10f * density))
-    val cTop = (if (firstR.top - cH - 16f * density > subheaderH) firstR.top - cH - 16f * density else lastR.bottom + 16f * density).coerceIn(subheaderH + 4f * density, max(subheaderH + 4f * density, height * splitRatio - cH - 8f * density))
-    val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
-
-    val closeBtn = RectF(cLeft + cW - 34f * density, cTop + 4f * density, cLeft + cW - 6f * density, cTop + 30f * density)
-    val row2Top = cTop + 34f * density
-    val row2Bottom = cTop + 68f * density
-    val excerptBtn = RectF(cLeft + 8f * density, row2Top, cLeft + 86f * density, row2Bottom)
-    val copyBtn = RectF(cLeft + 90f * density, row2Top, cLeft + 144f * density, row2Bottom)
-    val hlBtn = RectF(cLeft + 148f * density, row2Top, cLeft + 224f * density, row2Bottom)
-    val addWordLeftBtn = RectF(cLeft + 228f * density, row2Top, cLeft + 268f * density, row2Bottom)
-    val addWordRightBtn = RectF(cLeft + 272f * density, row2Top, cLeft + 312f * density, row2Bottom)
-    val selectAllBtn = RectF(cLeft + 316f * density, row2Top, cLeft + cW - 8f * density, row2Bottom)
-
-    val colorBtns = mutableListOf<Pair<RectF, Int>>()
-    val row3Top = cTop + 74f * density
-    var cx = cLeft + 16f * density
-    for (pair in sel.calloutColorBtns) {
-      val btnTop = row3Top + 6f * density
-      colorBtns.add(Pair(RectF(cx, btnTop, cx + 24f * density, btnTop + 24f * density), pair.second))
-      cx += 36f * density
-    }
+    val layout = computeSelectionCalloutLayout(screenRects, sel.calloutColorBtns.map { it.second })
 
     return sel.copy(
       highlightRects = screenRects,
       startHandle = startHandle,
       endHandle = endHandle,
-      calloutRect = calloutR,
-      calloutExcerptBtn = excerptBtn,
-      calloutCopyBtn = copyBtn,
-      calloutHighlightBtn = hlBtn,
-      calloutCloseBtn = closeBtn,
-      calloutAddWordLeftBtn = addWordLeftBtn,
-      calloutAddWordRightBtn = addWordRightBtn,
-      calloutSelectAllBtn = selectAllBtn,
-      calloutColorBtns = if (colorBtns.isNotEmpty()) colorBtns else sel.calloutColorBtns
+      calloutRect = layout.calloutRect,
+      calloutExcerptBtn = layout.excerptBtn,
+      calloutCopyBtn = layout.copyBtn,
+      calloutHighlightBtn = layout.highlightBtn,
+      calloutCloseBtn = layout.closeBtn,
+      calloutAddWordLeftBtn = layout.addWordLeftBtn,
+      calloutAddWordRightBtn = layout.addWordRightBtn,
+      calloutSelectAllBtn = layout.selectAllBtn,
+      calloutColorBtns = layout.colorBtns,
+      calloutMoreBtn = layout.moreBtn,
+      calloutTagsBtn = layout.tagsBtn,
+      calloutSubCardRect = layout.subCardRect,
+      calloutMainCardRect = layout.mainCardRect,
+      calloutRainbowBtn = layout.rainbowBtn
     )
   }
 
@@ -7355,9 +8096,489 @@ class ThinkspaceView : View {
   // ---------------------------------------------------------------------------
   // React Native Fabric Event Dispatchers
   // ---------------------------------------------------------------------------
-  private fun getEventDispatcher() = (context as? com.facebook.react.bridge.ReactContext)?.let {
-    UIManagerHelper.getEventDispatcherForReactTag(it, id)
+  // ---------------------------------------------------------------------------
+  // Notebook Page \u2014 Rendering
+  // ---------------------------------------------------------------------------
+  /**
+   * Draws all notebook pages on the canvas (called inside the world-transform save/restore block).
+   * Pages are drawn in list order (first = bottom), with the selected page always highlighted.
+   */
+  private fun drawNotebookPages(canvas: Canvas) {
+    nbPageDeleteRects.clear()
+    nbPageStyleBtnRects.clear()
+    nbPageResizeRects.clear()
+
+    for (page in notebookPages) {
+      val isSelected = page.id == selectedNotebookPageId
+      val r = RectF(page.x, page.y, page.x + page.width, page.y + page.height)
+
+      // 1. Drop shadow
+      val shadowR = RectF(r.left + 5f, r.top + 5f, r.right + 5f, r.bottom + 5f)
+      canvas.drawRoundRect(shadowR, 10f, 10f, nbPageShadowPaint)
+
+      // 2. Paper background
+      val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = page.backgroundColor; style = Paint.Style.FILL
+      }
+      canvas.drawRoundRect(r, 10f, 10f, bgPaint)
+
+      // 3. Paper pattern (clipped inside page bounds)
+      canvas.save()
+      canvas.clipRect(r)
+      drawNotebookPagePattern(canvas, page, r)
+      canvas.restore()
+
+      // 4. Title (only when there is one and page is large enough)
+      if (page.title.isNotEmpty() && page.height > 60f) {
+        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#374151")
+          textSize = (page.height * 0.055f).coerceIn(14f, 22f)
+          typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+        }
+        canvas.drawText(page.title, r.left + 18f, r.top + 28f, titlePaint)
+      }
+
+      // 5. Page border
+      canvas.drawRoundRect(r, 10f, 10f,
+        if (isSelected) nbPageSelectedBorderPaint else nbPageNormalBorderPaint)
+
+      // 6. Toolbar + controls when selected
+      if (isSelected) {
+        val tbH = 28f
+        val tbW = page.width.coerceAtMost(260f)
+        val tbLeft = r.left + (page.width - tbW) / 2f
+        val tbTop = r.top - tbH - 6f
+        val tbRect = RectF(tbLeft, tbTop, tbLeft + tbW, tbTop + tbH)
+
+        // Toolbar shadow
+        val toolShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#30000000"); style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(RectF(tbLeft, tbTop + 2f, tbLeft + tbW, tbTop + tbH + 2f),
+          12f, 12f, toolShadow)
+        // Toolbar bg + border
+        canvas.drawRoundRect(tbRect, 12f, 12f, nbPageToolbarBgPaint)
+        canvas.drawRoundRect(tbRect, 12f, 12f, nbPageToolbarBorderPaint)
+
+        val iconPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#CBD5E1"); textSize = 11.5f
+        }
+
+        val btnW = tbW / 4f
+        val midY = tbRect.centerY() + 4f
+
+        // [✥ Move] btn (visual header drag indicator)
+        val moveRect = RectF(tbLeft, tbTop, tbLeft + btnW, tbTop + tbH)
+        val moveLabel = "✥ Move"
+        canvas.drawText(moveLabel, moveRect.centerX() - iconPaint.measureText(moveLabel) / 2f, midY, iconPaint)
+
+        // [≡ Style] btn
+        val styleRect = RectF(tbLeft + btnW, tbTop, tbLeft + btnW * 2f, tbTop + tbH)
+        nbPageStyleBtnRects[page.id] = styleRect
+        val styleLabel = when (page.pageStyle) {
+          "blank" -> "Blank"
+          "ruled" -> "Ruled"
+          "grid"  -> "Grid"
+          "dotted"-> "Dots"
+          "sketch"-> "Sketch"
+          "cornell"-> "Cornell"
+          "squared"-> "Squared"
+          else    -> "Custom"
+        }
+        val styleFull = "≡ $styleLabel"
+        canvas.drawText(styleFull, styleRect.centerX() - iconPaint.measureText(styleFull) / 2f, midY, iconPaint)
+
+        // [⧉ Copy] btn
+        val dupRect = RectF(tbLeft + btnW * 2f, tbTop, tbLeft + btnW * 3f, tbTop + tbH)
+        nbPageDuplicateRects[page.id] = dupRect
+        val dupLabel = "⧉ Copy"
+        canvas.drawText(dupLabel, dupRect.centerX() - iconPaint.measureText(dupLabel) / 2f, midY, iconPaint)
+
+        // [🗑 Delete] btn
+        val deleteRect = RectF(tbLeft + btnW * 3f, tbTop, tbLeft + tbW, tbTop + tbH)
+        nbPageDeleteRects[page.id] = deleteRect
+        val delPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#FCA5A5"); textSize = 11.5f
+        }
+        val delLabel = "🗑 Delete"
+        canvas.drawText(delLabel, deleteRect.centerX() - delPaint.measureText(delLabel) / 2f, midY, delPaint)
+
+        // Dividers
+        val divPaint = Paint().apply { color = Color.parseColor("#334155"); strokeWidth = 1f }
+        canvas.drawLine(tbLeft + btnW, tbTop + 5f, tbLeft + btnW, tbTop + tbH - 5f, divPaint)
+        canvas.drawLine(tbLeft + btnW * 2f, tbTop + 5f, tbLeft + btnW * 2f, tbTop + tbH - 5f, divPaint)
+        canvas.drawLine(tbLeft + btnW * 3f, tbTop + 5f, tbLeft + btnW * 3f, tbTop + tbH - 5f, divPaint)
+
+        // 7. Four circular selection handles on corners (matching design reference)
+        val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#3B82F6"); style = Paint.Style.FILL
+        }
+        val cornerStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 1.5f
+        }
+        val corners = listOf(
+          Pair(r.left, r.top),
+          Pair(r.right, r.top),
+          Pair(r.left, r.bottom),
+          Pair(r.right, r.bottom)
+        )
+        for (pt in corners) {
+          canvas.drawCircle(pt.first, pt.second, 5.5f, cornerPaint)
+          canvas.drawCircle(pt.first, pt.second, 5.5f, cornerStroke)
+        }
+
+        // Bottom-right corner resize hit area
+        val handleSz = 22f
+        val handleRect = RectF(r.right - handleSz, r.bottom - handleSz, r.right, r.bottom)
+        nbPageResizeRects[page.id] = handleRect
+
+        // 8. Style picker overlay (if open for this page)
+        if (isNotebookStylePickerOpen && stylePickerForPageId == page.id) {
+          val styles = listOf(
+            "blank" to "Blank",
+            "ruled" to "Ruled",
+            "grid" to "Grid",
+            "dotted" to "Dotted",
+            "sketch" to "Sketch",
+            "cornell" to "Cornell",
+            "squared" to "Squared",
+            "custom" to "Custom"
+          )
+          val rowH = 34f
+          val popW = 125f
+          val popLeft = (nbPageStyleBtnRects[page.id]?.left ?: r.left)
+          val popTop = tbTop + tbH + 4f
+          val popRect = RectF(popLeft, popTop, popLeft + popW, popTop + styles.size * rowH)
+          nbPageStylePickerRect.set(popRect)
+
+          // Picker shadow + bg
+          canvas.drawRoundRect(RectF(popLeft, popTop + 2f, popLeft + popW, popTop + styles.size * rowH + 2f),
+            8f, 8f, toolShadow)
+          val popBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#0F172A"); style = Paint.Style.FILL
+          }
+          canvas.drawRoundRect(popRect, 8f, 8f, popBg)
+          canvas.drawRoundRect(popRect, 8f, 8f, nbPageToolbarBorderPaint)
+
+          val rowPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 12f
+          }
+          for (i in styles.indices) {
+            val (styleKey, styleLabel2) = styles[i]
+            val rowTop = popTop + i * rowH
+            val isActive = page.pageStyle == styleKey
+            if (isActive) {
+              val activeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#1E3A5F"); style = Paint.Style.FILL
+              }
+              canvas.drawRect(popLeft, rowTop, popLeft + popW, rowTop + rowH, activeBg)
+            }
+            rowPaint.color = if (isActive) Color.parseColor("#3B82F6") else Color.parseColor("#CBD5E1")
+            canvas.drawText(styleLabel2, popLeft + 12f, rowTop + rowH * 0.65f, rowPaint)
+          }
+        }
+      }
+    }
   }
+
+  /** Draws the paper texture/pattern lines inside the notebook page's clipped region. */
+  private fun drawNotebookPagePattern(canvas: Canvas, page: NativeNotebookPage, r: RectF) {
+    val contentTop = r.top + 40f  // leave room for title
+    when (page.pageStyle) {
+      "ruled" -> {
+        val lineSpacing = (page.height * 0.065f).coerceIn(22f, 36f)
+        var y = contentTop + lineSpacing
+        while (y < r.bottom - 10f) {
+          canvas.drawLine(r.left + 10f, y, r.right - 10f, y, nbPageRuledLinePaint)
+          y += lineSpacing
+        }
+        // Pink margin line ~15% from left
+        val marginX = r.left + page.width * 0.15f
+        canvas.drawLine(marginX, contentTop, marginX, r.bottom - 10f, nbPageMarginLinePaint)
+      }
+      "grid" -> {
+        val step = (page.width * 0.08f).coerceIn(20f, 40f)
+        var x = r.left + step
+        while (x < r.right - 5f) {
+          canvas.drawLine(x, contentTop, x, r.bottom - 5f, nbPageGridLinePaint)
+          x += step
+        }
+        var y = contentTop + step
+        while (y < r.bottom - 5f) {
+          canvas.drawLine(r.left + 5f, y, r.right - 5f, y, nbPageGridLinePaint)
+          y += step
+        }
+      }
+      "dotted" -> {
+        val stepX = (page.width * 0.1f).coerceIn(20f, 38f)
+        val stepY = (page.height * 0.065f).coerceIn(20f, 36f)
+        var x = r.left + stepX
+        while (x < r.right - 5f) {
+          var y = contentTop + stepY
+          while (y < r.bottom - 5f) {
+            canvas.drawCircle(x, y, 1.8f, nbPageDotPaint)
+            y += stepY
+          }
+          x += stepX
+        }
+      }
+      "sketch" -> {
+        val step = (page.width * 0.12f).coerceIn(24f, 46f)
+        val sketchPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#D8D5BE"); strokeWidth = 0.6f; style = Paint.Style.STROKE
+        }
+        var startX = r.left - page.height
+        while (startX < r.right + page.height) {
+          canvas.drawLine(startX, contentTop, startX + page.height, r.bottom, sketchPaint)
+          startX += step
+        }
+      }
+      "cornell" -> {
+        val cueX = r.left + page.width * 0.28f
+        val summaryY = r.bottom - page.height * 0.22f
+        val cornellSepPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#EF4444"); strokeWidth = 1.2f
+        }
+        // Vertical cue column
+        canvas.drawLine(cueX, contentTop, cueX, summaryY, cornellSepPaint)
+        // Horizontal summary line
+        canvas.drawLine(r.left + 10f, summaryY, r.right - 10f, summaryY, cornellSepPaint)
+        // Ruled lines in main notes section
+        val lineSpacing = (page.height * 0.065f).coerceIn(22f, 36f)
+        var y = contentTop + lineSpacing
+        while (y < summaryY - 8f) {
+          canvas.drawLine(cueX + 4f, y, r.right - 10f, y, nbPageRuledLinePaint)
+          y += lineSpacing
+        }
+      }
+      "squared" -> {
+        val step = (page.width * 0.05f).coerceIn(14f, 26f)
+        val sqMajorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#94A3B8"); strokeWidth = 0.8f
+        }
+        val sqMinorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#CBD5E1"); strokeWidth = 0.4f
+        }
+        var count = 0
+        var x = r.left + step
+        while (x < r.right - 5f) {
+          canvas.drawLine(x, contentTop, x, r.bottom - 5f, if (count % 5 == 0) sqMajorPaint else sqMinorPaint)
+          x += step
+          count++
+        }
+        count = 0
+        var y = contentTop + step
+        while (y < r.bottom - 5f) {
+          canvas.drawLine(r.left + 5f, y, r.right - 5f, y, if (count % 5 == 0) sqMajorPaint else sqMinorPaint)
+          y += step
+          count++
+        }
+      }
+      "custom" -> {
+        val lineSpacing = (page.height * 0.07f).coerceIn(24f, 38f)
+        val customLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#E0E7FF"); strokeWidth = 0.8f
+        }
+        var y = contentTop + lineSpacing
+        while (y < r.bottom - 10f) {
+          canvas.drawLine(r.left + 15f, y, r.right - 15f, y, customLinePaint)
+          y += lineSpacing
+        }
+      }
+      // "blank" -> clean paper background without guide lines
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notebook Page — Public API & Persistence
+  // ---------------------------------------------------------------------------
+  /**
+   * Creates a new notebook page centered in the current viewport and adds it to the canvas.
+   * Called from React Native via the 'addNotebookPage' command, or directly from Kotlin.
+   */
+  fun addNotebookPage(style: String = "ruled", title: String = "") {
+    val viewW = width.toFloat()
+    val viewH = height.toFloat()
+    val hasDoc = activePdfDoc != null || activeDocument != null
+    val splitY = if (hasDoc) viewH * effectiveSplitRatio else 0f
+    val canvasTopY = if (hasDoc && effectiveSplitRatio > 0f) splitY + 14f else 0f
+
+    // Center in the visible canvas viewport
+    val centerScreenX = viewW / 2f
+    val centerScreenY = (canvasTopY + viewH) / 2f
+    val (centerWx, centerWy) = canvasScreenToWorld(centerScreenX, centerScreenY, canvasTopY)
+
+    val pageW = (280f / scaleFactor).coerceIn(200f, 600f)
+    val pageH = (380f / scaleFactor).coerceIn(260f, 800f)
+
+    val newPage = NativeNotebookPage(
+      id = "nbpage-${System.currentTimeMillis()}",
+      x = centerWx - pageW / 2f,
+      y = centerWy - pageH / 2f,
+      width = pageW,
+      height = pageH,
+      pageStyle = style,
+      title = if (title.isEmpty()) "Notebook Page" else title
+    )
+
+    notebookPages.add(newPage)
+    selectedNotebookPageId = newPage.id
+
+    undoRedoManager.record(CreateNotebookPageAction(
+      page = newPage,
+      pagesList = notebookPages,
+      onUndoDispatched = { invalidate() },
+      onRedoDispatched = { invalidate() }
+    ))
+
+    dispatchNotebookPageAddedEvent(newPage)
+    persistNotebookPagesLocally()
+    hudToast.show("📄 Notebook page added — drag header to move")
+    performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+    invalidate()
+  }
+
+  /**
+   * Duplicates an existing notebook page, offsetting it slightly and adding it to the canvas.
+   */
+  fun duplicateNotebookPage(pageId: String) {
+    val orig = notebookPages.find { it.id == pageId } ?: return
+    val copy = NativeNotebookPage(
+      id = "nbpage-${System.currentTimeMillis()}",
+      x = orig.x + 30f,
+      y = orig.y + 30f,
+      width = orig.width,
+      height = orig.height,
+      pageStyle = orig.pageStyle,
+      title = if (orig.title.endsWith("(Copy)")) orig.title else "${orig.title} (Copy)",
+      backgroundColor = orig.backgroundColor
+    )
+    notebookPages.add(copy)
+    selectedNotebookPageId = copy.id
+    undoRedoManager.record(CreateNotebookPageAction(
+      page = copy,
+      pagesList = notebookPages,
+      onUndoDispatched = { invalidate() },
+      onRedoDispatched = { invalidate() }
+    ))
+    dispatchNotebookPageAddedEvent(copy)
+    persistNotebookPagesLocally()
+    hudToast.show("📋 Page duplicated")
+    performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+    invalidate()
+  }
+
+  /**
+   * Persists the notebook pages to a local app-private JSON file so they survive restarts.
+   */
+  fun persistNotebookPagesLocally() {
+    try {
+      val file = java.io.File(context.filesDir, "thinkspace_notebook_pages.json")
+      val arr = org.json.JSONArray()
+      for (page in notebookPages) {
+        val obj = org.json.JSONObject().apply {
+          put("id", page.id)
+          put("x", page.x.toDouble())
+          put("y", page.y.toDouble())
+          put("width", page.width.toDouble())
+          put("height", page.height.toDouble())
+          put("pageStyle", page.pageStyle)
+          put("title", page.title)
+          put("backgroundColor", String.format("#%06X", 0xFFFFFF and page.backgroundColor))
+        }
+        arr.put(obj)
+      }
+      file.writeText(arr.toString())
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
+  }
+
+  /**
+   * Restores notebook pages from the local app-private JSON file if currently empty.
+   */
+  fun loadPersistedNotebookPages() {
+    try {
+      val file = java.io.File(context.filesDir, "thinkspace_notebook_pages.json")
+      if (file.exists() && notebookPages.isEmpty()) {
+        val json = file.readText()
+        setNotebookPagesFromJson(json)
+      }
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
+  }
+
+  /**
+   * Loads notebook pages from a JSON array string (used by the 'notebookPagesJson' ReactProp).
+   */
+  fun setNotebookPagesFromJson(json: String?) {
+    if (json.isNullOrBlank()) return
+    try {
+      val arr = org.json.JSONArray(json)
+      notebookPages.clear()
+      for (i in 0 until arr.length()) {
+        val obj = arr.getJSONObject(i)
+        notebookPages.add(NativeNotebookPage(
+          id = obj.optString("id", "nbpage-$i"),
+          x = obj.optDouble("x", 0.0).toFloat(),
+          y = obj.optDouble("y", 0.0).toFloat(),
+          width = obj.optDouble("width", 280.0).toFloat(),
+          height = obj.optDouble("height", 380.0).toFloat(),
+          pageStyle = obj.optString("pageStyle", "ruled"),
+          title = obj.optString("title", "Notebook Page"),
+          backgroundColor = Color.parseColor(obj.optString("backgroundColor", "#FFFEF0")
+            .let { if (it.startsWith("#")) it else "#FFFEF0" })
+        ))
+      }
+      persistNotebookPagesLocally()
+      invalidate()
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notebook Page \u2014 React Native Event Dispatchers
+  // ---------------------------------------------------------------------------
+  private fun getEventDispatcher(): EventDispatcher? {
+    val reactContext = UIManagerHelper.getReactContext(this) ?: return null
+    return UIManagerHelper.getEventDispatcherForReactTag(reactContext, id)
+  }
+
+  private fun dispatchNotebookPageAddedEvent(page: NativeNotebookPage) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("id", page.id)
+      putDouble("x", page.x.toDouble())
+      putDouble("y", page.y.toDouble())
+      putDouble("width", page.width.toDouble())
+      putDouble("height", page.height.toDouble())
+      putString("pageStyle", page.pageStyle)
+      putString("title", page.title)
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topNotebookPageAdded", data))
+  }
+
+  private fun dispatchNotebookPageMovedEvent(pageId: String, x: Float, y: Float) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("id", pageId)
+      putDouble("x", x.toDouble())
+      putDouble("y", y.toDouble())
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topNotebookPageMoved", data))
+  }
+
+  private fun dispatchNotebookPageDeletedEvent(pageId: String) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply { putString("id", pageId) }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topNotebookPageDeleted", data))
+  }
+
 
   private fun dispatchTransformEvent() {
     val surfaceId = UIManagerHelper.getSurfaceId(this)
@@ -7520,6 +8741,14 @@ class ThinkspaceView : View {
         maxY = maxOf(maxY, p.y)
         hasContent = true
       }
+    }
+
+    for (pg in notebookPages) {
+      minX = minOf(minX, pg.x)
+      maxX = maxOf(maxX, pg.x + pg.width)
+      minY = minOf(minY, pg.y)
+      maxY = maxOf(maxY, pg.y + pg.height)
+      hasContent = true
     }
 
     val targetPanX: Float

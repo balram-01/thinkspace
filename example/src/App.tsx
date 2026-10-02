@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   StyleSheet,
   StatusBar,
+  Modal,
 } from 'react-native';
 import {
   ThinkspaceView,
@@ -18,6 +19,8 @@ import {
   type DocumentAnnotation,
   type PdfDocumentInfo,
   type WorkspaceDocument,
+  type NotebookPageModel,
+  type NotebookPageStyle,
 } from 'thinkspace';
 
 const INITIAL_ANNOTATIONS: DocumentAnnotation[] = [];
@@ -39,6 +42,9 @@ export default function App() {
   const [excerpts, setExcerpts] = useState<ExcerptModel[]>(INITIAL_EXCERPTS);
   const [inkLinks, setInkLinks] = useState<InkLink[]>(INITIAL_LINKS);
   const [annotations] = useState<DocumentAnnotation[]>(INITIAL_ANNOTATIONS);
+  const [notebookPages, setNotebookPages] = useState<NotebookPageModel[]>([]);
+  const [isAddMenuOpen, setIsAddMenuOpen] = useState(false);
+  const [isStylePickerOpen, setIsStylePickerOpen] = useState(false);
   const [activeNav, setActiveNav] = useState<NavTabMode>('workspace');
 
   // PDF Engine Document State (null by default — no default document loaded)
@@ -312,6 +318,20 @@ export default function App() {
             setCanUndo(u);
             setCanRedo(r);
           }}
+          notebookPages={notebookPages}
+          onNotebookPageAdded={(p) => {
+            setNotebookPages((prev) =>
+              prev.some((x) => x.id === p.id) ? prev : [...prev, p]
+            );
+          }}
+          onNotebookPageMoved={(id, x, y) => {
+            setNotebookPages((prev) =>
+              prev.map((p) => (p.id === id ? { ...p, x, y } : p))
+            );
+          }}
+          onNotebookPageDeleted={(id) => {
+            setNotebookPages((prev) => prev.filter((p) => p.id !== id));
+          }}
         />
       </View>
 
@@ -376,6 +396,22 @@ export default function App() {
           <Text style={styles.toolIcon}>⊝</Text>
           <Text style={styles.toolLabel}>Zoom Out</Text>
         </TouchableOpacity>
+
+        {/* 
+          ── Add to Workspace / Notebook Page (Hidden for now) ──────────────────
+          Hidden for now as requested. To re-enable the "Add to Workspace / Add Page"
+          option in the bottom toolbar later, simply uncomment the TouchableOpacity below.
+        */}
+        {/*
+        <TouchableOpacity
+          style={styles.toolItem}
+          activeOpacity={0.7}
+          onPress={() => setIsAddMenuOpen(true)}
+        >
+          <Text style={[styles.toolIcon, styles.goldSparkle]}>📋</Text>
+          <Text style={[styles.toolLabel, styles.cyanText]}>Add Page</Text>
+        </TouchableOpacity>
+        */}
       </View>
 
       {/* ── Bottom Navigation Bar matching Screenshot ─────────────────────── */}
@@ -444,6 +480,169 @@ export default function App() {
           </Text>
         </TouchableOpacity>
       </View>
+
+      {/* ── Add to Workspace Modal (Step 2 of UX Reference) ─────────────── */}
+      <Modal
+        visible={isAddMenuOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsAddMenuOpen(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setIsAddMenuOpen(false)}
+        >
+          <View style={styles.addMenuCard}>
+            <View style={styles.menuHeader}>
+              <Text style={styles.menuTitle}>Add to Workspace</Text>
+              <TouchableOpacity onPress={() => setIsAddMenuOpen(false)}>
+                <Text style={styles.closeBtn}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.menuItemPrimary}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsAddMenuOpen(false);
+                setIsStylePickerOpen(true);
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>📄</Text>
+                <Text style={styles.menuItemTextPrimary}>Notebook Page</Text>
+              </View>
+              <Text style={styles.arrowIcon}>›</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.menuItem}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsAddMenuOpen(false);
+                handleAddTextBox();
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>📑</Text>
+                <Text style={styles.menuItemText}>PDF Excerpt Card</Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.menuItem}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsAddMenuOpen(false);
+                handleAddTextBox();
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>🔤</Text>
+                <Text style={styles.menuItemText}>Text Box</Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.menuItem}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsAddMenuOpen(false);
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>🖼️</Text>
+                <Text style={styles.menuItemText}>Image</Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.menuItem}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsAddMenuOpen(false);
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>🔷</Text>
+                <Text style={styles.menuItemText}>Shape</Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.menuItem}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsAddMenuOpen(false);
+                handleAddTextBox();
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>🏷️</Text>
+                <Text style={styles.menuItemText}>Sticky Note</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ── Choose Page Style Modal (Step 4 of UX Reference) ─────────────── */}
+      <Modal
+        visible={isStylePickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsStylePickerOpen(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setIsStylePickerOpen(false)}
+        >
+          <View style={styles.stylePickerCard}>
+            <View style={styles.menuHeader}>
+              <Text style={styles.menuTitle}>Page Style</Text>
+              <TouchableOpacity onPress={() => setIsStylePickerOpen(false)}>
+                <Text style={styles.closeBtn}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.styleGrid}>
+              {[
+                { id: 'blank', label: 'Blank', icon: '◻️' },
+                { id: 'ruled', label: 'Ruled', icon: '☰' },
+                { id: 'grid', label: 'Grid', icon: '▦' },
+                { id: 'dotted', label: 'Dotted', icon: '⁖' },
+                { id: 'sketch', label: 'Sketch', icon: '▨' },
+                { id: 'cornell', label: 'Cornell', icon: '◫' },
+                { id: 'squared', label: 'Squared', icon: '⊞' },
+                { id: 'custom', label: 'Custom', icon: '＋' },
+              ].map((item) => (
+                <TouchableOpacity
+                  key={item.id}
+                  style={[
+                    styles.styleOptionCard,
+                    item.id === 'ruled' && styles.styleOptionSelected,
+                  ]}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    setIsStylePickerOpen(false);
+                    thinkspaceRef.current?.addNotebookPage?.(
+                      item.id as NotebookPageStyle,
+                      `${item.label} Notes`
+                    );
+                  }}
+                >
+                  <View style={styles.styleThumbnail}>
+                    <Text style={styles.styleThumbnailIcon}>{item.icon}</Text>
+                  </View>
+                  <Text style={styles.styleOptionLabel}>{item.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 }
@@ -596,5 +795,139 @@ const styles = StyleSheet.create({
     color: '#00ADB5',
     fontSize: 13,
     fontWeight: '700',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  addMenuCard: {
+    width: 290,
+    backgroundColor: '#0F172A',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    elevation: 20,
+  },
+  menuHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
+  },
+  menuTitle: {
+    color: '#F8FAFC',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  closeBtn: {
+    color: '#94A3B8',
+    fontSize: 16,
+    padding: 4,
+  },
+  menuItemPrimary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#1E293B',
+    borderRadius: 10,
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#3B82F6',
+  },
+  menuItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  menuItemIcon: {
+    fontSize: 16,
+  },
+  menuItemTextPrimary: {
+    color: '#60A5FA',
+    fontSize: 13.5,
+    fontWeight: '600',
+  },
+  arrowIcon: {
+    color: '#60A5FA',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    marginBottom: 4,
+  },
+  menuItemText: {
+    color: '#CBD5E1',
+    fontSize: 13,
+  },
+  stylePickerCard: {
+    width: 320,
+    backgroundColor: '#0F172A',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    elevation: 20,
+  },
+  styleGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    justifyContent: 'space-between',
+  },
+  styleOptionCard: {
+    width: '22%',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    backgroundColor: '#1E293B',
+  },
+  styleOptionSelected: {
+    borderColor: '#3B82F6',
+    backgroundColor: '#1E3A5F',
+  },
+  styleThumbnail: {
+    width: 44,
+    height: 44,
+    borderRadius: 6,
+    backgroundColor: '#FFFEF0',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+  },
+  styleThumbnailIcon: {
+    fontSize: 20,
+    color: '#334155',
+  },
+  styleOptionLabel: {
+    color: '#CBD5E1',
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
   },
 });

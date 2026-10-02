@@ -3,6 +3,8 @@ package com.thinkspace.engine
 import com.thinkspace.NativeAnnotation
 import com.thinkspace.NativeCard
 import com.thinkspace.NativeLink
+import com.thinkspace.NativeNotebookPage
+import com.thinkspace.NativePoint
 import com.thinkspace.NativeStroke
 import com.thinkspace.PdfPageStroke
 import java.util.ArrayDeque
@@ -476,3 +478,137 @@ class UndoRedoManager(
     onStateChanged?.invoke(canUndo, canRedo)
   }
 }
+
+// ---------------------------------------------------------------------------
+// Notebook Page Actions
+// ---------------------------------------------------------------------------
+
+/**
+ * Creating a new notebook page on the canvas.
+ */
+class CreateNotebookPageAction(
+  val page: NativeNotebookPage,
+  private val pagesList: MutableList<NativeNotebookPage>,
+  private val onUndoDispatched: ((NativeNotebookPage) -> Unit)? = null,
+  private val onRedoDispatched: ((NativeNotebookPage) -> Unit)? = null
+) : UndoableAction {
+  override val description: String = "Add notebook page"
+
+  override fun undo() {
+    pagesList.removeAll { it.id == page.id }
+    onUndoDispatched?.invoke(page)
+  }
+
+  override fun redo() {
+    if (pagesList.none { it.id == page.id }) pagesList.add(page)
+    onRedoDispatched?.invoke(page)
+  }
+}
+
+/**
+ * Deleting a notebook page from the canvas.
+ */
+class DeleteNotebookPageAction(
+  val page: NativeNotebookPage,
+  private val pagesList: MutableList<NativeNotebookPage>,
+  private val onUndoDispatched: ((NativeNotebookPage) -> Unit)? = null,
+  private val onRedoDispatched: ((NativeNotebookPage) -> Unit)? = null
+) : UndoableAction {
+  override val description: String = "Delete notebook page"
+
+  override fun undo() {
+    if (pagesList.none { it.id == page.id }) pagesList.add(page)
+    onUndoDispatched?.invoke(page)
+  }
+
+  override fun redo() {
+    pagesList.removeAll { it.id == page.id }
+    onRedoDispatched?.invoke(page)
+  }
+}
+
+/**
+ * Moving (repositioning) a notebook page on the canvas.
+ * Moves any excerpt cards and ink strokes attached to this page.
+ */
+class MoveNotebookPageAction(
+  val pageId: String,
+  val prevX: Float,
+  val prevY: Float,
+  val newX: Float,
+  val newY: Float,
+  private val pagesList: MutableList<NativeNotebookPage>,
+  private val cardsList: List<NativeCard> = emptyList(),
+  private val strokesList: List<NativeStroke> = emptyList(),
+  private val deltaX: Float = 0f,
+  private val deltaY: Float = 0f,
+  private val onPositionChanged: ((String, Float, Float) -> Unit)? = null
+) : UndoableAction {
+  override val description: String = "Move notebook page"
+
+  override fun undo() {
+    val p = pagesList.find { it.id == pageId }
+    if (p != null) {
+      p.x = prevX
+      p.y = prevY
+      for (card in cardsList) {
+        card.x -= deltaX
+        card.y -= deltaY
+      }
+      for (stroke in strokesList) {
+        stroke.points = stroke.points.map { NativePoint(it.x - deltaX, it.y - deltaY) }
+      }
+      onPositionChanged?.invoke(pageId, prevX, prevY)
+    }
+  }
+
+  override fun redo() {
+    val p = pagesList.find { it.id == pageId }
+    if (p != null) {
+      p.x = newX
+      p.y = newY
+      for (card in cardsList) {
+        card.x += deltaX
+        card.y += deltaY
+      }
+      for (stroke in strokesList) {
+        stroke.points = stroke.points.map { NativePoint(it.x + deltaX, it.y + deltaY) }
+      }
+      onPositionChanged?.invoke(pageId, newX, newY)
+    }
+  }
+}
+
+/**
+ * Resizing a notebook page on the canvas.
+ */
+class ResizeNotebookPageAction(
+  val pageId: String,
+  val prevWidth: Float,
+  val prevHeight: Float,
+  val newWidth: Float,
+  val newHeight: Float,
+  private val pagesList: MutableList<NativeNotebookPage>,
+  private val onSizeChanged: ((String, Float, Float) -> Unit)? = null
+) : UndoableAction {
+  override val description: String = "Resize notebook page"
+
+  override fun undo() {
+    val p = pagesList.find { it.id == pageId }
+    if (p != null) {
+      p.width = prevWidth
+      p.height = prevHeight
+      onSizeChanged?.invoke(pageId, prevWidth, prevHeight)
+    }
+  }
+
+  override fun redo() {
+    val p = pagesList.find { it.id == pageId }
+    if (p != null) {
+      p.width = newWidth
+      p.height = newHeight
+      onSizeChanged?.invoke(pageId, newWidth, newHeight)
+    }
+  }
+}
+

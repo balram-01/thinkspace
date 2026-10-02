@@ -73,6 +73,26 @@ export type UndoStateChangeEvent = Readonly<{
   canRedo: boolean;
 }>;
 
+export type NotebookPageAddedEvent = Readonly<{
+  id: string;
+  x: Float;
+  y: Float;
+  width: Float;
+  height: Float;
+  pageStyle: string;
+  title: string;
+}>;
+
+export type NotebookPageMovedEvent = Readonly<{
+  id: string;
+  x: Float;
+  y: Float;
+}>;
+
+export type NotebookPageDeletedEvent = Readonly<{
+  id: string;
+}>;
+
 export interface NativeProps extends ViewProps {
   documentJson?: string;
   annotationsJson?: string;
@@ -84,6 +104,7 @@ export interface NativeProps extends ViewProps {
   strokesJson?: string;
   excerptsJson?: string;
   inkLinksJson?: string;
+  notebookPagesJson?: string;
   panX?: Float;
   panY?: Float;
   scale?: Float;
@@ -100,6 +121,9 @@ export interface NativeProps extends ViewProps {
   onExtractExcerpt?: DirectEventHandler<ExtractExcerptEvent>;
   onToggleSqueeze?: DirectEventHandler<ToggleSqueezeEvent>;
   onUndoStateChange?: DirectEventHandler<UndoStateChangeEvent>;
+  onNotebookPageAdded?: DirectEventHandler<NotebookPageAddedEvent>;
+  onNotebookPageMoved?: DirectEventHandler<NotebookPageMovedEvent>;
+  onNotebookPageDeleted?: DirectEventHandler<NotebookPageDeletedEvent>;
 }
 
 export default codegenNativeComponent<NativeProps>('ThinkspaceView');

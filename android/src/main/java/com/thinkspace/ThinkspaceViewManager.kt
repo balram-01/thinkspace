@@ -84,6 +84,11 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
     view?.setCardsFromJson(value)
   }
 
+  @ReactProp(name = "notebookPagesJson")
+  override fun setNotebookPagesJson(view: ThinkspaceView?, value: String?) {
+    view?.setNotebookPagesFromJson(value)
+  }
+
   @ReactProp(name = "inkLinksJson")
   override fun setInkLinksJson(view: ThinkspaceView?, value: String?) {
     view?.setLinksFromJson(value)
@@ -125,7 +130,10 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "topSplitRatioChange" to "onSplitRatioChange",
       "topExtractExcerpt" to "onExtractExcerpt",
       "topToggleSqueeze" to "onToggleSqueeze",
-      "topUndoStateChange" to "onUndoStateChange"
+      "topUndoStateChange" to "onUndoStateChange",
+      "topNotebookPageAdded" to "onNotebookPageAdded",
+      "topNotebookPageMoved" to "onNotebookPageMoved",
+      "topNotebookPageDeleted" to "onNotebookPageDeleted"
     )
     for ((top, on) in events) {
       map[top] = mapOf("registrationName" to on)
@@ -142,7 +150,8 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "undo" to 5,
       "redo" to 6,
       "zoomToFit" to 7,
-      "zoomOut" to 7
+      "zoomOut" to 7,
+      "addNotebookPage" to 8
     )
   }
 
@@ -155,6 +164,11 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "undo", "5" -> root.undo()
       "redo", "6" -> root.redo()
       "zoomToFit", "zoomOut", "7" -> root.zoomToFitCards()
+      "addNotebookPage", "8" -> {
+        val style = args?.getString(0) ?: "ruled"
+        val title = args?.getString(1) ?: ""
+        root.addNotebookPage(style, title)
+      }
     }
   }
 
@@ -167,6 +181,11 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       5 -> root.undo()
       6 -> root.redo()
       7 -> root.zoomToFitCards()
+      8 -> {
+        val style = args?.getString(0) ?: "ruled"
+        val title = args?.getString(1) ?: ""
+        root.addNotebookPage(style, title)
+      }
     }
   }
 

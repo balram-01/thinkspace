@@ -277,6 +277,7 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
     strokes = [],
     excerpts = [],
     inkLinks = [],
+    notebookPages = [],
     panX: propPanX = 0,
     panY: propPanY = 0,
     scale: propScale = 1,
@@ -294,11 +295,20 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
     onCopyText,
     onHighlightText,
     onUndoStateChange,
+    onNotebookPageAdded,
+    onNotebookPageMoved: _onNotebookPageMoved, // eslint-disable-line @typescript-eslint/no-unused-vars
+    onNotebookPageDeleted: _onNotebookPageDeleted, // eslint-disable-line @typescript-eslint/no-unused-vars
   } = props;
   const canvasRef = useRef<any>(null);
 
   const historyStack = useRef<{ undo: () => void; redo: () => void }[]>([]);
   const redoStack = useRef<{ undo: () => void; redo: () => void }[]>([]);
+
+  const [localNotebookPages, setLocalNotebookPages] =
+    useState<any[]>(notebookPages);
+  useEffect(() => {
+    setLocalNotebookPages(notebookPages);
+  }, [notebookPages]);
 
   React.useImperativeHandle(_ref, () => ({
     openSearch: () => {},
@@ -328,6 +338,20 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
     zoomOut: () => {
       setScale(1);
       setPan({ x: 0, y: 0 });
+    },
+    addNotebookPage: (style?: any, title?: string) => {
+      const newPage = {
+        id: `nbpage-${Date.now()}`,
+        x: (-pan.x + 80) / scale,
+        y: (-pan.y + 80) / scale,
+        width: 280,
+        height: 380,
+        pageStyle: style ?? 'ruled',
+        title: title || 'Notebook Page',
+        backgroundColor: '#FFFEF0',
+      };
+      setLocalNotebookPages((prev) => [...prev, newPage]);
+      onNotebookPageAdded?.(newPage);
     },
   }));
 
@@ -913,6 +937,125 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
       ctx.stroke();
     }
 
+    // ── Notebook Pages (rendered under cords, cards, and strokes)
+    localNotebookPages.forEach((page) => {
+      const pos = worldToCanvasScreen(page.x, page.y, canvasTopY);
+      const pw = page.width * scale;
+      const ph = page.height * scale;
+
+      // Drop shadow
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      if (ctx.roundRect) ctx.roundRect(pos.x + 4, pos.y + 4, pw, ph, 8);
+      else ctx.rect(pos.x + 4, pos.y + 4, pw, ph);
+      ctx.fill();
+
+      // Paper background
+      ctx.fillStyle = page.backgroundColor || '#FFFEF0';
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(pos.x, pos.y, pw, ph, 8);
+      else ctx.rect(pos.x, pos.y, pw, ph);
+      ctx.fill();
+
+      // Clip for pattern
+      ctx.save();
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(pos.x, pos.y, pw, ph, 8);
+      else ctx.rect(pos.x, pos.y, pw, ph);
+      ctx.clip();
+
+      // Title
+      if (page.title) {
+        ctx.fillStyle = '#374151';
+        ctx.font = `bold ${Math.max(12, 16 * scale)}px serif`;
+        ctx.fillText(page.title, pos.x + 14 * scale, pos.y + 24 * scale);
+      }
+
+      // Pattern lines
+      const contentTop = pos.y + 35 * scale;
+      if (page.pageStyle === 'ruled' || !page.pageStyle) {
+        ctx.strokeStyle = '#D1D5DB';
+        ctx.lineWidth = 1;
+        const lineSpacing = Math.max(16, 26 * scale);
+        ctx.beginPath();
+        for (
+          let y = contentTop + lineSpacing;
+          y < pos.y + ph - 8;
+          y += lineSpacing
+        ) {
+          ctx.moveTo(pos.x + 8, y);
+          ctx.lineTo(pos.x + pw - 8, y);
+        }
+        ctx.stroke();
+
+        // Red/pink margin line
+        ctx.strokeStyle = '#FCA5A5';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        const marginX = pos.x + pw * 0.15;
+        ctx.moveTo(marginX, contentTop);
+        ctx.lineTo(marginX, pos.y + ph - 8);
+        ctx.stroke();
+      } else if (page.pageStyle === 'grid' || page.pageStyle === 'squared') {
+        ctx.strokeStyle = '#E5E7EB';
+        ctx.lineWidth = 0.8;
+        const step = Math.max(14, 22 * scale);
+        ctx.beginPath();
+        for (let x = pos.x + step; x < pos.x + pw - 4; x += step) {
+          ctx.moveTo(x, contentTop);
+          ctx.lineTo(x, pos.y + ph - 4);
+        }
+        for (let y = contentTop + step; y < pos.y + ph - 4; y += step) {
+          ctx.moveTo(pos.x + 4, y);
+          ctx.lineTo(pos.x + pw - 4, y);
+        }
+        ctx.stroke();
+      } else if (page.pageStyle === 'dotted') {
+        ctx.fillStyle = '#9CA3AF';
+        const step = Math.max(14, 22 * scale);
+        for (let x = pos.x + step; x < pos.x + pw - 6; x += step) {
+          for (let y = contentTop + step; y < pos.y + ph - 6; y += step) {
+            ctx.beginPath();
+            ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      } else if (page.pageStyle === 'cornell') {
+        const cueX = pos.x + pw * 0.28;
+        const summaryY = pos.y + ph - ph * 0.22;
+        ctx.strokeStyle = '#EF4444';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(cueX, contentTop);
+        ctx.lineTo(cueX, summaryY);
+        ctx.moveTo(pos.x + 8, summaryY);
+        ctx.lineTo(pos.x + pw - 8, summaryY);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#D1D5DB';
+        ctx.lineWidth = 1;
+        const lineSpacing = Math.max(16, 26 * scale);
+        ctx.beginPath();
+        for (
+          let y = contentTop + lineSpacing;
+          y < summaryY - 8;
+          y += lineSpacing
+        ) {
+          ctx.moveTo(cueX + 4, y);
+          ctx.lineTo(pos.x + pw - 8, y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // Border
+      ctx.strokeStyle = '#CBD5E1';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(pos.x, pos.y, pw, ph, 8);
+      else ctx.rect(pos.x, pos.y, pw, ph);
+      ctx.stroke();
+    });
+
     // Tether Cords
     inkLinks.forEach((link) => {
       const card = excerpts.find((e) => e.id === link.sourceExcerptId);
@@ -1275,6 +1418,7 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
     worldToCanvasScreen,
     docSelection,
     copiedToastText,
+    localNotebookPages,
   ]);
 
   // Handle Resize
