@@ -5,6 +5,8 @@ import type {
   ThinkspaceViewProps,
   InkStroke,
   WorkspaceDocumentEntry,
+  PenDrawingMode,
+  SemanticInkLink,
 } from './types';
 
 export interface ThinkspaceViewRef {
@@ -17,6 +19,13 @@ export interface ThinkspaceViewRef {
   zoomToFit: () => void;
   zoomOut: () => void;
   addNotebookPage: (style?: string, title?: string) => void;
+  toggleImmersiveMode: () => void;
+  setImmersiveMode: (enabled: boolean) => void;
+  setPenMode: (mode: PenDrawingMode) => void;
+  setPenColor: (color: string) => void;
+  setPenThickness: (thickness: number) => void;
+  setPenFavorites: (favorites: string[]) => void;
+  togglePenSettings: () => void;
 }
 
 export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
@@ -60,6 +69,14 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     onNotebookPageDeleted,
     onRequestDocumentSwitch,
     onToggleImmersive,
+    penMode,
+    penColor,
+    penThickness,
+    penFavorites,
+    semanticInkLinks,
+    onPenStateChange,
+    onInkLinkCreate,
+    onInkLinkDelete,
   } = props;
 
   const nativeRef = useRef<any>(null);
@@ -147,6 +164,53 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         (UIManager as any).dispatchViewManagerCommand(handle, cmd, [enabled]);
       }
     },
+    setPenMode: (mode: PenDrawingMode) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.setPenMode ?? 11;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [mode]);
+      }
+    },
+    setPenColor: (color: string) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.setPenColor ?? 12;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [color]);
+      }
+    },
+    setPenThickness: (thickness: number) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.setPenThickness ?? 13;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [thickness]);
+      }
+    },
+    setPenFavorites: (favorites: string[]) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.setPenFavorites ?? 14;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [
+          JSON.stringify(favorites),
+        ]);
+      }
+    },
+    togglePenSettings: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.togglePenSettings ?? 15;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, []);
+      }
+    },
   }));
 
   // ── Serialized JSON props ─────────────────────────────────────────────────
@@ -184,6 +248,14 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
   const notebookPagesJson = useMemo(
     () => JSON.stringify(notebookPages),
     [notebookPages]
+  );
+  const penFavoritesJson = useMemo(
+    () => (penFavorites ? JSON.stringify(penFavorites) : undefined),
+    [penFavorites]
+  );
+  const semanticInkLinksJson = useMemo(
+    () => (semanticInkLinks ? JSON.stringify(semanticInkLinks) : undefined),
+    [semanticInkLinks]
   );
 
   return (
@@ -369,6 +441,89 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         onToggleImmersive
           ? (e: any) => {
               onToggleImmersive(e.nativeEvent.isImmersive);
+            }
+          : undefined
+      }
+      penMode={penMode}
+      penColor={penColor}
+      penThickness={penThickness}
+      penFavoritesJson={penFavoritesJson}
+      semanticInkLinksJson={semanticInkLinksJson}
+      onPenStateChange={
+        onPenStateChange
+          ? (e: any) => {
+              const ev = e.nativeEvent || {};
+              let favs: string[] = [];
+              if (ev.favoritesJson) {
+                try {
+                  favs = JSON.parse(ev.favoritesJson);
+                } catch {
+                  // Ignore JSON parse errors
+                }
+              } else if (Array.isArray(ev.favorites)) {
+                favs = ev.favorites;
+              }
+              onPenStateChange({
+                active: true,
+                settingsOpen: true,
+                drawingMode: (ev.mode || 'freehand') as PenDrawingMode,
+                color: ev.color || '#E87A90',
+                thickness: ev.thickness || 3.5,
+                favoriteColors: favs,
+              });
+            }
+          : undefined
+      }
+      onInkLinkCreate={
+        onInkLinkCreate
+          ? (e: any) => {
+              const ev = e.nativeEvent || {};
+              if (ev.linkJson) {
+                try {
+                  const parsed = JSON.parse(ev.linkJson);
+                  onInkLinkCreate(parsed);
+                  return;
+                } catch {
+                  // Ignore JSON parse errors
+                }
+              }
+              const semanticLink: SemanticInkLink = {
+                id: ev.id,
+                sourceEndpoint: {
+                  type: 'pdf',
+                  documentId: ev.sourceDocId || '',
+                  pageIndex: ev.sourcePageIndex || 0,
+                  sourceRect: {
+                    left: (ev.sourceX || 0) - 30,
+                    top: (ev.sourceY || 0) - 10,
+                    right: (ev.sourceX || 0) + 30,
+                    bottom: (ev.sourceY || 0) + 10,
+                  },
+                  anchorPoint: { x: ev.sourceX || 0, y: ev.sourceY || 0 },
+                },
+                targetEndpoint: {
+                  type: 'card',
+                  cardId: ev.targetCardId || '',
+                  anchorPoint: { x: 0, y: 0 },
+                },
+                strokePoints: [],
+                color:
+                  typeof ev.color === 'number'
+                    ? // eslint-disable-next-line no-bitwise
+                      `#${(ev.color & 0xffffff).toString(16).padStart(6, '0')}`
+                    : ev.color || '#E87A90',
+                thickness: ev.strokeWidth || 3.5,
+                style: (ev.style as any) || 'elastic',
+                createdAt: ev.createdAt || new Date().toISOString(),
+              };
+              onInkLinkCreate(semanticLink);
+            }
+          : undefined
+      }
+      onInkLinkDelete={
+        onInkLinkDelete
+          ? (e: any) => {
+              onInkLinkDelete(e.nativeEvent?.id);
             }
           : undefined
       }

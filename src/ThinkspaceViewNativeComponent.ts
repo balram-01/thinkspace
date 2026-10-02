@@ -107,6 +107,21 @@ export type ToggleImmersiveEvent = Readonly<{
   isImmersive: boolean;
 }>;
 
+export type InkLinkCreateEvent = Readonly<{
+  linkJson: string;
+}>;
+
+export type InkLinkDeleteEvent = Readonly<{
+  id: string;
+}>;
+
+export type PenStateChangeEvent = Readonly<{
+  mode: string;
+  color: string;
+  thickness: Float;
+  favoritesJson: string;
+}>;
+
 export interface NativeProps extends ViewProps {
   documentJson?: string;
   annotationsJson?: string;
@@ -128,6 +143,12 @@ export interface NativeProps extends ViewProps {
   panX?: Float;
   panY?: Float;
   scale?: Float;
+  // ── Pen / Inking System Props ──────────────────────────────────────────
+  penMode?: string;
+  penColor?: string;
+  penThickness?: Float;
+  penFavoritesJson?: string;
+  semanticInkLinksJson?: string;
   onAddStroke?: DirectEventHandler<StrokeEvent>;
   onEraseStroke?: DirectEventHandler<StrokeIdEvent>;
   onExcerptMoveEnd?: DirectEventHandler<ExcerptMoveEvent>;
@@ -148,6 +169,9 @@ export interface NativeProps extends ViewProps {
   onRequestDocumentSwitch?: DirectEventHandler<RequestDocumentSwitchEvent>;
   /** Fired when user taps content to toggle immersive mode. */
   onToggleImmersive?: DirectEventHandler<ToggleImmersiveEvent>;
+  onInkLinkCreate?: DirectEventHandler<InkLinkCreateEvent>;
+  onInkLinkDelete?: DirectEventHandler<InkLinkDeleteEvent>;
+  onPenStateChange?: DirectEventHandler<PenStateChangeEvent>;
 }
 
 export default codegenNativeComponent<NativeProps>('ThinkspaceView');

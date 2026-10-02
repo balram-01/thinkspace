@@ -2,6 +2,7 @@ export { default as ThinkspaceView } from './ThinkspaceView';
 export { default as DocumentViewer } from './DocumentViewer';
 export { default as SplitDivider } from './SplitDivider';
 export { default as LiquidTextWorkspace } from './LiquidTextWorkspace';
+export { PenSettingsPanel } from './PenSettingsPanel';
 export * from './types';
 
 // PDF Engine — Android-native PDF processing, rendering, search & text extraction

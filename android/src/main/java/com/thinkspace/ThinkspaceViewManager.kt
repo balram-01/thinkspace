@@ -118,6 +118,36 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
     view?.setImmersiveMode(value)
   }
 
+  @ReactProp(name = "penMode")
+  override fun setPenMode(view: ThinkspaceView?, value: String?) {
+    if (view == null) return
+    view.penDrawingMode = value ?: "freehand"
+  }
+
+  @ReactProp(name = "penColor")
+  override fun setPenColor(view: ThinkspaceView?, value: String?) {
+    if (view == null || value.isNullOrEmpty()) return
+    try {
+      view.penColor = Color.parseColor(value)
+    } catch (_: Exception) {}
+  }
+
+  @ReactProp(name = "penThickness")
+  override fun setPenThickness(view: ThinkspaceView?, value: Float) {
+    if (view == null || value <= 0f) return
+    view.penThickness = value
+  }
+
+  @ReactProp(name = "penFavoritesJson")
+  override fun setPenFavoritesJson(view: ThinkspaceView?, value: String?) {
+    view?.setPenFavoritesFromJson(value)
+  }
+
+  @ReactProp(name = "semanticInkLinksJson")
+  override fun setSemanticInkLinksJson(view: ThinkspaceView?, value: String?) {
+    view?.setSemanticInkLinksFromJson(value)
+  }
+
   @ReactProp(name = "panX")
   override fun setPanX(view: ThinkspaceView?, value: Float) {
     if (view == null) return
@@ -161,7 +191,11 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       // Multi-document: fired when user taps a source badge on a card
       "topRequestDocumentSwitch" to "onRequestDocumentSwitch",
       // Immersive content mode: fired when user taps content
-      "topToggleImmersive" to "onToggleImmersive"
+      "topToggleImmersive" to "onToggleImmersive",
+      // LiquidText Pen & Ink-Links system
+      "topInkLinkCreate" to "onInkLinkCreate",
+      "topInkLinkDelete" to "onInkLinkDelete",
+      "topPenStateChange" to "onPenStateChange"
     )
     for ((top, on) in events) {
       map[top] = mapOf("registrationName" to on)
@@ -181,7 +215,12 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "zoomOut" to 7,
       "addNotebookPage" to 8,
       "toggleImmersiveMode" to 9,
-      "setImmersiveMode" to 10
+      "setImmersiveMode" to 10,
+      "setPenMode" to 11,
+      "setPenColor" to 12,
+      "setPenThickness" to 13,
+      "setPenFavorites" to 14,
+      "togglePenSettings" to 15
     )
   }
 
@@ -201,6 +240,16 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       }
       "toggleImmersiveMode", "9" -> root.toggleImmersiveMode()
       "setImmersiveMode", "10" -> root.setImmersiveMode(args?.getBoolean(0) ?: false)
+      "setPenMode", "11" -> root.penDrawingMode = args?.getString(0) ?: "freehand"
+      "setPenColor", "12" -> {
+        val col = args?.getString(0)
+        if (!col.isNullOrEmpty()) {
+          try { root.penColor = Color.parseColor(col) } catch (_: Exception) {}
+        }
+      }
+      "setPenThickness", "13" -> root.penThickness = args?.getDouble(0)?.toFloat() ?: 3.5f
+      "setPenFavorites", "14" -> root.setPenFavoritesFromJson(args?.getString(0))
+      "togglePenSettings", "15" -> root.togglePenSettings()
     }
   }
 
@@ -220,6 +269,16 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       }
       9 -> root.toggleImmersiveMode()
       10 -> root.setImmersiveMode(args?.getBoolean(0) ?: false)
+      11 -> root.penDrawingMode = args?.getString(0) ?: "freehand"
+      12 -> {
+        val col = args?.getString(0)
+        if (!col.isNullOrEmpty()) {
+          try { root.penColor = Color.parseColor(col) } catch (_: Exception) {}
+        }
+      }
+      13 -> root.penThickness = args?.getDouble(0)?.toFloat() ?: 3.5f
+      14 -> root.setPenFavoritesFromJson(args?.getString(0))
+      15 -> root.togglePenSettings()
     }
   }
 

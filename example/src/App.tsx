@@ -13,6 +13,9 @@ import {
 import {
   ThinkspaceView,
   PdfEngine,
+  PenSettingsPanel,
+  DEFAULT_PEN_FAVORITES,
+  type ThinkspaceViewRef,
   type WorkspaceTool,
   type WorkspacePattern,
   type InkStroke,
@@ -24,6 +27,8 @@ import {
   type WorkspaceDocumentEntry,
   type NotebookPageModel,
   type NotebookPageStyle,
+  type PenDrawingMode,
+  type SemanticInkLink,
 } from 'thinkspace';
 
 const INITIAL_ANNOTATIONS: DocumentAnnotation[] = [];
@@ -122,7 +127,51 @@ export default function App() {
   const [pdfUri, setPdfUri] = useState<string | null>(null);
 
   // Thinkspace Native View Reference
-  const thinkspaceRef = useRef<any>(null);
+  const thinkspaceRef = useRef<ThinkspaceViewRef | null>(null);
+
+  // LiquidText Real Pen & Inking System State
+  const [penMode, setPenMode] = useState<PenDrawingMode>('freehand');
+  const [penColor, setPenColor] = useState('#00ADB5');
+  const [penThickness, setPenThickness] = useState(3.5);
+  const [penFavorites, setPenFavorites] = useState<string[]>(
+    DEFAULT_PEN_FAVORITES
+  );
+  const [isPenSettingsOpen, setIsPenSettingsOpen] = useState(false);
+  const [semanticInkLinks, setSemanticInkLinks] = useState<SemanticInkLink[]>(
+    []
+  );
+
+  const handlePenPress = useCallback(() => {
+    if (tool !== 'pen') {
+      setTool('pen');
+      setIsPenSettingsOpen(true);
+      thinkspaceRef.current?.setPenMode(penMode);
+      thinkspaceRef.current?.setPenColor(penColor);
+      thinkspaceRef.current?.setPenThickness(penThickness);
+    } else {
+      setIsPenSettingsOpen((prev) => !prev);
+    }
+  }, [tool, penMode, penColor, penThickness]);
+
+  const handleSelectPenDrawingMode = useCallback((mode: PenDrawingMode) => {
+    setPenMode(mode);
+    thinkspaceRef.current?.setPenMode(mode);
+  }, []);
+
+  const handleSelectPenColor = useCallback((c: string) => {
+    setPenColor(c);
+    thinkspaceRef.current?.setPenColor(c);
+  }, []);
+
+  const handleSelectPenThickness = useCallback((th: number) => {
+    setPenThickness(th);
+    thinkspaceRef.current?.setPenThickness(th);
+  }, []);
+
+  const handleChangePenFavorites = useCallback((favs: string[]) => {
+    setPenFavorites(favs);
+    thinkspaceRef.current?.setPenFavorites(favs);
+  }, []);
 
   // ── Active document object for ThinkspaceView (legacy, single-doc) ───────
   // Still used for backward compatibility when workspaceDocs is empty
@@ -235,12 +284,15 @@ export default function App() {
     setActiveNav(mode);
     if (mode === 'drawing') {
       setTool((prev) => (prev === 'select' ? 'pen' : prev));
-    } else if (mode === 'document') {
-      setSplitRatio(0.72);
-      setTool('select');
     } else {
-      setSplitRatio(0.48);
-      setTool('select');
+      setIsPenSettingsOpen(false);
+      if (mode === 'document') {
+        setSplitRatio(0.72);
+        setTool('select');
+      } else {
+        setSplitRatio(0.48);
+        setTool('select');
+      }
     }
   }, []);
 
@@ -373,6 +425,29 @@ export default function App() {
           strokes={strokes}
           excerpts={excerpts}
           inkLinks={inkLinks}
+          penMode={penMode}
+          penColor={penColor}
+          penThickness={penThickness}
+          penFavorites={penFavorites}
+          semanticInkLinks={semanticInkLinks}
+          onPenStateChange={(state) => {
+            if (state.drawingMode) setPenMode(state.drawingMode);
+            if (state.color) setPenColor(state.color);
+            if (state.thickness) setPenThickness(state.thickness);
+            if (state.favoriteColors) setPenFavorites(state.favoriteColors);
+            if (typeof state.settingsOpen === 'boolean') {
+              setIsPenSettingsOpen(state.settingsOpen);
+            }
+          }}
+          onInkLinkCreate={(link) => {
+            setSemanticInkLinks((prev) => [
+              ...prev.filter((l) => l.id !== link.id),
+              link,
+            ]);
+          }}
+          onInkLinkDelete={(linkId) => {
+            setSemanticInkLinks((prev) => prev.filter((l) => l.id !== linkId));
+          }}
           onAddStroke={(s) => setStrokes((prev) => [...prev, s])}
           onEraseStroke={(id) =>
             setStrokes((prev) => prev.filter((s) => s.id !== id))
@@ -474,6 +549,21 @@ export default function App() {
         ]}
         pointerEvents={isImmersive ? 'none' : 'auto'}
       >
+        {activeNav === 'drawing' && (
+          <PenSettingsPanel
+            visible={isPenSettingsOpen}
+            onClose={() => setIsPenSettingsOpen(false)}
+            drawingMode={penMode}
+            onSelectDrawingMode={handleSelectPenDrawingMode}
+            selectedColor={penColor}
+            onSelectColor={handleSelectPenColor}
+            selectedThickness={penThickness}
+            onSelectThickness={handleSelectPenThickness}
+            favoriteColors={penFavorites}
+            onChangeFavorites={handleChangePenFavorites}
+          />
+        )}
+
         <View style={styles.secondaryToolbar}>
           {activeNav === 'drawing' && (
             <>
@@ -484,7 +574,10 @@ export default function App() {
                   tool === 'select' && styles.toolItemActive,
                 ]}
                 activeOpacity={0.7}
-                onPress={() => setTool('select')}
+                onPress={() => {
+                  setTool('select');
+                  setIsPenSettingsOpen(false);
+                }}
               >
                 <Text
                   style={[
@@ -511,7 +604,7 @@ export default function App() {
                   tool === 'pen' && styles.toolItemActive,
                 ]}
                 activeOpacity={0.7}
-                onPress={() => setTool('pen')}
+                onPress={handlePenPress}
               >
                 <Text
                   style={[
@@ -529,6 +622,14 @@ export default function App() {
                 >
                   Pen
                 </Text>
+                {tool === 'pen' && (
+                  <View
+                    style={[
+                      styles.penColorIndicator,
+                      { backgroundColor: penColor },
+                    ]}
+                  />
+                )}
               </TouchableOpacity>
 
               {/* [Highlighter] */}
@@ -538,7 +639,10 @@ export default function App() {
                   tool === 'highlighter' && styles.toolItemActive,
                 ]}
                 activeOpacity={0.7}
-                onPress={() => setTool('highlighter')}
+                onPress={() => {
+                  setTool('highlighter');
+                  setIsPenSettingsOpen(false);
+                }}
               >
                 <Text
                   style={[
@@ -565,7 +669,10 @@ export default function App() {
                   tool === 'eraser' && styles.toolItemActive,
                 ]}
                 activeOpacity={0.7}
-                onPress={() => setTool('eraser')}
+                onPress={() => {
+                  setTool('eraser');
+                  setIsPenSettingsOpen(false);
+                }}
               >
                 <Text
                   style={[
@@ -592,7 +699,10 @@ export default function App() {
                   tool === 'lasso' && styles.toolItemActive,
                 ]}
                 activeOpacity={0.7}
-                onPress={() => setTool('lasso')}
+                onPress={() => {
+                  setTool('lasso');
+                  setIsPenSettingsOpen(false);
+                }}
               >
                 <Text
                   style={[
@@ -1349,6 +1459,12 @@ const styles = StyleSheet.create({
   toolLabelActive: {
     color: '#00ADB5',
     fontWeight: '700',
+  },
+  penColorIndicator: {
+    width: 14,
+    height: 3,
+    borderRadius: 1.5,
+    marginTop: 2,
   },
   docItem: {
     flexDirection: 'row',

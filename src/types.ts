@@ -161,12 +161,132 @@ export interface ExcerptModel {
   sourceRects?: { left: number; top: number; right: number; bottom: number }[];
 }
 
+export type PenDrawingMode = 'freehand' | 'straight';
+
+export interface PenState {
+  active: boolean;
+  settingsOpen: boolean;
+  drawingMode: PenDrawingMode;
+  color: string;
+  thickness: number;
+  favoriteColors: string[];
+}
+
+export const DEFAULT_PEN_FAVORITES: string[] = [
+  '#E87A90',
+  '#F6AD55',
+  '#76E4F7',
+  '#4A7BB0',
+  '#10B981',
+  '#94A3B8',
+  '#EF4444',
+  '#FACC15',
+  '#0D9488',
+  '#2563EB',
+  '#22C55E',
+  '#6B7280',
+  '#A855F7',
+  '#991B1B',
+  '#EC4899',
+  '#93C5FD',
+  '#14B8A6',
+];
+
+export const EXPANDED_PEN_PALETTE: string[] = [
+  // Row 1
+  '#E87A90',
+  '#F6AD55',
+  '#76E4F7',
+  '#4A7BB0',
+  '#334155',
+  '#94A3B8',
+  '#A855F7',
+  '#EC4899',
+  // Row 2
+  '#EF4444',
+  '#F97316',
+  '#FACC15',
+  '#2563EB',
+  '#22C55E',
+  '#93C5FD',
+  '#D946EF',
+  '#F472B6',
+  // Row 3
+  '#991B1B',
+  '#B45309',
+  '#CA8A04',
+  '#15803D',
+  '#0D9488',
+  '#1D4ED8',
+  '#6D28D9',
+  '#86198F',
+  // Row 4
+  '#FFFFFF',
+  '#E2E8F0',
+  '#CBD5E1',
+  '#94A3B8',
+  '#64748B',
+  '#475569',
+  '#000000',
+  '#E5E7EB',
+];
+
+export const PEN_THICKNESS_PRESETS: number[] = [
+  1.5, 2.5, 3.5, 5.0, 7.0, 9.5, 12.0,
+];
+
+export type InkLinkEndpointType = 'pdf' | 'card' | 'note' | 'notebookPage';
+
+export interface InkLinkPdfEndpoint {
+  type: 'pdf';
+  documentId: string;
+  pageIndex: number;
+  sourceRect?: { left: number; top: number; right: number; bottom: number };
+  anchorPoint?: { x: number; y: number };
+}
+
+export interface InkLinkCardEndpoint {
+  type: 'card';
+  cardId: string;
+  anchorPoint?: { x: number; y: number };
+}
+
+export interface InkLinkNoteEndpoint {
+  type: 'note' | 'notebookPage';
+  noteId: string;
+  anchorPoint?: { x: number; y: number };
+}
+
+export type InkLinkEndpoint =
+  InkLinkPdfEndpoint | InkLinkCardEndpoint | InkLinkNoteEndpoint;
+
+export interface SemanticInkLink {
+  id: string;
+  sourceEndpoint: InkLinkEndpoint;
+  targetEndpoint: InkLinkEndpoint;
+  strokePoints?: InkPoint[];
+  color: string;
+  thickness: number;
+  style?: 'solid' | 'dashed' | 'elastic';
+  createdAt?: string;
+  // Backward compatibility with legacy InkLink:
+  sourceExcerptId?: string;
+  targetPageNumber?: number;
+  targetY?: number;
+}
+
 export interface InkLink {
   id: string;
   sourceExcerptId: string;
   targetPageNumber?: number;
   targetY?: number;
   color?: string;
+  // Semantic extensions:
+  sourceEndpoint?: InkLinkEndpoint;
+  targetEndpoint?: InkLinkEndpoint;
+  strokePoints?: InkPoint[];
+  thickness?: number;
+  style?: 'solid' | 'dashed' | 'elastic';
 }
 
 export interface CanvasTransform {
@@ -275,6 +395,16 @@ export interface ThinkspaceViewProps {
     cardId: string;
   }) => void;
   onToggleImmersive?: (isImmersive: boolean) => void;
+  // ── Pen / Inking System Props ──────────────────────────────────────────
+  penMode?: PenDrawingMode;
+  penColor?: string;
+  penThickness?: number;
+  penFavorites?: string[];
+  isPenSettingsOpen?: boolean;
+  semanticInkLinks?: SemanticInkLink[];
+  onPenStateChange?: (state: PenState) => void;
+  onInkLinkCreate?: (link: SemanticInkLink) => void;
+  onInkLinkDelete?: (linkId: string) => void;
 }
 
 export interface ThinkspaceViewRef {
@@ -289,6 +419,12 @@ export interface ThinkspaceViewRef {
   addNotebookPage: (style?: NotebookPageStyle, title?: string) => void;
   toggleImmersiveMode: () => void;
   setImmersiveMode: (enabled: boolean) => void;
+  // ── Pen / Inking System Methods ─────────────────────────────────────────
+  setPenMode: (mode: PenDrawingMode) => void;
+  setPenColor: (color: string) => void;
+  setPenThickness: (thickness: number) => void;
+  setPenFavorites: (favorites: string[]) => void;
+  togglePenSettings: () => void;
 }
 
 export interface DocumentViewerProps {

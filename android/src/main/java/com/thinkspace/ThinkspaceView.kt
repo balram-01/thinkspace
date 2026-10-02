@@ -77,7 +77,8 @@ data class PdfPageStroke(
   val points: List<NativePoint>,
   val color: Int,
   val strokeWidth: Float,
-  val isHighlighter: Boolean
+  val isHighlighter: Boolean,
+  val isStraight: Boolean = false
 )
 
 data class ParagraphLayoutInfo(
@@ -113,7 +114,8 @@ data class NativeStroke(
   var points: List<NativePoint>,
   val color: Int,
   val strokeWidth: Float,
-  val isHighlighter: Boolean
+  val isHighlighter: Boolean,
+  val isStraight: Boolean = false
 )
 
 data class NativeTableRow(val cells: List<String>)
@@ -216,6 +218,19 @@ data class NativeLink(
   val id: String,
   val sourceExcerptId: String,
   val color: Int
+)
+
+data class NativeInkLink(
+  val id: String,
+  val sourceDocId: String,
+  val sourcePageIndex: Int,
+  val sourcePdfRect: RectF,
+  val sourcePdfPoint: NativePoint,
+  val targetCardId: String,
+  val color: Int,
+  val strokeWidth: Float,
+  val style: String = "elastic",
+  val createdAt: Long = System.currentTimeMillis()
 )
 
 data class NativeDocumentSelection(
@@ -347,7 +362,11 @@ class ThinkspaceView : View {
       dispatchUndoStateChangeEvent(canUndo, canRedo)
     }
 
-    post { loadPersistedNotebookPages() }
+    post {
+      loadPersistedNotebookPages()
+      loadPersistedPenSettings()
+      loadPersistedSemanticInkLinks()
+    }
   }
 
   val effectiveSplitRatio: Float
@@ -561,6 +580,15 @@ class ThinkspaceView : View {
   var splitRatio: Float = 0.44f
   var isSqueezed: Boolean = false
   var activeTool: String = "select" // "select", "pan", "pen", "highlighter", "eraser"
+    set(value) {
+      val prev = field
+      field = value
+      if (value != "select" && (activePdfSelection != null || isSelectingPdfText)) {
+        activePdfSelection = null
+        isSelectingPdfText = false
+        invalidate()
+      }
+    }
   var selectedColor: Int = Color.parseColor("#00ADB5")
   var pattern: String = "looseleaf"
   var showCanvasToolbar: Boolean = false
@@ -728,6 +756,48 @@ class ThinkspaceView : View {
   private val activePoints = mutableListOf<NativePoint>()
   private val activePath = Path()
 
+  // LiquidText Real Pen & Semantic Inking System
+  var penDrawingMode: String = "freehand" // "freehand" | "straight"
+    set(value) {
+      field = if (value.equals("straight", ignoreCase = true)) "straight" else "freehand"
+      persistPenSettingsLocally()
+      dispatchPenStateChangeEvent()
+      invalidate()
+    }
+  var penThickness: Float = 3.5f
+    set(value) {
+      field = value.coerceIn(1.0f, 25.0f)
+      persistPenSettingsLocally()
+      dispatchPenStateChangeEvent()
+      invalidate()
+    }
+  var penColor: Int = Color.parseColor("#00ADB5")
+    set(value) {
+      field = value
+      selectedColor = value
+      persistPenSettingsLocally()
+      dispatchPenStateChangeEvent()
+      invalidate()
+    }
+  var penFavoriteColors = mutableListOf<String>(
+    "#00ADB5", "#2563EB", "#059669", "#DC2626", "#D97706", "#7C3AED",
+    "#0284C7", "#10B981", "#EA580C", "#9333EA", "#E11D48", "#475569",
+    "#0891B2", "#16A34A", "#CA8A04", "#4F46E5", "#BE185D"
+  )
+  var isPenSettingsOpen: Boolean = false
+  val semanticInkLinks = mutableListOf<NativeInkLink>()
+
+  // Live InkLink cross-zone gesture tracking
+  private var isDrawingCrossZoneLink: Boolean = false
+  private var inkLinkSourceDocId: String = ""
+  private var inkLinkSourcePageIndex: Int = -1
+  private var inkLinkSourcePdfRect: RectF = RectF()
+  private var inkLinkSourcePdfPoint: NativePoint = NativePoint(0f, 0f)
+  private var inkLinkSourceScreenStart: PointF = PointF()
+  private var inkLinkCurrentScreenTouch: PointF = PointF()
+  private var inkLinkTargetCardId: String? = null
+  private var canvasPenStartCardId: String? = null
+
   // Active card interaction state
   private var selectedCardId: String? = null
   private var draggingCard: NativeCard? = null
@@ -848,6 +918,11 @@ class ThinkspaceView : View {
 
   // Jump button hit-rects per card (world-space, populated each draw frame)
   private val cardJumpBtnRects = HashMap<String, RectF>()
+  // Original Extraction Source `>` arrow hit-rects per card (world-space)
+  private val cardExtractionArrowRects = HashMap<String, RectF>()
+  // Semantic InkLink anchor hit-rects (screen-space)
+  private val inkLinkPdfAnchorScreenRects = HashMap<String, RectF>()
+  private val inkLinkCardAnchorScreenRects = HashMap<String, RectF>()
 
   // Drop shockwave ripple animation
   private var rippleOriginX = 0f
@@ -1306,6 +1381,73 @@ class ThinkspaceView : View {
     sel.holdAndDragRect.set(sel.screenRect.left, sel.screenRect.top - 24f * density, sel.screenRect.left + 115f * density, sel.screenRect.top - 4f * density)
   }
 
+  /**
+   * Calculates the exact point on the perimeter/edge of [card] that faces [fromWorldX], [fromWorldY].
+   * Ensures the InkLink line attaches cleanly to the card's exterior edge rather than floating or stopping inside.
+   */
+  private fun getCardEdgeAnchor(card: NativeCard, fromWorldX: Float, fromWorldY: Float): PointF {
+    val left = card.x
+    val top = card.y
+    val right = card.x + card.width
+    val bottom = card.y + card.getHeight()
+    val cx = (left + right) / 2f
+    val cy = (top + bottom) / 2f
+
+    val dx = cx - fromWorldX
+    val dy = cy - fromWorldY
+
+    if (abs(dx) < 0.001f && abs(dy) < 0.001f) {
+      return PointF(cx, top)
+    }
+
+    // Top edge (y = top): ray traveling downwards toward center
+    if (fromWorldY < top && dy > 0f) {
+      val t = (top - fromWorldY) / dy
+      val x = fromWorldX + t * dx
+      if (x in left..right) {
+        return PointF(x.coerceIn(left + 10f, right - 10f), top)
+      }
+    }
+    // Bottom edge (y = bottom): ray traveling upwards toward center
+    if (fromWorldY > bottom && dy < 0f) {
+      val t = (bottom - fromWorldY) / dy
+      val x = fromWorldX + t * dx
+      if (x in left..right) {
+        return PointF(x.coerceIn(left + 10f, right - 10f), bottom)
+      }
+    }
+    // Left edge (x = left): ray traveling rightwards toward center
+    if (fromWorldX < left && dx > 0f) {
+      val t = (left - fromWorldX) / dx
+      val y = fromWorldY + t * dy
+      if (y in top..bottom) {
+        return PointF(left, y.coerceIn(top + 10f, bottom - 10f))
+      }
+    }
+    // Right edge (x = right): ray traveling leftwards toward center
+    if (fromWorldX > right && dx < 0f) {
+      val t = (right - fromWorldX) / dx
+      val y = fromWorldY + t * dy
+      if (y in top..bottom) {
+        return PointF(right, y.coerceIn(top + 10f, bottom - 10f))
+      }
+    }
+
+    // Default fallback to top center
+    return PointF(cx, top)
+  }
+
+  private fun distToSegment(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+    val dx = bx - ax
+    val dy = by - ay
+    val l2 = dx * dx + dy * dy
+    if (l2 < 0.0001f) return hypot(px - ax, py - ay)
+    val t = (((px - ax) * dx + (py - ay) * dy) / l2).coerceIn(0f, 1f)
+    val projX = ax + t * dx
+    val projY = ay + t * dy
+    return hypot(px - projX, py - projY)
+  }
+
   private fun triggerLongPressSelect(x: Float, y: Float) {
     val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
     if (y < splitY - 14f && y >= subheaderH) {
@@ -1375,12 +1517,12 @@ class ThinkspaceView : View {
         }
       }
 
-      // 1. Real PDF document
+      // 1. Real PDF document - ONLY select text when activeTool is explicitly "select"
       if (activePdfDoc != null) {
         for (pl in pageLayouts) {
           if (!pl.isFolded && pl.boundsOnScreen.contains(x, y)) {
             val words = pageWordsCache[pl.pageIndex]
-            if (!words.isNullOrEmpty() && activeTool != "lasso" && docMode != "crop") {
+            if (!words.isNullOrEmpty() && activeTool == "select" && docMode != "crop") {
               val px = (x - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
               val py = (y - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
               val hitWord = words.find { w ->
@@ -1451,8 +1593,8 @@ class ThinkspaceView : View {
         }
       }
 
-      // 2. Structured Sections Document
-      if (activeDocument != null) {
+      // 2. Structured Sections Document - ONLY select text when activeTool is explicitly "select"
+      if (activeDocument != null && activeTool == "select") {
         for (pInfo in paragraphLayouts) {
           val paraH = pInfo.layout.height.toFloat() + 16f
           val pRect = RectF(pInfo.paperX, pInfo.topY, pInfo.paperX + pInfo.width + 56f, pInfo.topY + paraH)
@@ -2731,14 +2873,37 @@ class ThinkspaceView : View {
                 if (hasActiveOnThisPage) {
                   val isHl = activeTool == "highlighter"
                   val activePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = selectedColor
+                    color = if (isHl) selectedColor else penColor
                     style = Paint.Style.STROKE
                     strokeCap = Paint.Cap.ROUND
                     strokeJoin = Paint.Join.ROUND
-                    strokeWidth = if (isHl) 18f else 3.0f
+                    strokeWidth = if (isHl) 18f else penThickness
                     if (isHl) alpha = 115
                   }
                   canvas.drawPath(activeDocPath, activePaint)
+                }
+
+                // Draw InkLink Anchor Pins on PDF page
+                val docLinks = semanticInkLinks.filter { it.sourceDocId == activeDocumentId && it.sourcePageIndex == pageIdx }
+                if (docLinks.isNotEmpty()) {
+                  val pinPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+                  val pinWhitePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    style = Paint.Style.FILL
+                    color = Color.WHITE
+                  }
+                  val pinRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    style = Paint.Style.STROKE
+                    strokeWidth = 2f
+                  }
+                  for (dl in docLinks) {
+                    val px = dl.sourcePdfPoint.x
+                    val py = dl.sourcePdfPoint.y
+                    pinPaint.color = dl.color
+                    pinRingPaint.color = dl.color
+                    canvas.drawCircle(px, py, 7f, pinPaint)
+                    canvas.drawCircle(px, py, 3f, pinWhitePaint)
+                    canvas.drawCircle(px, py, 11f, pinRingPaint)
+                  }
                 }
 
                 canvas.restore()
@@ -3800,6 +3965,8 @@ class ThinkspaceView : View {
       )
     }
 
+
+
     // Completed Canvas Strokes
     for (stroke in strokes) {
       if (stroke.points.isEmpty()) continue
@@ -3827,8 +3994,8 @@ class ThinkspaceView : View {
     if (activePoints.isNotEmpty()) {
       val isHighlighter = activeTool == "highlighter"
       val curPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = selectedColor
-        strokeWidth = if (isHighlighter) 20f else 3.5f
+        color = if (isHighlighter) selectedColor else penColor
+        strokeWidth = if (isHighlighter) 20f else penThickness
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
@@ -3839,6 +4006,7 @@ class ThinkspaceView : View {
 
     // Excerpt Cards
     cardJumpBtnRects.clear()
+    cardExtractionArrowRects.clear()
     for (card in cards) {
       val cardH = card.getHeight()
       val cardRect = RectF(card.x, card.y, card.x + card.width, card.y + cardH)
@@ -3992,6 +4160,63 @@ class ThinkspaceView : View {
 
       // Store world hit rect — tap detection uses this in onTouchEvent
       cardJumpBtnRects[card.id] = RectF(jumpBtnRect)
+
+      // ── Card Original Extraction Source `>` Arrow Affordance ───────────────
+      // Every extracted card that has an original PDF source has a small `>` navigation
+      // affordance on the RIGHT-MIDDLE EDGE of the card.
+      val hasPdfSource = card.pageNumber > 0 || card.sourceRects.isNotEmpty() || card.documentId.isNotEmpty()
+      if (hasPdfSource) {
+        val midY = cardRect.centerY()
+
+        // Stem connecting card right-middle edge to `>` tab: `── >`
+        val stemPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = docAccentColor
+          strokeWidth = 2.2f
+          style = Paint.Style.STROKE
+          strokeCap = Paint.Cap.ROUND
+        }
+        canvas.drawLine(cardRect.right - 1f, midY, cardRect.right + 7f, midY, stemPaint)
+
+        // Right-pointing chevron pill/tab
+        val tabW = 20f
+        val tabH = 22f
+        val arrowTabRect = RectF(cardRect.right + 7f, midY - tabH / 2f, cardRect.right + 7f + tabW, midY + tabH / 2f)
+
+        val tabBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#0F172A")
+          style = Paint.Style.FILL
+        }
+        val tabBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = docAccentColor
+          strokeWidth = 1.6f
+          style = Paint.Style.STROKE
+        }
+        canvas.drawRoundRect(arrowTabRect, 6f, 6f, tabBgPaint)
+        canvas.drawRoundRect(arrowTabRect, 6f, 6f, tabBorderPaint)
+
+        // Chevron `>`
+        val chevronPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.WHITE
+          strokeWidth = 2f
+          style = Paint.Style.STROKE
+          strokeCap = Paint.Cap.ROUND
+          strokeJoin = Paint.Join.ROUND
+        }
+        val chP = Path().apply {
+          moveTo(arrowTabRect.left + 7f, arrowTabRect.centerY() - 4.5f)
+          lineTo(arrowTabRect.left + 12.5f, arrowTabRect.centerY())
+          lineTo(arrowTabRect.left + 7f, arrowTabRect.centerY() + 4.5f)
+        }
+        canvas.drawPath(chP, chevronPaint)
+
+        // Hit rect with comfortable touch margin
+        cardExtractionArrowRects[card.id] = RectF(
+          arrowTabRect.left - 6f,
+          arrowTabRect.top - 8f,
+          arrowTabRect.right + 12f,
+          arrowTabRect.bottom + 8f
+        )
+      }
 
 
       // Delete Button if selected
@@ -4222,6 +4447,155 @@ class ThinkspaceView : View {
       }
 
       canvas.restore() // Clip canvas rect
+
+      // =========================================================================
+      // 4B. PERSISTENT SEMANTIC INKLINKS (Unclipped Cross-Zone Connections)
+      // =========================================================================
+      inkLinkPdfAnchorScreenRects.clear()
+      inkLinkCardAnchorScreenRects.clear()
+
+      for (link in semanticInkLinks) {
+        val card = cards.find { it.id == link.targetCardId } ?: continue
+        val isCardActive = draggingCard?.id == card.id || heldCardId == card.id || selectedCardId == card.id || magneticTargetCardId == card.id
+
+        // 1. Compute PDF source in screen coordinates
+        var srcSx = viewW / 2f
+        var srcSy = if (effectiveSplitRatio > 0f) height * effectiveSplitRatio - 14f else height.toFloat()
+
+        if (link.sourceDocId == activeDocumentId) {
+          val pl = pageLayouts.find { it.pageIndex == link.sourcePageIndex }
+          if (pl != null) {
+            val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
+              ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+            val rawSx = pl.boundsOnScreen.left + (link.sourcePdfPoint.x / pSize.width) * pl.boundsOnScreen.width()
+            val rawSy = pl.boundsOnScreen.top + (link.sourcePdfPoint.y / pSize.height) * pl.boundsOnScreen.height()
+
+            val docBottom = if (effectiveSplitRatio > 0f) height * effectiveSplitRatio - 14f else height.toFloat()
+            // Clamp to document viewport if page is partially scrolled off
+            srcSx = rawSx.coerceIn(24f, viewW - 24f)
+            srcSy = rawSy.coerceIn(subheaderH + 8f, docBottom)
+          }
+        }
+
+        // 2. Compute Card edge anchor facing the source in screen coordinates
+        val srcWorldX = camera.screenToWorldX(srcSx)
+        val srcWorldY = camera.screenToWorldY(srcSy, canvasTopY)
+        val edgeAnchorWorld = getCardEdgeAnchor(card, srcWorldX, srcWorldY)
+
+        val cardTargetSx = edgeAnchorWorld.x * scaleFactor + panX
+        val cardTargetSy = canvasTopY + edgeAnchorWorld.y * scaleFactor + panY
+
+        // 3. Draw the direct connection line
+        inkLinkRenderer.drawTether(
+          canvas = canvas,
+          startX = srcSx,
+          startY = srcSy,
+          endX = cardTargetSx,
+          endY = cardTargetSy,
+          color = link.color,
+          isHeld = isCardActive
+        )
+
+        // 4. Source anchor pin `●` (PDF end)
+        val pinOuterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = link.color
+          style = Paint.Style.FILL
+        }
+        val pinInnerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.WHITE
+          style = Paint.Style.FILL
+        }
+        val pinBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#0F172A")
+          strokeWidth = 1.2f * density
+          style = Paint.Style.STROKE
+        }
+        canvas.drawCircle(srcSx, srcSy, 6f * density, pinOuterPaint)
+        canvas.drawCircle(srcSx, srcSy, 6f * density, pinBorderPaint)
+        canvas.drawCircle(srcSx, srcSy, 2.5f * density, pinInnerPaint)
+
+        // 5. Target anchor pin `●` (Card edge end)
+        canvas.drawCircle(cardTargetSx, cardTargetSy, 5.5f * density, pinOuterPaint)
+        canvas.drawCircle(cardTargetSx, cardTargetSy, 5.5f * density, pinBorderPaint)
+        canvas.drawCircle(cardTargetSx, cardTargetSy, 2.2f * density, pinInnerPaint)
+
+        // Store hit rects for bidirectional tap navigation
+        inkLinkPdfAnchorScreenRects[link.id] = RectF(
+          srcSx - 22f * density, srcSy - 22f * density,
+          srcSx + 22f * density, srcSy + 22f * density
+        )
+        inkLinkCardAnchorScreenRects[link.id] = RectF(
+          cardTargetSx - 22f * density, cardTargetSy - 22f * density,
+          cardTargetSx + 22f * density, cardTargetSy + 22f * density
+        )
+      }
+
+      // Live preview during cross-zone drawing
+      if (isDrawingCrossZoneLink) {
+        val startSx = inkLinkSourceScreenStart.x
+        val startSy = inkLinkSourceScreenStart.y
+        val curSx = inkLinkCurrentScreenTouch.x
+        val curSy = inkLinkCurrentScreenTouch.y
+
+        val (curWx, curWy) = canvasScreenToWorld(curSx, curSy, canvasTopY)
+        val hoverCard = cards.find {
+          val margin = 36f * density
+          curWx >= it.x - margin && curWx <= it.x + it.width + margin &&
+          curWy >= it.y - margin && curWy <= it.y + it.getHeight() + margin
+        }
+
+        val finalTargetSx: Float
+        val finalTargetSy: Float
+
+        if (hoverCard != null) {
+          inkLinkTargetCardId = hoverCard.id
+          val srcWorldX = camera.screenToWorldX(startSx)
+          val srcWorldY = camera.screenToWorldY(startSy, canvasTopY)
+          val edgeWorld = getCardEdgeAnchor(hoverCard, srcWorldX, srcWorldY)
+          finalTargetSx = edgeWorld.x * scaleFactor + panX
+          finalTargetSy = canvasTopY + edgeWorld.y * scaleFactor + panY
+
+          // Draw card hover glow
+          val cardSx = hoverCard.x * scaleFactor + panX
+          val cardSy = canvasTopY + hoverCard.y * scaleFactor + panY
+          val cardSw = hoverCard.width * scaleFactor
+          val cardSh = hoverCard.getHeight() * scaleFactor
+          val hoverRect = RectF(cardSx - 4f * density, cardSy - 4f * density, cardSx + cardSw + 4f * density, cardSy + cardSh + 4f * density)
+          val hoverPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = penColor
+            strokeWidth = 3f * density
+            style = Paint.Style.STROKE
+          }
+          canvas.drawRoundRect(hoverRect, 14f * density, 14f * density, hoverPaint)
+        } else {
+          inkLinkTargetCardId = null
+          finalTargetSx = curSx
+          finalTargetSy = curSy
+        }
+
+        inkLinkRenderer.drawTether(
+          canvas = canvas,
+          startX = startSx,
+          startY = startSy,
+          endX = finalTargetSx,
+          endY = finalTargetSy,
+          color = penColor,
+          isHeld = true
+        )
+
+        val livePinPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = penColor
+          style = Paint.Style.FILL
+        }
+        val livePinInner = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.WHITE
+          style = Paint.Style.FILL
+        }
+        canvas.drawCircle(startSx, startSy, 6f * density, livePinPaint)
+        canvas.drawCircle(startSx, startSy, 2.5f * density, livePinInner)
+        canvas.drawCircle(finalTargetSx, finalTargetSy, 5.5f * density, livePinPaint)
+        canvas.drawCircle(finalTargetSx, finalTargetSy, 2.2f * density, livePinInner)
+      }
 
       // =========================================================================
       // 5. FLOATING 3D CROSS-ZONE LIFT-AND-DRAG CARD (LiquidText interaction)
@@ -5464,6 +5838,52 @@ class ThinkspaceView : View {
           }
         }
 
+        // 0A. Check InkLink PDF Anchor Pin Tap (Screen space)
+        val hitPdfLinkEntry = inkLinkPdfAnchorScreenRects.entries.find { it.value.contains(sx, sy) }
+        if (hitPdfLinkEntry != null) {
+          val link = semanticInkLinks.find { it.id == hitPdfLinkEntry.key }
+          if (link != null) {
+            val targetCard = cards.find { it.id == link.targetCardId }
+            if (targetCard != null) {
+              val targetCx = targetCard.x + targetCard.width / 2f
+              val targetCy = targetCard.y + targetCard.getHeight() / 2f
+              val curCanvasTopY = if (hasDoc && effectiveSplitRatio > 0f) height * effectiveSplitRatio + 14f else 0f
+              val viewW = width.toFloat()
+              val viewH = height - curCanvasTopY
+              camera.panX = -targetCx * camera.scaleFactor + viewW / 2f
+              camera.panY = -targetCy * camera.scaleFactor + viewH / 2f
+              selectedCardId = targetCard.id
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              hudToast.show("Jumped to Linked Card in Workspace")
+              invalidate()
+              return true
+            }
+          }
+        }
+
+        // 0B. Check InkLink Card Anchor Pin Tap (Screen space)
+        val hitCardLinkEntry = inkLinkCardAnchorScreenRects.entries.find { it.value.contains(sx, sy) }
+        if (hitCardLinkEntry != null) {
+          val link = semanticInkLinks.find { it.id == hitCardLinkEntry.key }
+          if (link != null) {
+            val cardDocId = link.sourceDocId.takeIf { it.isNotEmpty() } ?: activeDocumentId
+            val isCrossDoc = cardDocId.isNotEmpty() && cardDocId != activeDocumentId
+            if (isCrossDoc) {
+              pendingScrollToPage = link.sourcePageIndex + 1
+              pendingPulseRects = listOf(link.sourcePdfRect)
+              dispatchRequestDocumentSwitchEvent(link.id, cardDocId, link.sourcePageIndex + 1)
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              hudToast.show("Switching to source document · p.${link.sourcePageIndex + 1}")
+            } else {
+              scrollToDocumentPage(link.sourcePageIndex + 1, listOf(link.sourcePdfRect))
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              hudToast.show("Navigated to PDF Source p.${link.sourcePageIndex + 1}")
+            }
+            invalidate()
+            return true
+          }
+        }
+
         // 0. Check Floating Search HUD clicks if active
         if (isSearchActive && searchHudRect.contains(sx, sy)) {
           if (searchCloseBtnRect.contains(sx, sy)) {
@@ -5580,7 +6000,15 @@ class ThinkspaceView : View {
         if (inCanvasZone && canvasToolbarRect.contains(sx, sy)) {
           for ((toolId, rect) in toolBtnRects) {
             if (rect.contains(sx, sy)) {
-              activeTool = toolId
+              if (toolId == "pen" && activeTool == "pen") {
+                togglePenSettings()
+              } else {
+                activeTool = toolId
+                if (toolId == "pen") {
+                  isPenSettingsOpen = true
+                  dispatchPenStateChangeEvent()
+                }
+              }
               invalidate()
               return true
             }
@@ -5636,6 +6064,26 @@ class ThinkspaceView : View {
               activeDocPoints.add(NativePoint(px, py, pressure))
               activeDocPath.reset()
               activeDocPath.moveTo(px, py)
+
+              if (activeTool == "pen") {
+                inkLinkSourceDocId = activeDocumentId
+                inkLinkSourcePageIndex = pl.pageIndex
+                inkLinkSourcePdfPoint = NativePoint(px, py)
+                val words = pageWordsCache[pl.pageIndex]
+                val nearbyWord = words?.find { w ->
+                  val b = w.bounds
+                  px in (b.left - 24f)..(b.right + 24f) && py in (b.top - 18f)..(b.bottom + 18f)
+                }
+                inkLinkSourcePdfRect = if (nearbyWord != null) {
+                  RectF(nearbyWord.bounds.left, nearbyWord.bounds.top, nearbyWord.bounds.right, nearbyWord.bounds.bottom)
+                } else {
+                  RectF(px - 30f, py - 10f, px + 30f, py + 10f)
+                }
+                inkLinkSourceScreenStart.set(sx, sy)
+                inkLinkCurrentScreenTouch.set(sx, sy)
+                isDrawingCrossZoneLink = false
+                inkLinkTargetCardId = null
+              }
 
               isScrollingDoc = false
               isSelectingPdfText = false
@@ -6015,13 +6463,16 @@ class ThinkspaceView : View {
           downDocY = sy
 
           // Start 350ms Long-Press Timer for Android-style Text Selection (handles & callout)
-          longPressStartX = sx
-          longPressStartY = sy
-          pendingLongPressRunnable?.let { longPressHandler.removeCallbacks(it) }
-          pendingLongPressRunnable = Runnable {
-            triggerLongPressSelect(longPressStartX, longPressStartY)
+          // ONLY when activeTool is explicitly "select"
+          if (activeTool == "select") {
+            longPressStartX = sx
+            longPressStartY = sy
+            pendingLongPressRunnable?.let { longPressHandler.removeCallbacks(it) }
+            pendingLongPressRunnable = Runnable {
+              triggerLongPressSelect(longPressStartX, longPressStartY)
+            }
+            longPressHandler.postDelayed(pendingLongPressRunnable!!, 350)
           }
-          longPressHandler.postDelayed(pendingLongPressRunnable!!, 350)
           return true
         }
 
@@ -6153,30 +6604,34 @@ class ThinkspaceView : View {
           if (clickedCard != null) {
             selectedCardId = clickedCard.id
 
-            // Check if user tapped the dedicated Jump-to-Source button or page badge
+            // Check if user tapped the dedicated `>` Extraction Arrow or source badge
+            val arrowRect = cardExtractionArrowRects[clickedCard.id]
             val jumpRect = cardJumpBtnRects[clickedCard.id]
-            val isJumpTap = (jumpRect != null && jumpRect.contains(wx, wy)) ||
-                            (wx >= clickedCard.x + 10f && wx <= clickedCard.x + 75f && wy >= clickedCard.y + 5f && wy <= clickedCard.y + 35f)
+            val isExtractionArrowTap = arrowRect != null && arrowRect.contains(wx, wy)
+            val isJumpBadgeTap = jumpRect != null && jumpRect.contains(wx, wy)
+            val isSourceNavigationTap = isExtractionArrowTap || isJumpBadgeTap
 
             // Multi-document: check if this card belongs to a different document
             val cardDocId = clickedCard.documentId.takeIf { it.isNotEmpty() } ?: activeDocumentId
-            val isCrossDocJump = isJumpTap && cardDocId.isNotEmpty() && cardDocId != activeDocumentId
+            val isCrossDocJump = isSourceNavigationTap && cardDocId.isNotEmpty() && cardDocId != activeDocumentId
 
-            if (isCrossDocJump) {
-              // Store pending page navigation so that when the document activates, it scrolls to the page
-              pendingScrollToPage = clickedCard.pageNumber
-              pendingPulseRects = clickedCard.sourceRects
-              // Cross-document source jump: ask RN to switch documents, then scroll
-              dispatchRequestDocumentSwitchEvent(clickedCard.id, cardDocId, clickedCard.pageNumber)
-              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-              hudToast.show("Switching to source document · p.${clickedCard.pageNumber}")
-            } else {
-              // Same-document: Bidirectional Navigation — scroll document to card's page & pulse highlight
-              scrollToDocumentPage(clickedCard.pageNumber, clickedCard.sourceRects)
-              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-              if (isJumpTap) {
-                hudToast.show("Navigating to Page ${clickedCard.pageNumber}...")
+            if (isSourceNavigationTap) {
+              if (isCrossDocJump) {
+                // Store pending page navigation so that when the document activates, it scrolls to the page
+                pendingScrollToPage = clickedCard.pageNumber
+                pendingPulseRects = clickedCard.sourceRects
+                // Cross-document source jump: ask RN to switch documents, then scroll
+                dispatchRequestDocumentSwitchEvent(clickedCard.id, cardDocId, clickedCard.pageNumber)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                hudToast.show("Switching to source document · p.${clickedCard.pageNumber}")
+              } else {
+                // Same-document: Bidirectional Navigation — scroll document to card's page & pulse highlight
+                scrollToDocumentPage(clickedCard.pageNumber, clickedCard.sourceRects)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                hudToast.show("Source: p.${clickedCard.pageNumber}")
               }
+              invalidate()
+              return true
             }
 
             // Update cursor position if actively editing this card
@@ -6672,28 +7127,66 @@ class ThinkspaceView : View {
           return true
         }
 
-        // Document Page Inking
+        // Cross-zone InkLink drag detection (from Doc across divider to Canvas)
+        val curSplitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
+        if (isDrawingOnDoc && (sy > curSplitY || isDrawingCrossZoneLink) && activeTool == "pen") {
+          isDrawingCrossZoneLink = true
+          inkLinkCurrentScreenTouch.set(sx, sy)
+          val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          val hoverCard = cards.find {
+            val margin = 28f * density
+            wx >= it.x - margin && wx <= it.x + it.width + margin &&
+            wy >= it.y - margin && wy <= it.y + it.getHeight() + margin
+          }
+          inkLinkTargetCardId = hoverCard?.id
+          invalidate()
+          return true
+        }
+
+        // Document Page Inking (Freehand vs Straight)
         if (isDrawingOnDoc && activeDocPoints.isNotEmpty() && activeDocStrokePageIndex >= 0) {
           val pl = pageLayouts.find { it.pageIndex == activeDocStrokePageIndex }
           if (pl != null) {
             val px = ((sx - pl.boundsOnScreen.left) / pl.boundsOnScreen.width()) * activeDocStrokePageW
             val py = ((sy - pl.boundsOnScreen.top) / pl.boundsOnScreen.height()) * activeDocStrokePageH
             val pressure = event.pressure.takeIf { it > 0f } ?: 1.0f
-            val lastPt = activeDocPoints.last()
-            activeDocPath.quadTo(lastPt.x, lastPt.y, (lastPt.x + px) / 2f, (lastPt.y + py) / 2f)
-            activeDocPoints.add(NativePoint(px, py, pressure))
+
+            if (activeTool == "pen" && penDrawingMode == "straight") {
+              val startPt = activeDocPoints.first()
+              activeDocPoints.clear()
+              activeDocPoints.add(startPt)
+              activeDocPoints.add(NativePoint(px, py, pressure))
+              activeDocPath.reset()
+              activeDocPath.moveTo(startPt.x, startPt.y)
+              activeDocPath.lineTo(px, py)
+            } else {
+              val lastPt = activeDocPoints.last()
+              activeDocPath.quadTo(lastPt.x, lastPt.y, (lastPt.x + px) / 2f, (lastPt.y + py) / 2f)
+              activeDocPoints.add(NativePoint(px, py, pressure))
+            }
             invalidate()
             return true
           }
         }
 
-        // Canvas Inking
+        // Canvas Inking (Freehand vs Straight)
         if (activePoints.isNotEmpty()) {
           val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
           val pressure = event.pressure.takeIf { it > 0f } ?: 1.0f
-          val lastPt = activePoints.last()
-          activePath.quadTo(lastPt.x, lastPt.y, (lastPt.x + wx) / 2f, (lastPt.y + wy) / 2f)
-          activePoints.add(NativePoint(wx, wy, pressure))
+
+          if (activeTool == "pen" && penDrawingMode == "straight") {
+            val startPt = activePoints.first()
+            activePoints.clear()
+            activePoints.add(startPt)
+            activePoints.add(NativePoint(wx, wy, pressure))
+            activePath.reset()
+            activePath.moveTo(startPt.x, startPt.y)
+            activePath.lineTo(wx, wy)
+          } else {
+            val lastPt = activePoints.last()
+            activePath.quadTo(lastPt.x, lastPt.y, (lastPt.x + wx) / 2f, (lastPt.y + wy) / 2f)
+            activePoints.add(NativePoint(wx, wy, pressure))
+          }
           invalidate()
           return true
         }
@@ -7037,16 +7530,68 @@ class ThinkspaceView : View {
           return true
         }
 
+        // Finalize Cross-Zone Semantic InkLink
+        if (isDrawingCrossZoneLink && inkLinkSourceDocId.isNotEmpty()) {
+          val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          val targetCard = cards.find {
+            val margin = 36f * density
+            wx >= it.x - margin && wx <= it.x + it.width + margin &&
+            wy >= it.y - margin && wy <= it.y + it.getHeight() + margin
+          }
+          if (targetCard != null) {
+            val newLink = NativeInkLink(
+              id = "inklink-${System.currentTimeMillis()}",
+              sourceDocId = inkLinkSourceDocId,
+              sourcePageIndex = inkLinkSourcePageIndex,
+              sourcePdfRect = inkLinkSourcePdfRect,
+              sourcePdfPoint = inkLinkSourcePdfPoint,
+              targetCardId = targetCard.id,
+              color = penColor,
+              strokeWidth = penThickness,
+              style = "elastic",
+              createdAt = System.currentTimeMillis()
+            )
+            semanticInkLinks.add(newLink)
+            undoRedoManager.record(CreateSemanticInkLinkAction(
+              link = newLink,
+              linksList = semanticInkLinks,
+              onUndoDispatched = { l ->
+                dispatchInkLinkDeleteEvent(l.id)
+                persistSemanticInkLinksLocally()
+                invalidate()
+              },
+              onRedoDispatched = { l ->
+                dispatchInkLinkCreateEvent(l)
+                persistSemanticInkLinksLocally()
+                invalidate()
+              }
+            ))
+            dispatchInkLinkCreateEvent(newLink)
+            persistSemanticInkLinksLocally()
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            hudToast.show("Linked Document p.${inkLinkSourcePageIndex + 1} to Card")
+          }
+          isDrawingCrossZoneLink = false
+          inkLinkTargetCardId = null
+          activeDocPoints.clear()
+          activeDocPath.reset()
+          isDrawingOnDoc = false
+          invalidate()
+          return true
+        }
+
         // Finalize Document Inking Stroke
         if (isDrawingOnDoc && activeDocPoints.isNotEmpty() && activeDocStrokePageIndex >= 0) {
           val isHl = activeTool == "highlighter"
+          val isStraight = activeTool == "pen" && penDrawingMode == "straight"
           val newPageStroke = PdfPageStroke(
             id = "doc-stroke-${System.currentTimeMillis()}",
             pageIndex = activeDocStrokePageIndex,
             points = activeDocPoints.toList(),
-            color = selectedColor,
-            strokeWidth = if (isHl) 18f else 3.0f,
-            isHighlighter = isHl
+            color = if (isHl) selectedColor else penColor,
+            strokeWidth = if (isHl) 18f else penThickness,
+            isHighlighter = isHl,
+            isStraight = isStraight
           )
           val list = pageStrokes.getOrPut(activeDocStrokePageIndex) { mutableListOf() }
           list.add(newPageStroke)
@@ -7068,12 +7613,15 @@ class ThinkspaceView : View {
 
         // Finalize Canvas Inking Stroke
         if (activePoints.isNotEmpty()) {
+          val isHl = activeTool == "highlighter"
+          val isStraight = activeTool == "pen" && penDrawingMode == "straight"
           val newStroke = NativeStroke(
             id = "stroke-${System.currentTimeMillis()}",
             points = activePoints.toList(),
-            color = selectedColor,
-            strokeWidth = if (activeTool == "highlighter") 20f else 3.5f,
-            isHighlighter = activeTool == "highlighter"
+            color = if (isHl) selectedColor else penColor,
+            strokeWidth = if (isHl) 20f else penThickness,
+            isHighlighter = isHl,
+            isStraight = isStraight
           )
           strokes.add(newStroke)
           undoRedoManager.record(AddStrokeAction(
@@ -7121,17 +7669,45 @@ class ThinkspaceView : View {
       return
     }
 
-    // 1. Real PDF Word Selection
+    // 1. Real PDF Word Selection or InkLink Tap
     if (activePdfDoc != null) {
       for (pl in pageLayouts) {
         if (pl.boundsOnScreen.contains(tapX, tapY)) {
+          val px = (tapX - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
+          val py = (tapY - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
+
+          // Check if tapped on or near an InkLink anchor pin in the PDF
+          val matchingLink = semanticInkLinks.find {
+            it.sourceDocId == activeDocumentId &&
+            it.sourcePageIndex == pl.pageIndex &&
+            hypot(it.sourcePdfPoint.x - px, it.sourcePdfPoint.y - py) < 28f
+          }
+          if (matchingLink != null) {
+            val targetCard = cards.find { it.id == matchingLink.targetCardId }
+            if (targetCard != null) {
+              val targetCx = targetCard.x + targetCard.width / 2f
+              val targetCy = targetCard.y + targetCard.getHeight() / 2f
+              val hasDoc = activePdfDoc != null || activeDocument != null
+              val curCanvasTopY = if (hasDoc && effectiveSplitRatio > 0f) height * effectiveSplitRatio + 14f else 0f
+              val viewW = width.toFloat()
+              val viewH = height - curCanvasTopY
+              camera.panX = -targetCx + (viewW / 2f) / camera.scaleFactor
+              camera.panY = -targetCy + (viewH / 2f) / camera.scaleFactor
+              selectedCardId = targetCard.id
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              hudToast.show("Jumped to Linked Card in Workspace")
+              invalidate()
+              return
+            }
+          }
+
           if (pl.isFolded) {
             compressionEngine.expandPage(pl.pageIndex, animate = true) { invalidate() }
             performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             return
           }
           val words = pageWordsCache[pl.pageIndex]
-          if (words != null && words.isNotEmpty()) {
+          if (words != null && words.isNotEmpty() && activeTool == "select") {
             val px = (tapX - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
             val py = (tapY - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
             val hitWord = words.find { w ->
@@ -7208,7 +7784,7 @@ class ThinkspaceView : View {
     }
 
     // 2. Structured Sections Document
-    if (activeDocument != null && activePdfDoc == null) {
+    if (activeDocument != null && activePdfDoc == null && activeTool == "select") {
       for (pInfo in paragraphLayouts) {
         val paraH = pInfo.layout.height.toFloat() + 16f
         val pRect = RectF(pInfo.paperX, pInfo.topY, pInfo.paperX + pInfo.width + 56f, pInfo.topY + paraH)
@@ -7721,6 +8297,53 @@ class ThinkspaceView : View {
       }
       invalidate()
     }
+
+    val curCanvasTopY = if ((activePdfDoc != null || activeDocument != null) && effectiveSplitRatio > 0f) height * effectiveSplitRatio + 14f else 0f
+    val erasedLinks = semanticInkLinks.filter { link ->
+      val card = cards.find { it.id == link.targetCardId }
+      if (card == null) false
+      else {
+        val srcWorldX: Float
+        val srcWorldY: Float
+        val pl = pageLayouts.find { it.pageIndex == link.sourcePageIndex }
+        if (pl != null && link.sourceDocId == activeDocumentId) {
+          val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
+            ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+          val rawSx = pl.boundsOnScreen.left + (link.sourcePdfPoint.x / pSize.width) * pl.boundsOnScreen.width()
+          val rawSy = pl.boundsOnScreen.top + (link.sourcePdfPoint.y / pSize.height) * pl.boundsOnScreen.height()
+          srcWorldX = camera.screenToWorldX(rawSx)
+          srcWorldY = camera.screenToWorldY(rawSy, curCanvasTopY)
+        } else {
+          srcWorldX = card.x
+          srcWorldY = card.y - 120f
+        }
+        val edge = getCardEdgeAnchor(card, srcWorldX, srcWorldY)
+        val d = distToSegment(wx, wy, srcWorldX, srcWorldY, edge.x, edge.y)
+        d <= threshold || hypot(edge.x - wx, edge.y - wy) <= threshold * 1.4f
+      }
+    }
+    if (erasedLinks.isNotEmpty()) {
+      semanticInkLinks.removeAll(erasedLinks)
+      for (el in erasedLinks) {
+        undoRedoManager.record(DeleteSemanticInkLinkAction(
+          link = el,
+          linksList = semanticInkLinks,
+          onUndoDispatched = { l ->
+            dispatchInkLinkCreateEvent(l)
+            persistSemanticInkLinksLocally()
+            invalidate()
+          },
+          onRedoDispatched = { l ->
+            dispatchInkLinkDeleteEvent(l.id)
+            persistSemanticInkLinksLocally()
+            invalidate()
+          }
+        ))
+        dispatchInkLinkDeleteEvent(el.id)
+      }
+      persistSemanticInkLinksLocally()
+      invalidate()
+    }
   }
 
   private fun eraseDocStrokesNear(sx: Float, sy: Float): Boolean {
@@ -7747,6 +8370,35 @@ class ThinkspaceView : View {
           onUndoDispatched = { invalidate() },
           onRedoDispatched = { invalidate() }
         ))
+        erasedAny = true
+        invalidate()
+      }
+
+      val erasedDocLinks = semanticInkLinks.filter { link ->
+        link.sourceDocId == activeDocumentId &&
+        link.sourcePageIndex == pl.pageIndex &&
+        hypot(link.sourcePdfPoint.x - px, link.sourcePdfPoint.y - py) <= threshold
+      }
+      if (erasedDocLinks.isNotEmpty()) {
+        semanticInkLinks.removeAll(erasedDocLinks)
+        for (el in erasedDocLinks) {
+          undoRedoManager.record(DeleteSemanticInkLinkAction(
+            link = el,
+            linksList = semanticInkLinks,
+            onUndoDispatched = { l ->
+              dispatchInkLinkCreateEvent(l)
+              persistSemanticInkLinksLocally()
+              invalidate()
+            },
+            onRedoDispatched = { l ->
+              dispatchInkLinkDeleteEvent(l.id)
+              persistSemanticInkLinksLocally()
+              invalidate()
+            }
+          ))
+          dispatchInkLinkDeleteEvent(el.id)
+        }
+        persistSemanticInkLinksLocally()
         erasedAny = true
         invalidate()
       }
@@ -9171,5 +9823,202 @@ class ThinkspaceView : View {
       putBoolean("isImmersive", enabled)
     }
     eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topToggleImmersive", data))
+  }
+
+  // ---------------------------------------------------------------------------
+  // LiquidText Real Pen & Semantic Inking System API & Events
+  // ---------------------------------------------------------------------------
+  fun setPenFavoritesFromJson(json: String?) {
+    if (json.isNullOrEmpty()) return
+    try {
+      val arr = JSONArray(json)
+      val list = mutableListOf<String>()
+      for (i in 0 until arr.length()) {
+        list.add(arr.getString(i))
+      }
+      if (list.isNotEmpty()) {
+        penFavoriteColors.clear()
+        penFavoriteColors.addAll(list)
+        persistPenSettingsLocally()
+        dispatchPenStateChangeEvent()
+      }
+    } catch (_: Exception) {}
+  }
+
+  fun setSemanticInkLinksFromJson(json: String?) {
+    if (json.isNullOrEmpty()) return
+    try {
+      val arr = JSONArray(json)
+      semanticInkLinks.clear()
+      for (i in 0 until arr.length()) {
+        val obj = arr.getJSONObject(i)
+        val id = obj.getString("id")
+        val srcDoc = obj.optString("sourceDocId", activeDocumentId)
+        val srcPage = obj.optInt("sourcePageIndex", 0)
+        val rectObj = obj.optJSONObject("sourcePdfRect")
+        val rect = if (rectObj != null) {
+          RectF(
+            rectObj.optDouble("left", 0.0).toFloat(),
+            rectObj.optDouble("top", 0.0).toFloat(),
+            rectObj.optDouble("right", 0.0).toFloat(),
+            rectObj.optDouble("bottom", 0.0).toFloat()
+          )
+        } else RectF(0f, 0f, 100f, 20f)
+        val ptObj = obj.optJSONObject("sourcePdfPoint")
+        val pt = if (ptObj != null) {
+          NativePoint(ptObj.optDouble("x", 0.0).toFloat(), ptObj.optDouble("y", 0.0).toFloat())
+        } else NativePoint(rect.centerX(), rect.centerY())
+        val targetCard = obj.getString("targetCardId")
+        val color = try { Color.parseColor(obj.optString("color", "#00ADB5")) } catch (_: Exception) { Color.parseColor("#00ADB5") }
+        val strokeW = obj.optDouble("strokeWidth", 3.5).toFloat()
+        val style = obj.optString("style", "elastic")
+        val createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+
+        semanticInkLinks.add(NativeInkLink(
+          id = id,
+          sourceDocId = srcDoc,
+          sourcePageIndex = srcPage,
+          sourcePdfRect = rect,
+          sourcePdfPoint = pt,
+          targetCardId = targetCard,
+          color = color,
+          strokeWidth = strokeW,
+          style = style,
+          createdAt = createdAt
+        ))
+      }
+      invalidate()
+    } catch (_: Exception) {}
+  }
+
+  fun togglePenSettings() {
+    isPenSettingsOpen = !isPenSettingsOpen
+    dispatchPenStateChangeEvent()
+    invalidate()
+  }
+
+  fun persistPenSettingsLocally() {
+    try {
+      val file = File(context.filesDir, "thinkspace_pen_settings.json")
+      val obj = JSONObject().apply {
+        put("mode", penDrawingMode)
+        put("color", String.format("#%06X", (0xFFFFFF and penColor)))
+        put("thickness", penThickness.toDouble())
+        val arr = JSONArray()
+        for (c in penFavoriteColors) arr.put(c)
+        put("favorites", arr)
+      }
+      file.writeText(obj.toString())
+    } catch (_: Exception) {}
+  }
+
+  fun loadPersistedPenSettings() {
+    try {
+      val file = File(context.filesDir, "thinkspace_pen_settings.json")
+      if (file.exists()) {
+        val obj = JSONObject(file.readText())
+        if (obj.has("mode")) penDrawingMode = obj.getString("mode")
+        if (obj.has("color")) {
+          try {
+            penColor = Color.parseColor(obj.getString("color"))
+            selectedColor = penColor
+          } catch (_: Exception) {}
+        }
+        if (obj.has("thickness")) penThickness = obj.getDouble("thickness").toFloat()
+        if (obj.has("favorites")) {
+          val arr = obj.getJSONArray("favorites")
+          penFavoriteColors.clear()
+          for (i in 0 until arr.length()) {
+            penFavoriteColors.add(arr.getString(i))
+          }
+        }
+      }
+    } catch (_: Exception) {}
+  }
+
+  fun persistSemanticInkLinksLocally() {
+    try {
+      val file = File(context.filesDir, "thinkspace_ink_links.json")
+      val arr = JSONArray()
+      for (link in semanticInkLinks) {
+        val obj = JSONObject().apply {
+          put("id", link.id)
+          put("sourceDocId", link.sourceDocId)
+          put("sourcePageIndex", link.sourcePageIndex)
+          put("sourcePdfRect", JSONObject().apply {
+            put("left", link.sourcePdfRect.left.toDouble())
+            put("top", link.sourcePdfRect.top.toDouble())
+            put("right", link.sourcePdfRect.right.toDouble())
+            put("bottom", link.sourcePdfRect.bottom.toDouble())
+          })
+          put("sourcePdfPoint", JSONObject().apply {
+            put("x", link.sourcePdfPoint.x.toDouble())
+            put("y", link.sourcePdfPoint.y.toDouble())
+          })
+          put("targetCardId", link.targetCardId)
+          put("color", String.format("#%06X", (0xFFFFFF and link.color)))
+          put("strokeWidth", link.strokeWidth.toDouble())
+          put("style", link.style)
+          put("createdAt", link.createdAt)
+        }
+        arr.put(obj)
+      }
+      file.writeText(arr.toString())
+    } catch (_: Exception) {}
+  }
+
+  fun loadPersistedSemanticInkLinks() {
+    try {
+      val file = File(context.filesDir, "thinkspace_ink_links.json")
+      if (file.exists() && semanticInkLinks.isEmpty()) {
+        setSemanticInkLinksFromJson(file.readText())
+      }
+    } catch (_: Exception) {}
+  }
+
+  private fun dispatchPenStateChangeEvent() {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val hexColor = String.format("#%06X", (0xFFFFFF and penColor))
+    val data = Arguments.createMap().apply {
+      putString("mode", penDrawingMode)
+      putString("color", hexColor)
+      putDouble("thickness", penThickness.toDouble())
+      putBoolean("isSettingsOpen", isPenSettingsOpen)
+      val favs = Arguments.createArray()
+      for (f in penFavoriteColors) {
+        favs.pushString(f)
+      }
+      putArray("favoriteColors", favs)
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topPenStateChange", data))
+  }
+
+  private fun dispatchInkLinkCreateEvent(link: NativeInkLink) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val hexColor = String.format("#%06X", (0xFFFFFF and link.color))
+    val data = Arguments.createMap().apply {
+      putString("id", link.id)
+      putString("sourceDocId", link.sourceDocId)
+      putInt("sourcePageIndex", link.sourcePageIndex)
+      putDouble("sourceX", link.sourcePdfPoint.x.toDouble())
+      putDouble("sourceY", link.sourcePdfPoint.y.toDouble())
+      putString("targetCardId", link.targetCardId)
+      putString("color", hexColor)
+      putDouble("strokeWidth", link.strokeWidth.toDouble())
+      putString("style", link.style)
+      putDouble("createdAt", link.createdAt.toDouble())
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topInkLinkCreate", data))
+  }
+
+  private fun dispatchInkLinkDeleteEvent(linkId: String) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("id", linkId)
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topInkLinkDelete", data))
   }
 }

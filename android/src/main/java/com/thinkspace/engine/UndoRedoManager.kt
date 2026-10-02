@@ -2,6 +2,7 @@ package com.thinkspace.engine
 
 import com.thinkspace.NativeAnnotation
 import com.thinkspace.NativeCard
+import com.thinkspace.NativeInkLink
 import com.thinkspace.NativeLink
 import com.thinkspace.NativeNotebookPage
 import com.thinkspace.NativePoint
@@ -611,4 +612,57 @@ class ResizeNotebookPageAction(
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Semantic Ink-Link Actions
+// ---------------------------------------------------------------------------
+
+/**
+ * Creating a semantic ink link connecting PDF content to a workspace card.
+ */
+class CreateSemanticInkLinkAction(
+  val link: NativeInkLink,
+  private val linksList: MutableList<NativeInkLink>,
+  private val onUndoDispatched: ((NativeInkLink) -> Unit)? = null,
+  private val onRedoDispatched: ((NativeInkLink) -> Unit)? = null
+) : UndoableAction {
+  override val description: String = "Ink-Link to p. ${link.sourcePageIndex + 1}"
+
+  override fun undo() {
+    linksList.removeAll { it.id == link.id }
+    onUndoDispatched?.invoke(link)
+  }
+
+  override fun redo() {
+    if (linksList.none { it.id == link.id }) {
+      linksList.add(link)
+    }
+    onRedoDispatched?.invoke(link)
+  }
+}
+
+/**
+ * Erasing or deleting a semantic ink link.
+ */
+class DeleteSemanticInkLinkAction(
+  val link: NativeInkLink,
+  private val linksList: MutableList<NativeInkLink>,
+  private val onUndoDispatched: ((NativeInkLink) -> Unit)? = null,
+  private val onRedoDispatched: ((NativeInkLink) -> Unit)? = null
+) : UndoableAction {
+  override val description: String = "Erase Ink-Link"
+
+  override fun undo() {
+    if (linksList.none { it.id == link.id }) {
+      linksList.add(link)
+    }
+    onUndoDispatched?.invoke(link)
+  }
+
+  override fun redo() {
+    linksList.removeAll { it.id == link.id }
+    onRedoDispatched?.invoke(link)
+  }
+}
+
 
