@@ -1,7 +1,11 @@
 import React, { useMemo, useRef, forwardRef, useImperativeHandle } from 'react';
 import { UIManager, findNodeHandle } from 'react-native';
 import ThinkspaceViewNativeComponent from './ThinkspaceViewNativeComponent';
-import type { ThinkspaceViewProps, InkStroke } from './types';
+import type {
+  ThinkspaceViewProps,
+  InkStroke,
+  WorkspaceDocumentEntry,
+} from './types';
 
 export interface ThinkspaceViewRef {
   openSearch: () => void;
@@ -22,6 +26,8 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
   const {
     style,
     document,
+    workspaceDocuments,
+    activeDocumentId,
     annotations = [],
     isSqueezed = false,
     splitRatio = 0.45,
@@ -51,6 +57,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     onNotebookPageAdded,
     onNotebookPageMoved,
     onNotebookPageDeleted,
+    onRequestDocumentSwitch,
   } = props;
 
   const nativeRef = useRef<any>(null);
@@ -108,24 +115,45 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         (UIManager as any).dispatchViewManagerCommand(handle, 'zoomToFit', []);
       }
     },
-    addNotebookPage: (style?: string, title?: string) => {
+    addNotebookPage: (pageStyle?: string, title?: string) => {
       const handle = findNodeHandle(nativeRef.current);
       if (handle) {
         const cmd =
           (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
             ?.addNotebookPage ?? 8;
         (UIManager as any).dispatchViewManagerCommand(handle, cmd, [
-          style ?? 'ruled',
+          pageStyle ?? 'ruled',
           title ?? '',
         ]);
       }
     },
   }));
 
+  // ── Serialized JSON props ─────────────────────────────────────────────────
   const documentJson = useMemo(
     () => (document ? JSON.stringify(document) : ''),
     [document]
   );
+
+  // Multi-document: serialize the full workspace doc list
+  const workspaceDocumentsJson = useMemo(() => {
+    if (workspaceDocuments && workspaceDocuments.length > 0) {
+      return JSON.stringify(workspaceDocuments);
+    }
+    // Backward compat: if legacy single `document` prop is used, wrap it
+    if (document) {
+      const entry: WorkspaceDocumentEntry = {
+        id: document.id,
+        title: document.title,
+        pageCount: document.pageCount,
+        uri: document.uri ?? '',
+        colorAccent: '#00ADB5',
+      };
+      return JSON.stringify([entry]);
+    }
+    return '';
+  }, [workspaceDocuments, document]);
+
   const annotationsJson = useMemo(
     () => JSON.stringify(annotations),
     [annotations]
@@ -143,6 +171,10 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
       ref={nativeRef}
       style={style}
       documentJson={documentJson}
+      workspaceDocumentsJson={workspaceDocumentsJson}
+      activeDocumentId={
+        activeDocumentId ?? workspaceDocuments?.[0]?.id ?? document?.id ?? ''
+      }
       annotationsJson={annotationsJson}
       isSqueezed={isSqueezed}
       splitRatio={splitRatio}
@@ -249,6 +281,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
                 x,
                 y,
                 sourceRects,
+                documentId,
               } = e.nativeEvent;
               onExtractExcerpt({
                 id,
@@ -261,6 +294,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
                 x,
                 y,
                 sourceRects,
+                documentId,
               } as any);
             }
           : undefined
@@ -299,6 +333,14 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         onNotebookPageDeleted
           ? (e: any) => {
               onNotebookPageDeleted(e.nativeEvent.id);
+            }
+          : undefined
+      }
+      onRequestDocumentSwitch={
+        onRequestDocumentSwitch
+          ? (e: any) => {
+              const { documentId, sourcePageNumber, cardId } = e.nativeEvent;
+              onRequestDocumentSwitch({ documentId, sourcePageNumber, cardId });
             }
           : undefined
       }

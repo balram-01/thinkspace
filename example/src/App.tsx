@@ -19,6 +19,7 @@ import {
   type DocumentAnnotation,
   type PdfDocumentInfo,
   type WorkspaceDocument,
+  type WorkspaceDocumentEntry,
   type NotebookPageModel,
   type NotebookPageStyle,
 } from 'thinkspace';
@@ -28,6 +29,18 @@ const INITIAL_EXCERPTS: ExcerptModel[] = [];
 const INITIAL_LINKS: InkLink[] = [];
 
 type NavTabMode = 'drawing' | 'document' | 'workspace';
+
+// ── Document accent colors (cyclic assignment) ────────────────────────────
+const DOC_COLORS = [
+  '#6C5CE7',
+  '#00ADB5',
+  '#F59E0B',
+  '#EF4444',
+  '#10B981',
+  '#8B5CF6',
+  '#F97316',
+  '#3B82F6',
+];
 
 export default function App() {
   const [appScreen, setAppScreen] = useState<'workspace' | 'pdftest'>(
@@ -47,16 +60,29 @@ export default function App() {
   const [isStylePickerOpen, setIsStylePickerOpen] = useState(false);
   const [activeNav, setActiveNav] = useState<NavTabMode>('workspace');
 
-  // PDF Engine Document State (null by default — no default document loaded)
+  // ── Multi-Document Workspace State ────────────────────────────────────────
+  /**
+   * All documents in the workspace, as WorkspaceDocumentEntry objects.
+   * This is the multi-document API. Each entry has a unique ID, title, pageCount, and uri.
+   */
+  const [workspaceDocs, setWorkspaceDocs] = useState<WorkspaceDocumentEntry[]>(
+    []
+  );
+
+  /** ID of the document currently shown in the PDF viewport */
+  const [activeDocId, setActiveDocId] = useState<string | null>(null);
+
+  // Legacy single-doc state kept for internal tracking
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentInfo | null>(null);
   const [pdfUri, setPdfUri] = useState<string | null>(null);
 
   // Thinkspace Native View Reference
   const thinkspaceRef = useRef<any>(null);
 
-  // Active document object for ThinkspaceView (undefined by default until user imports a PDF)
-  const activeDocument: WorkspaceDocument | undefined = useMemo(() => {
-    if (pdfDoc) {
+  // ── Active document object for ThinkspaceView (legacy, single-doc) ───────
+  // Still used for backward compatibility when workspaceDocs is empty
+  const activeDocumentLegacy: WorkspaceDocument | undefined = useMemo(() => {
+    if (pdfDoc && workspaceDocs.length === 0) {
       return {
         id: pdfDoc.documentId,
         title: pdfDoc.title || 'PDF Document',
@@ -65,24 +91,38 @@ export default function App() {
       };
     }
     return undefined;
-  }, [pdfDoc, pdfUri]);
+  }, [pdfDoc, pdfUri, workspaceDocs]);
 
-  // ── Import PDF via system file picker ─────────────────────────────────────
+  // ── Import PDF via system file picker (multi-document) ────────────────────
   const handleImportPdf = useCallback(async () => {
     try {
       const file = await PdfEngine.pickPdfFile();
-      if (pdfDoc) {
-        try {
-          await PdfEngine.closeDocument(pdfDoc.documentId);
-        } catch {}
-      }
       const opened = await PdfEngine.openDocument(file.uri);
+      const colorAccent = DOC_COLORS[workspaceDocs.length % DOC_COLORS.length]!;
+      const entry: WorkspaceDocumentEntry = {
+        id: opened.documentId,
+        title:
+          opened.title ||
+          file.uri.split('/').pop()?.replace('.pdf', '') ||
+          'Document',
+        pageCount: opened.pageCount,
+        uri: file.uri,
+        colorAccent,
+        addedAt: new Date().toISOString(),
+      };
+      setWorkspaceDocs((prev) => {
+        // Replace if same ID, otherwise append
+        const exists = prev.find((d) => d.id === opened.documentId);
+        if (exists) return prev;
+        return [...prev, entry];
+      });
+      setActiveDocId(opened.documentId);
       setPdfDoc(opened);
       setPdfUri(file.uri);
     } catch {
       // User cancelled or error handled
     }
-  }, [pdfDoc]);
+  }, [workspaceDocs]);
 
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
@@ -235,7 +275,7 @@ export default function App() {
             style={styles.iconBtn}
             activeOpacity={0.7}
             onPress={() => {
-              if (activeDocument) {
+              if (workspaceDocs.length > 0 || pdfDoc) {
                 thinkspaceRef.current?.openSearch();
               }
             }}
@@ -257,7 +297,7 @@ export default function App() {
         <ThinkspaceView
           ref={thinkspaceRef}
           style={styles.nativeWorkspace}
-          document={activeDocument}
+          document={activeDocumentLegacy}
           annotations={annotations}
           isSqueezed={isSqueezed}
           splitRatio={splitRatio}
@@ -290,7 +330,12 @@ export default function App() {
             const newId = item.id || `excerpt-${Date.now()}`;
             const newCard: ExcerptModel = {
               id: newId,
-              documentId: pdfDoc?.documentId ?? 'doc-active',
+              // Multi-doc: use documentId from the event, falling back to active doc
+              documentId:
+                item.documentId ||
+                activeDocId ||
+                pdfDoc?.documentId ||
+                'doc-active',
               pageNumber: item.pageNumber,
               text: item.text,
               color: item.color,
@@ -331,6 +376,23 @@ export default function App() {
           }}
           onNotebookPageDeleted={(id) => {
             setNotebookPages((prev) => prev.filter((p) => p.id !== id));
+          }}
+          workspaceDocuments={
+            workspaceDocs.length > 0 ? workspaceDocs : undefined
+          }
+          activeDocumentId={activeDocId ?? undefined}
+          onRequestDocumentSwitch={({ documentId, sourcePageNumber }) => {
+            // Switch the active document viewport — the workspace canvas stays untouched
+            setActiveDocId(documentId);
+            // Update legacy pdfDoc reference for single-doc paths
+            const entry = workspaceDocs.find((d) => d.id === documentId);
+            if (entry) {
+              setPdfUri(entry.uri);
+            }
+            // The native engine will scroll to sourcePageNumber automatically after switching
+            console.log(
+              `[ThinkSpace] Document switch requested: ${documentId} → p${sourcePageNumber}`
+            );
           }}
         />
       </View>

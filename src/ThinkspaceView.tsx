@@ -5,6 +5,7 @@ import type {
   InkStroke,
   InkPoint,
   ExcerptModel,
+  WorkspaceDocument,
 } from './types';
 
 const CONTEXT_COLORS = ['#00ADB5', '#F59E0B', '#EF4444', '#3B82F6', '#8B5CF6'];
@@ -268,6 +269,9 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
   const {
     style,
     document,
+    workspaceDocuments,
+    activeDocumentId,
+    onRequestDocumentSwitch,
     annotations = [],
     isSqueezed = false,
     splitRatio: propSplitRatio = 0.45,
@@ -300,6 +304,22 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
     onNotebookPageDeleted: _onNotebookPageDeleted, // eslint-disable-line @typescript-eslint/no-unused-vars
   } = props;
   const canvasRef = useRef<any>(null);
+
+  const effectiveDocument: WorkspaceDocument | undefined = React.useMemo(() => {
+    if (workspaceDocuments && workspaceDocuments.length > 0) {
+      const found = workspaceDocuments.find((d) => d.id === activeDocumentId);
+      const active = found || workspaceDocuments[0]!;
+      return {
+        id: active.id,
+        title: active.title,
+        pageCount: active.pageCount,
+        uri: active.uri,
+        author: active.author,
+        sections: (active as any).sections,
+      };
+    }
+    return document;
+  }, [workspaceDocuments, activeDocumentId, document]);
 
   const historyStack = useRef<{ undo: () => void; redo: () => void }[]>([]);
   const redoStack = useRef<{ undo: () => void; redo: () => void }[]>([]);
@@ -339,14 +359,14 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
       setScale(1);
       setPan({ x: 0, y: 0 });
     },
-    addNotebookPage: (style?: any, title?: string) => {
+    addNotebookPage: (pageStyle?: any, title?: string) => {
       const newPage = {
         id: `nbpage-${Date.now()}`,
         x: (-pan.x + 80) / scale,
         y: (-pan.y + 80) / scale,
         width: 280,
         height: 380,
-        pageStyle: style ?? 'ruled',
+        pageStyle: pageStyle ?? 'ruled',
         title: title || 'Notebook Page',
         backgroundColor: '#FFFEF0',
       };
@@ -441,7 +461,9 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
   );
 
   const hasDoc = Boolean(
-    document && document.sections && document.sections.length > 0
+    effectiveDocument &&
+    effectiveDocument.sections &&
+    effectiveDocument.sections.length > 0
   );
 
   const getCanvasTopY = useCallback(
@@ -491,7 +513,7 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
     // =========================================================================
     // 1. TOP ZONE: Document Viewer
     // =========================================================================
-    if (hasDoc && document && docBottomY > 10) {
+    if (hasDoc && effectiveDocument && docBottomY > 10) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(0, 0, width, docBottomY);
@@ -507,9 +529,9 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
 
       // Document Dropdown Pill
       const docTitle =
-        document.title.length > 22
-          ? document.title.slice(0, 20) + '... ▾'
-          : `${document.title} ▾`;
+        effectiveDocument.title.length > 22
+          ? effectiveDocument.title.slice(0, 20) + '... ▾'
+          : `${effectiveDocument.title} ▾`;
       ctx.fillStyle = '#1A202C';
       ctx.strokeStyle = '#00ADB5';
       ctx.lineWidth = 1;
@@ -526,7 +548,7 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
       // Page Badge
       ctx.fillStyle = '#CBD5E1';
       ctx.font = '11px sans-serif';
-      ctx.fillText(`p. 7/${document.pageCount || 58}`, 200, 23);
+      ctx.fillText(`p. 7/${effectiveDocument.pageCount || 58}`, 200, 23);
 
       // Crop button
       ctx.fillStyle = '#1A202C';
@@ -555,7 +577,7 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
       var curY = subheaderH + 16 - docScrollY;
       const newMeasuredParas: MeasuredParagraph[] = [];
 
-      (document.sections ?? []).forEach((sec) => {
+      (effectiveDocument.sections ?? []).forEach((sec) => {
         const secAnns = annotations.filter((a) => a.sectionId === sec.id);
         const hasAnn = secAnns.length > 0;
 
@@ -1224,10 +1246,18 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
       );
       ctx.fill();
 
-      // Page Badge Pill (Light cyan capsule)
-      const badgePillW = 60 * scale;
-      ctx.fillStyle = 'rgba(0, 173, 181, 0.12)';
-      ctx.strokeStyle = 'rgba(0, 173, 181, 0.3)';
+      // Page / Document Source Badge Pill
+      const docEntry = workspaceDocuments?.find(
+        (d) => d.id === card.documentId
+      );
+      const docBadgeColor = docEntry?.colorAccent || card.color || '#00ADB5';
+      const badgeText = docEntry
+        ? `${docEntry.title.length > 10 ? docEntry.title.slice(0, 8) + '…' : docEntry.title} · p.${card.pageNumber || 1}`
+        : `🔗 p. ${card.pageNumber || 1}`;
+      const badgePillW =
+        Math.max(60, ctx.measureText(badgeText).width + 16) * scale;
+      ctx.fillStyle = `${docBadgeColor}22`;
+      ctx.strokeStyle = `${docBadgeColor}66`;
       ctx.lineWidth = 0.5 * scale;
       ctx.beginPath();
       if (ctx.roundRect)
@@ -1243,13 +1273,9 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
       ctx.fill();
       ctx.stroke();
 
-      ctx.fillStyle = '#00ADB5';
+      ctx.fillStyle = docBadgeColor;
       ctx.font = `bold ${Math.max(9, Math.round(10 * scale))}px sans-serif`;
-      ctx.fillText(
-        `🔗 p. ${card.pageNumber || 1}`,
-        pos.x + 30 * scale,
-        pos.y + 23 * scale
-      );
+      ctx.fillText(badgeText, pos.x + 30 * scale, pos.y + 23 * scale);
 
       // Close Button
       ctx.fillStyle = '#94A3B8';
@@ -1395,7 +1421,8 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
       ctx.restore();
     }
   }, [
-    document,
+    effectiveDocument,
+    workspaceDocuments,
     annotations,
     isSqueezed,
     splitRatio,
@@ -1964,7 +1991,7 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
         const newId = `card-${Date.now()}`;
         const newCard: ExcerptModel = {
           id: newId,
-          documentId: document?.id,
+          documentId: effectiveDocument?.id,
           pageNumber: liftItem.pageNumber,
           text: liftItem.text,
           color: liftItem.color,
@@ -2017,6 +2044,17 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
           );
         } else {
           onExcerptPress?.(card.id);
+          if (
+            card.documentId &&
+            card.documentId !== effectiveDocument?.id &&
+            onRequestDocumentSwitch
+          ) {
+            onRequestDocumentSwitch({
+              documentId: card.documentId,
+              sourcePageNumber: card.pageNumber || 1,
+              cardId: card.id,
+            });
+          }
         }
       }
       setDraggingCardId(null);

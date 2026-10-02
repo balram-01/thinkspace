@@ -168,7 +168,13 @@ data class NativeCard(
   var isStrikethrough: Boolean = false,
   var textColor: Int = Color.parseColor("#1E293B"),
   var textStyleName: String = "Default",
-  val undoTextStack: ArrayDeque<String> = ArrayDeque()
+  val undoTextStack: ArrayDeque<String> = ArrayDeque(),
+  /**
+   * Multi-document: ID of the source document this card was extracted from.
+   * Empty string = legacy card (uses the single active document).
+   * Used for source badge rendering and source-jump navigation.
+   */
+  val documentId: String = ""
 ) {
   fun getHeight(): Float {
     return when {
@@ -576,6 +582,55 @@ class ThinkspaceView : View {
   private val pageWordsCache = ConcurrentHashMap<Int, List<TextWord>>()
   private val extractingWords = ConcurrentHashMap.newKeySet<Int>()
   private val renderScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+  // ── Multi-document workspace registry ───────────────────────────────────────
+  /**
+   * Registry of all PDF documents currently opened in this workspace.
+   * Keys are documentId strings matching WorkspaceDocumentEntry.id.
+   * Values are opened PdfDocument handles (shared with PdfEngineModule).
+   * Documents are opened lazily when first needed.
+   */
+  private val documentRegistry = ConcurrentHashMap<String, PdfDocument>()
+
+  /**
+   * Ordered list of workspace document entries (metadata only).
+   * Kept in insertion order. The PDF renderer uses documentRegistry for actual docs.
+   */
+  private val workspaceDocumentEntries = mutableListOf<WorkspaceDocumentEntry>()
+
+  /**
+   * ID of the document currently visible in the PDF/document viewport.
+   * Changing this triggers a viewport switch without touching the workspace canvas.
+   */
+  private var activeDocumentId: String = ""
+
+  /** Color palette for auto-assigning document accent colors. */
+  private val docColorPalette = listOf(
+    android.graphics.Color.parseColor("#6C5CE7"),
+    android.graphics.Color.parseColor("#00ADB5"),
+    android.graphics.Color.parseColor("#F59E0B"),
+    android.graphics.Color.parseColor("#EF4444"),
+    android.graphics.Color.parseColor("#10B981"),
+    android.graphics.Color.parseColor("#8B5CF6"),
+    android.graphics.Color.parseColor("#F97316"),
+    android.graphics.Color.parseColor("#3B82F6")
+  )
+
+  /** Returns the parsed accent Color Int for a document ID, or a default. */
+  fun getDocumentAccentColor(docId: String): Int {
+    val entry = workspaceDocumentEntries.find { it.id == docId }
+    val hex = entry?.colorAccent ?: "#00ADB5"
+    return try { android.graphics.Color.parseColor(hex) } catch (e: Exception) { docColorPalette[0] }
+  }
+
+  // ── Multi-document: simple data holder for workspace entry metadata ──────────
+  data class WorkspaceDocumentEntry(
+    val id: String,
+    val title: String,
+    val pageCount: Int,
+    val uri: String,
+    val colorAccent: String = "#00ADB5"
+  )
 
   // Document & Annotation Models (Fallback/Demo Doc)
   private var activeDocument: NativeDoc? = null
@@ -1868,6 +1923,135 @@ class ThinkspaceView : View {
     invalidate()
   }
 
+  // ── Multi-Document Engine Methods ────────────────────────────────────────────
+
+  /**
+   * Called when the React Native layer passes a new workspace documents list.
+   * Registers all document entries in workspaceDocumentEntries.
+   * Does NOT immediately open all PDFs — only the active one is opened eagerly;
+   * others are opened lazily when switchToDocument() is called.
+   *
+   * @param json JSON array of WorkspaceDocumentEntry objects.
+   */
+  fun setWorkspaceDocumentsFromJson(json: String?) {
+    if (json.isNullOrEmpty()) return
+    try {
+      val arr = JSONArray(json)
+      val incoming = mutableListOf<WorkspaceDocumentEntry>()
+      val palette = docColorPalette
+
+      for (i in 0 until arr.length()) {
+        val obj = arr.getJSONObject(i)
+        val id = obj.optString("id", "doc-$i")
+        val title = obj.optString("title", "Document")
+        val pageCount = obj.optInt("pageCount", 1)
+        val uri = obj.optString("uri", "")
+        // Assign a color from palette if not provided, cycling by index
+        val existingAccent = workspaceDocumentEntries.find { it.id == id }?.colorAccent
+        val colorHex = obj.optString("colorAccent", "").takeIf { it.isNotEmpty() }
+          ?: existingAccent
+          ?: "#%06X".format(palette[i % palette.size] and 0xFFFFFF)
+        incoming.add(WorkspaceDocumentEntry(id, title, pageCount, uri, colorHex))
+      }
+
+      // Preserve ordering: update existing entries, add new ones
+      workspaceDocumentEntries.clear()
+      workspaceDocumentEntries.addAll(incoming)
+
+      // For each entry, check if already in PdfEngineModule registry
+      for (entry in incoming) {
+        val existing = PdfEngineModule.openDocuments[entry.id]
+        if (existing != null) {
+          documentRegistry[entry.id] = existing
+        }
+      }
+
+      // If no active doc is set yet, activate the first one
+      if (activeDocumentId.isEmpty() && incoming.isNotEmpty()) {
+        switchToDocument(incoming[0].id)
+      }
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
+  }
+
+  /**
+   * Switch the active PDF/document viewport to the given document ID.
+   * The workspace canvas (cards, strokes, ink, notes) is NOT affected.
+   * Only the document pane changes.
+   *
+   * If the document is already opened in the registry, switching is instant.
+   * If not yet opened, opens it asynchronously from the stored URI.
+   *
+   * @param docId The document ID to activate.
+   */
+  fun switchToDocument(docId: String) {
+    if (docId == activeDocumentId && activePdfDoc != null) return // Already active
+
+    activeDocumentId = docId
+
+    // Check registry first (instant switch)
+    val cached = documentRegistry[docId] ?: PdfEngineModule.openDocuments[docId]
+    if (cached != null) {
+      documentRegistry[docId] = cached
+      activePdfDoc = cached
+      activeDocument = null
+      // Clear per-page caches for the previous document's bitmaps
+      pageBitmaps.evictAll()
+      pageWordsCache.clear()
+      docScrollY = 0f
+      invalidate()
+      return
+    }
+
+    // Not yet open — find the entry and open from URI asynchronously
+    val entry = workspaceDocumentEntries.find { it.id == docId }
+    if (entry != null && entry.uri.isNotEmpty()) {
+      renderScope.launch(Dispatchers.IO) {
+        try {
+          val engine = PdfEngineModule.getOrCreateEngine(context)
+          val source = PdfEngineModule.resolveSource(context, entry.uri)
+          val doc = engine.open(source)
+          PdfEngineModule.openDocuments[docId] = doc
+          documentRegistry[docId] = doc
+          withContext(Dispatchers.Main) {
+            if (activeDocumentId == docId) {
+              activePdfDoc = doc
+              activeDocument = null
+              pageBitmaps.evictAll()
+              pageWordsCache.clear()
+              docScrollY = 0f
+              invalidate()
+            }
+          }
+        } catch (e: Exception) {
+          e.printStackTrace()
+        }
+      }
+    }
+  }
+
+  /**
+   * Dispatch a React Native event requesting the RN layer to switch to a specific
+   * document and page. Called when the user taps the source badge on a card.
+   *
+   * @param cardId   The card whose source badge was tapped.
+   * @param docId    The source document ID.
+   * @param pageNum  The source page number (1-based).
+   */
+  private fun dispatchRequestDocumentSwitchEvent(cardId: String, docId: String, pageNum: Int) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val dispatcher: EventDispatcher? = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putString("documentId", docId)
+      putInt("sourcePageNumber", pageNum)
+      putString("cardId", cardId)
+    }
+    dispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topRequestDocumentSwitch", data))
+  }
+
+  // ── End Multi-Document Engine Methods ────────────────────────────────────────
+
   fun setAnnotationsFromJson(json: String?) {
     if (json.isNullOrEmpty()) {
       return
@@ -2013,12 +2197,19 @@ class ThinkspaceView : View {
           parsedSourceRects.addAll(existing.sourceRects)
         }
 
+        // Multi-document: parse documentId, falling back to existing or activeDocumentId
+        val cardDocumentId = obj.optString(
+          "documentId",
+          existing?.documentId?.takeIf { it.isNotEmpty() } ?: activeDocumentId
+        )
+
         updatedList.add(
           NativeCard(
             id, x, y, width, text, color, pageNumber, comment, clusterId, stackCount,
             isImage, imageUrl, isTable, existing?.tableRows,
             existing?.groupedItems,
-            parsedSourceRects
+            parsedSourceRects,
+            documentId = cardDocumentId
           )
         )
       }
@@ -3739,8 +3930,20 @@ class ThinkspaceView : View {
         canvas.drawText(groupCountText, groupBadgeRect.left + 8f, cardRect.top + 24f, groupTextPaint)
       }
 
-      // LiquidText-style Jump-to-Source Button (↗ p.N)
-      val jumpText = "↗ p.${card.pageNumber}"
+      // ── Multi-Document Source Badge ─────────────────────────────────────────
+      // Shows the source document name + page, color-coded to the doc's accent color.
+      // Tapping it triggers a source jump (or document switch if needed).
+      val cardDocId = card.documentId.takeIf { it.isNotEmpty() } ?: activeDocumentId
+      val docEntry = workspaceDocumentEntries.find { it.id == cardDocId }
+      val docAccentColor = getDocumentAccentColor(cardDocId)
+      val docShortTitle = docEntry?.title?.let { t ->
+        if (t.length > 12) t.substring(0, 11) + "…" else t
+      } ?: ""
+      val jumpText = if (docShortTitle.isNotEmpty() && workspaceDocumentEntries.size > 1) {
+        "📄 $docShortTitle · p.${card.pageNumber}"
+      } else {
+        "↗ p.${card.pageNumber}"
+      }
       val jumpTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textSize = 10f
@@ -3752,14 +3955,15 @@ class ThinkspaceView : View {
       val jumpBtnRect = RectF(jumpBtnRight - jumpBtnW, cardRect.top + 9f, jumpBtnRight, cardRect.top + 31f)
 
       val jumpBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = card.color
+        color = docAccentColor  // Use document accent color instead of card color
         style = Paint.Style.FILL
       }
       canvas.drawRoundRect(jumpBtnRect, 11f, 11f, jumpBgPaint)
       canvas.drawText(jumpText, jumpBtnRect.left + 8f, jumpBtnRect.centerY() + 3.5f, jumpTextPaint)
 
-      // Store world hit rect
+      // Store world hit rect — tap detection uses this in onTouchEvent
       cardJumpBtnRects[card.id] = RectF(jumpBtnRect)
+
 
       // Delete Button if selected
       if (card.id == selectedCardId) {
@@ -5921,12 +6125,22 @@ class ThinkspaceView : View {
             val isJumpTap = (jumpRect != null && jumpRect.contains(wx, wy)) ||
                             (wx >= clickedCard.x + 10f && wx <= clickedCard.x + 75f && wy >= clickedCard.y + 5f && wy <= clickedCard.y + 35f)
 
-            // Bidirectional Navigation: Scroll document to card's page & pulse highlight exact source!
-            scrollToDocumentPage(clickedCard.pageNumber, clickedCard.sourceRects)
-            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            // Multi-document: check if this card belongs to a different document
+            val cardDocId = clickedCard.documentId.takeIf { it.isNotEmpty() } ?: activeDocumentId
+            val isCrossDocJump = isJumpTap && cardDocId.isNotEmpty() && cardDocId != activeDocumentId
 
-            if (isJumpTap) {
-              hudToast.show("Navigating to Page ${clickedCard.pageNumber}...")
+            if (isCrossDocJump) {
+              // Cross-document source jump: ask RN to switch documents, then scroll
+              dispatchRequestDocumentSwitchEvent(clickedCard.id, cardDocId, clickedCard.pageNumber)
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              hudToast.show("Switching to source document · p.${clickedCard.pageNumber}")
+            } else {
+              // Same-document: Bidirectional Navigation — scroll document to card's page & pulse highlight
+              scrollToDocumentPage(clickedCard.pageNumber, clickedCard.sourceRects)
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              if (isJumpTap) {
+                hudToast.show("Navigating to Page ${clickedCard.pageNumber}...")
+              }
             }
 
             // Update cursor position if actively editing this card
@@ -8618,7 +8832,8 @@ class ThinkspaceView : View {
     x: Float = 0f,
     y: Float = 0f,
     cardId: String? = null,
-    sourceRects: List<RectF> = emptyList()
+    sourceRects: List<RectF> = emptyList(),
+    documentId: String = activeDocumentId
   ) {
     val surfaceId = UIManagerHelper.getSurfaceId(this)
     val eventDispatcher = getEventDispatcher()
@@ -8636,6 +8851,8 @@ class ThinkspaceView : View {
       }
       putDouble("x", x.toDouble())
       putDouble("y", y.toDouble())
+      // Multi-document: always include the source document ID
+      putString("documentId", documentId)
       if (sourceRects.isNotEmpty()) {
         val arr = Arguments.createArray()
         for (r in sourceRects) {

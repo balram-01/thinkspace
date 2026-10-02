@@ -96,6 +96,27 @@ export interface WorkspaceDocument {
   sections?: DocumentSection[];
 }
 
+/**
+ * A document entry inside a multi-document workspace.
+ * Each entry represents one PDF/document source within the shared workspace.
+ */
+export interface WorkspaceDocumentEntry {
+  /** Unique document ID — matches PdfDocumentInfo.documentId */
+  id: string;
+  /** Display title */
+  title: string;
+  /** Total page count */
+  pageCount: number;
+  /** File URI — used by the native engine to open the PDF */
+  uri: string;
+  /** Auto-assigned accent color for this document (used in source badges) */
+  colorAccent?: string;
+  /** ISO timestamp when this document was added to the workspace */
+  addedAt?: string;
+  /** Optional author metadata */
+  author?: string;
+}
+
 export type NotebookPageStyle =
   | 'blank'
   | 'ruled'
@@ -119,6 +140,7 @@ export interface NotebookPageModel {
 
 export interface ExcerptModel {
   id: string;
+  /** ID of the source document this excerpt was extracted from */
   documentId?: string;
   pageNumber?: number;
   text: string;
@@ -168,7 +190,21 @@ export interface DocumentSelection {
 export interface ThinkspaceViewProps {
   ref?: any;
   style?: any;
+  // ── Single-document (legacy / simple) API ────────────────────────────────
   document?: WorkspaceDocument;
+  // ── Multi-document workspace API ─────────────────────────────────────────
+  /**
+   * Full list of documents currently in the workspace.
+   * When provided, the native engine opens/registers all of them lazily.
+   * The active PDF viewport shows the document matching activeDocumentId.
+   */
+  workspaceDocuments?: WorkspaceDocumentEntry[];
+  /**
+   * ID of the document currently shown in the PDF/document viewport.
+   * Must match one of the IDs in workspaceDocuments.
+   */
+  activeDocumentId?: string;
+  // ── Shared props ──────────────────────────────────────────────────────────
   annotations?: DocumentAnnotation[];
   isSqueezed?: boolean;
   splitRatio?: number;
@@ -182,6 +218,7 @@ export interface ThinkspaceViewProps {
   panX?: number;
   panY?: number;
   scale?: number;
+  // ── Events ────────────────────────────────────────────────────────────────
   onAddStroke?: (stroke: InkStroke) => void;
   onEraseStroke?: (strokeId: string) => void;
   onExcerptMoveEnd?: (
@@ -204,6 +241,8 @@ export interface ThinkspaceViewProps {
     color: string;
     isTable: boolean;
     isImage: boolean;
+    /** documentId of the source document this excerpt came from */
+    documentId?: string;
     sourceRects?: {
       left: number;
       top: number;
@@ -224,6 +263,16 @@ export interface ThinkspaceViewProps {
     pIdx: number
   ) => void;
   onUndoStateChange?: (canUndo: boolean, canRedo: boolean) => void;
+  /**
+   * Fired when the user taps the source label on an excerpt card
+   * to jump back to the source document+page.
+   * React Native layer should switch activeDocumentId and scroll to sourcePageNumber.
+   */
+  onRequestDocumentSwitch?: (data: {
+    documentId: string;
+    sourcePageNumber: number;
+    cardId: string;
+  }) => void;
 }
 
 export interface ThinkspaceViewRef {

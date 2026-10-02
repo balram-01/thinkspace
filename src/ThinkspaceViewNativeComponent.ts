@@ -73,6 +73,16 @@ export type UndoStateChangeEvent = Readonly<{
   canRedo: boolean;
 }>;
 
+/**
+ * Fired when the user taps the source badge on an excerpt card.
+ * React Native should switch the active document and scroll to the source page.
+ */
+export type RequestDocumentSwitchEvent = Readonly<{
+  documentId: string;
+  sourcePageNumber: Float;
+  cardId: string;
+}>;
+
 export type NotebookPageAddedEvent = Readonly<{
   id: string;
   x: Float;
@@ -96,6 +106,10 @@ export type NotebookPageDeletedEvent = Readonly<{
 export interface NativeProps extends ViewProps {
   documentJson?: string;
   annotationsJson?: string;
+  /** Full list of workspace documents as JSON — multi-document mode. */
+  workspaceDocumentsJson?: string;
+  /** The document ID currently active in the PDF viewport. */
+  activeDocumentId?: string;
   isSqueezed?: boolean;
   splitRatio?: Float;
   activeTool?: string;
@@ -124,6 +138,8 @@ export interface NativeProps extends ViewProps {
   onNotebookPageAdded?: DirectEventHandler<NotebookPageAddedEvent>;
   onNotebookPageMoved?: DirectEventHandler<NotebookPageMovedEvent>;
   onNotebookPageDeleted?: DirectEventHandler<NotebookPageDeletedEvent>;
+  /** Fired when user taps a source badge on a card — native requests doc switch. */
+  onRequestDocumentSwitch?: DirectEventHandler<RequestDocumentSwitchEvent>;
 }
 
 export default codegenNativeComponent<NativeProps>('ThinkspaceView');

@@ -94,6 +94,25 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
     view?.setLinksFromJson(value)
   }
 
+  /**
+   * Multi-document: full ordered list of documents in the workspace.
+   * Native engine registers/opens all docs and keeps a registry.
+   */
+  @ReactProp(name = "workspaceDocumentsJson")
+  override fun setWorkspaceDocumentsJson(view: ThinkspaceView?, value: String?) {
+    view?.setWorkspaceDocumentsFromJson(value)
+  }
+
+  /**
+   * Multi-document: which document should be shown in the PDF viewport.
+   */
+  @ReactProp(name = "activeDocumentId")
+  override fun setActiveDocumentId(view: ThinkspaceView?, value: String?) {
+    if (!value.isNullOrEmpty()) {
+      view?.switchToDocument(value)
+    }
+  }
+
   @ReactProp(name = "panX")
   override fun setPanX(view: ThinkspaceView?, value: Float) {
     if (view == null) return
@@ -133,7 +152,9 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "topUndoStateChange" to "onUndoStateChange",
       "topNotebookPageAdded" to "onNotebookPageAdded",
       "topNotebookPageMoved" to "onNotebookPageMoved",
-      "topNotebookPageDeleted" to "onNotebookPageDeleted"
+      "topNotebookPageDeleted" to "onNotebookPageDeleted",
+      // Multi-document: fired when user taps a source badge on a card
+      "topRequestDocumentSwitch" to "onRequestDocumentSwitch"
     )
     for ((top, on) in events) {
       map[top] = mapOf("registrationName" to on)
