@@ -1,7 +1,7 @@
 export type WorkspacePattern = 'dots' | 'grid' | 'looseleaf' | 'plain' | 'none';
 
 export type WorkspaceTool =
-  'select' | 'pen' | 'highlighter' | 'eraser' | 'addNote';
+  'select' | 'pen' | 'highlighter' | 'eraser' | 'addNote' | 'lasso';
 
 export type ToolContext = 'drawing' | 'document' | 'workspace';
 
@@ -208,6 +208,7 @@ export interface ThinkspaceViewProps {
   annotations?: DocumentAnnotation[];
   isSqueezed?: boolean;
   splitRatio?: number;
+  isImmersive?: boolean;
   activeTool?: WorkspaceTool;
   selectedColor?: string;
   pattern?: WorkspacePattern;
@@ -273,6 +274,7 @@ export interface ThinkspaceViewProps {
     sourcePageNumber: number;
     cardId: string;
   }) => void;
+  onToggleImmersive?: (isImmersive: boolean) => void;
 }
 
 export interface ThinkspaceViewRef {
@@ -285,6 +287,8 @@ export interface ThinkspaceViewRef {
   zoomToFit: () => void;
   zoomOut: () => void;
   addNotebookPage: (style?: NotebookPageStyle, title?: string) => void;
+  toggleImmersiveMode: () => void;
+  setImmersiveMode: (enabled: boolean) => void;
 }
 
 export interface DocumentViewerProps {

@@ -19,7 +19,9 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -604,6 +606,10 @@ class ThinkspaceView : View {
    */
   private var activeDocumentId: String = ""
 
+  /** Pending page number and source rects to scroll to when switching documents */
+  private var pendingScrollToPage: Int? = null
+  private var pendingPulseRects: List<RectF>? = null
+
   /** Color palette for auto-assigning document accent colors. */
   private val docColorPalette = listOf(
     android.graphics.Color.parseColor("#6C5CE7"),
@@ -774,6 +780,10 @@ class ThinkspaceView : View {
   private var isScrollingDoc = false
   private var lastTouchScreenX = 0f
   private var lastTouchScreenY = 0f
+
+  // Immersive / Distraction-Free Content Mode state
+  private var isImmersive = false
+  private var hadSelectionOrModalBeforeTouch = false
 
   // Real PDF Selection state
   private var activePdfSelection: NativePdfSelection? = null
@@ -1999,7 +2009,15 @@ class ThinkspaceView : View {
       // Clear per-page caches for the previous document's bitmaps
       pageBitmaps.evictAll()
       pageWordsCache.clear()
+      compressionEngine.resetAllToNormal(animate = false) {}
       docScrollY = 0f
+      val targetPage = pendingScrollToPage
+      val targetRects = pendingPulseRects
+      pendingScrollToPage = null
+      pendingPulseRects = null
+      if (targetPage != null) {
+        post { scrollToDocumentPage(targetPage, targetRects ?: emptyList()) }
+      }
       invalidate()
       return
     }
@@ -2020,12 +2038,23 @@ class ThinkspaceView : View {
               activeDocument = null
               pageBitmaps.evictAll()
               pageWordsCache.clear()
+              compressionEngine.resetAllToNormal(animate = false) {}
               docScrollY = 0f
+              val targetPage = pendingScrollToPage
+              val targetRects = pendingPulseRects
+              pendingScrollToPage = null
+              pendingPulseRects = null
+              if (targetPage != null) {
+                post { scrollToDocumentPage(targetPage, targetRects ?: emptyList()) }
+              }
               invalidate()
             }
           }
         } catch (e: Exception) {
           e.printStackTrace()
+          withContext(Dispatchers.Main) {
+            hudToast.show("Document could not be opened")
+          }
         }
       }
     }
@@ -5178,6 +5207,10 @@ class ThinkspaceView : View {
         lastTouchScreenX = sx
         lastTouchScreenY = sy
         totalDragDistance = 0f
+        hadSelectionOrModalBeforeTouch = (selectedCardId != null || editingCardId != null ||
+          selectedNotebookPageId != null || isStyleSheetOpen || isCardColorPaletteOpen ||
+          isTypoTextColorPaletteOpen || isNotebookStylePickerOpen || activeCropSelection != null ||
+          activePdfSelection != null)
 
         // 0A. Check LiquidText Style Sheet Popover Clicks (Screenshot 4)
         if (isStyleSheetOpen && styleSheetRect.contains(sx, sy)) {
@@ -6130,6 +6163,9 @@ class ThinkspaceView : View {
             val isCrossDocJump = isJumpTap && cardDocId.isNotEmpty() && cardDocId != activeDocumentId
 
             if (isCrossDocJump) {
+              // Store pending page navigation so that when the document activates, it scrolls to the page
+              pendingScrollToPage = clickedCard.pageNumber
+              pendingPulseRects = clickedCard.sourceRects
               // Cross-document source jump: ask RN to switch documents, then scroll
               dispatchRequestDocumentSwitchEvent(clickedCard.id, cardDocId, clickedCard.pageNumber)
               performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -6718,6 +6754,7 @@ class ThinkspaceView : View {
         isDraggingCropBottomRightHandle = false
         isMovingCropSelection = false
         isDraggingDivider = false
+        val wasPanningCanvas = isPanningCanvas
         isPanningCanvas = false
         isSelectingPdfText = false
         isDraggingCrop = false
@@ -6868,7 +6905,8 @@ class ThinkspaceView : View {
                 imageUrl = finalImgPath,
                 isTable = false,
                 tableRows = null,
-                sourceRects = liftCandidateSourceRects
+                sourceRects = liftCandidateSourceRects,
+                documentId = activeDocumentId
               )
               cards.add(card)
 
@@ -7056,6 +7094,14 @@ class ThinkspaceView : View {
           invalidate()
           return true
         }
+
+        // Clean Canvas Background Tap Detection:
+        // If the tap was inside the canvas zone, was not dragged, had no selections/modals open,
+        // and no card or page was touched, toggle immersive mode!
+        if (sy >= canvasTopY && wasPanningCanvas && totalDragDistance <= touchSlop && !hadSelectionOrModalBeforeTouch && draggingCard == null && resizingNotebookPage == null && draggingNotebookPage == null && !isLiftingExcerpt) {
+          toggleImmersiveMode()
+          return true
+        }
       }
     }
 
@@ -7150,9 +7196,10 @@ class ThinkspaceView : View {
             invalidate()
             return
           } else {
-            // Normal tap on blank whitespace in text mode: dismiss selections
+            // Normal tap on blank whitespace in text mode: toggle immersive mode!
             activeCropSelection = null
             activePdfSelection = null
+            toggleImmersiveMode()
             invalidate()
             return
           }
@@ -7205,9 +7252,13 @@ class ThinkspaceView : View {
       }
     }
 
-    // 3. Tapped outside -> Dismiss selection
+    // 3. Tapped outside -> Dismiss selection or toggle immersive mode
+    val hadSelection = activePdfSelection != null || activeCropSelection != null
     activePdfSelection = null
     activeCropSelection = null
+    if (!hadSelection) {
+      toggleImmersiveMode()
+    }
     invalidate()
   }
 
@@ -7436,7 +7487,8 @@ class ThinkspaceView : View {
       isTable = false,
       tableRows = null,
       groupedItems = null,
-      sourceRects = pdfRects
+      sourceRects = pdfRects,
+      documentId = activeDocumentId
     )
     cards.add(card)
 
@@ -7514,7 +7566,8 @@ class ThinkspaceView : View {
       isTable = false,
       tableRows = null,
       groupedItems = null,
-      sourceRects = cropSourceRects
+      sourceRects = cropSourceRects,
+      documentId = activeDocumentId
     )
     cards.add(card)
 
@@ -9077,5 +9130,46 @@ class ThinkspaceView : View {
       putString("color", String.format("#%06X", 0xFFFFFF and color))
     }
     eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topChangeCardColor", data))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Immersive / Distraction-Free Content Mode API & Event
+  // ---------------------------------------------------------------------------
+  fun isImmersiveMode(): Boolean = isImmersive
+
+  fun setImmersiveMode(enabled: Boolean) {
+    if (isImmersive == enabled) return
+    isImmersive = enabled
+    setSystemBarsImmersive(enabled)
+    dispatchToggleImmersiveEvent(enabled)
+    invalidate()
+  }
+
+  fun toggleImmersiveMode() {
+    setImmersiveMode(!isImmersive)
+  }
+
+  fun setSystemBarsImmersive(enabled: Boolean) {
+    post {
+      val reactContext = UIManagerHelper.getReactContext(this) ?: return@post
+      val activity = reactContext.currentActivity ?: return@post
+      val window = activity.window ?: return@post
+      val controller = WindowCompat.getInsetsController(window, window.decorView)
+      if (enabled) {
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+      } else {
+        controller.show(WindowInsetsCompat.Type.systemBars())
+      }
+    }
+  }
+
+  private fun dispatchToggleImmersiveEvent(enabled: Boolean) {
+    val surfaceId = UIManagerHelper.getSurfaceId(this)
+    val eventDispatcher = getEventDispatcher()
+    val data = Arguments.createMap().apply {
+      putBoolean("isImmersive", enabled)
+    }
+    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topToggleImmersive", data))
   }
 }

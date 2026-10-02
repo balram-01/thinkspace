@@ -113,6 +113,11 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
     }
   }
 
+  @ReactProp(name = "isImmersive")
+  override fun setIsImmersive(view: ThinkspaceView?, value: Boolean) {
+    view?.setImmersiveMode(value)
+  }
+
   @ReactProp(name = "panX")
   override fun setPanX(view: ThinkspaceView?, value: Float) {
     if (view == null) return
@@ -154,7 +159,9 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "topNotebookPageMoved" to "onNotebookPageMoved",
       "topNotebookPageDeleted" to "onNotebookPageDeleted",
       // Multi-document: fired when user taps a source badge on a card
-      "topRequestDocumentSwitch" to "onRequestDocumentSwitch"
+      "topRequestDocumentSwitch" to "onRequestDocumentSwitch",
+      // Immersive content mode: fired when user taps content
+      "topToggleImmersive" to "onToggleImmersive"
     )
     for ((top, on) in events) {
       map[top] = mapOf("registrationName" to on)
@@ -172,7 +179,9 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "redo" to 6,
       "zoomToFit" to 7,
       "zoomOut" to 7,
-      "addNotebookPage" to 8
+      "addNotebookPage" to 8,
+      "toggleImmersiveMode" to 9,
+      "setImmersiveMode" to 10
     )
   }
 
@@ -190,6 +199,8 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
         val title = args?.getString(1) ?: ""
         root.addNotebookPage(style, title)
       }
+      "toggleImmersiveMode", "9" -> root.toggleImmersiveMode()
+      "setImmersiveMode", "10" -> root.setImmersiveMode(args?.getBoolean(0) ?: false)
     }
   }
 
@@ -207,6 +218,8 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
         val title = args?.getString(1) ?: ""
         root.addNotebookPage(style, title)
       }
+      9 -> root.toggleImmersiveMode()
+      10 -> root.setImmersiveMode(args?.getBoolean(0) ?: false)
     }
   }
 

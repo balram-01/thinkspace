@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import PdfEngineTestScreen from './PdfEngineTestScreen';
 import {
   View,
@@ -7,6 +7,8 @@ import {
   StyleSheet,
   StatusBar,
   Modal,
+  Animated,
+  Easing,
 } from 'react-native';
 import {
   ThinkspaceView,
@@ -58,7 +60,50 @@ export default function App() {
   const [notebookPages, setNotebookPages] = useState<NotebookPageModel[]>([]);
   const [isAddMenuOpen, setIsAddMenuOpen] = useState(false);
   const [isStylePickerOpen, setIsStylePickerOpen] = useState(false);
+  const [isDocsModalOpen, setIsDocsModalOpen] = useState(false);
+  const [isWorkspacesModalOpen, setIsWorkspacesModalOpen] = useState(false);
+  const [isPageEditorOpen, setIsPageEditorOpen] = useState(false);
   const [activeNav, setActiveNav] = useState<NavTabMode>('workspace');
+  const [isImmersive, setIsImmersive] = useState(false);
+  const immersiveAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(immersiveAnim, {
+      toValue: isImmersive ? 1 : 0,
+      duration: 250,
+      easing: Easing.bezier(0.25, 0.1, 0.25, 1),
+      useNativeDriver: false,
+    }).start();
+  }, [isImmersive, immersiveAnim]);
+
+  const statusBarH = StatusBar.currentHeight ?? 24;
+  const topBarH = 48 + statusBarH;
+  const bottomChromeH = 112;
+
+  const topTranslateY = immersiveAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -topBarH],
+  });
+
+  const bottomTranslateY = immersiveAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, bottomChromeH],
+  });
+
+  const chromeOpacity = immersiveAnim.interpolate({
+    inputRange: [0, 0.6, 1],
+    outputRange: [1, 0.3, 0],
+  });
+
+  const contentTop = immersiveAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [topBarH, 0],
+  });
+
+  const contentBottom = immersiveAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [bottomChromeH, 0],
+  });
 
   // ── Multi-Document Workspace State ────────────────────────────────────────
   /**
@@ -189,9 +234,9 @@ export default function App() {
   const handleSelectNav = useCallback((mode: NavTabMode) => {
     setActiveNav(mode);
     if (mode === 'drawing') {
-      setTool('pen');
+      setTool((prev) => (prev === 'select' ? 'pen' : prev));
     } else if (mode === 'document') {
-      setSplitRatio(0.8);
+      setSplitRatio(0.72);
       setTool('select');
     } else {
       setSplitRatio(0.48);
@@ -218,12 +263,23 @@ export default function App() {
     <View style={styles.container}>
       <StatusBar
         barStyle="light-content"
-        backgroundColor="#0F172A"
-        translucent={false}
+        backgroundColor={isImmersive ? '#000000' : '#0F172A'}
+        hidden={isImmersive}
+        animated={true}
+        showHideTransition="slide"
       />
 
       {/* ── Top System Header matching Screenshot ─────────────────────────── */}
-      <View style={styles.topBar}>
+      <Animated.View
+        style={[
+          styles.topBar,
+          {
+            transform: [{ translateY: topTranslateY }],
+            opacity: chromeOpacity,
+          },
+        ]}
+        pointerEvents={isImmersive ? 'none' : 'auto'}
+      >
         <View style={styles.topBarLeft}>
           <TouchableOpacity
             style={styles.iconBtn}
@@ -290,13 +346,23 @@ export default function App() {
             <Text style={styles.headerIcon}>•••</Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </Animated.View>
 
       {/* ── 100% Native Kotlin Fabric Workspace Engine ────────────────────── */}
-      <View style={styles.workspaceWrapper}>
+      <Animated.View
+        style={[
+          styles.workspaceWrapper,
+          {
+            top: contentTop,
+            bottom: contentBottom,
+          },
+        ]}
+      >
         <ThinkspaceView
           ref={thinkspaceRef}
           style={styles.nativeWorkspace}
+          isImmersive={isImmersive}
+          onToggleImmersive={(imm) => setIsImmersive(imm)}
           document={activeDocumentLegacy}
           annotations={annotations}
           isSqueezed={isSqueezed}
@@ -395,153 +461,614 @@ export default function App() {
             );
           }}
         />
-      </View>
+      </Animated.View>
 
-      {/* ── Secondary Action Toolbar matching Screenshot ──────────────────── */}
-      <View style={styles.secondaryToolbar}>
-        <TouchableOpacity
-          style={styles.toolItem}
-          activeOpacity={0.7}
-          onPress={() => {}}
-        >
-          <Text style={styles.toolIcon}>⊞</Text>
-          <Text style={styles.toolLabel}>Workspaces</Text>
-        </TouchableOpacity>
+      {/* ── Bottom Chrome: Contextual Secondary Toolbar + Bottom Navigation Bar ── */}
+      <Animated.View
+        style={[
+          styles.bottomChromeContainer,
+          {
+            transform: [{ translateY: bottomTranslateY }],
+            opacity: chromeOpacity,
+          },
+        ]}
+        pointerEvents={isImmersive ? 'none' : 'auto'}
+      >
+        <View style={styles.secondaryToolbar}>
+          {activeNav === 'drawing' && (
+            <>
+              {/* [Text Select] */}
+              <TouchableOpacity
+                style={[
+                  styles.toolItem,
+                  tool === 'select' && styles.toolItemActive,
+                ]}
+                activeOpacity={0.7}
+                onPress={() => setTool('select')}
+              >
+                <Text
+                  style={[
+                    styles.toolIcon,
+                    tool === 'select' && styles.toolIconActive,
+                  ]}
+                >
+                  ↖
+                </Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    tool === 'select' && styles.toolLabelActive,
+                  ]}
+                >
+                  Text Select
+                </Text>
+              </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.toolItem}
-          activeOpacity={0.7}
-          onPress={handleAddTextBox}
-        >
-          <Text style={[styles.toolIcon, styles.boldA]}>A</Text>
-          <Text style={styles.toolLabel}>Text Box</Text>
-        </TouchableOpacity>
+              {/* [Pen] */}
+              <TouchableOpacity
+                style={[
+                  styles.toolItem,
+                  tool === 'pen' && styles.toolItemActive,
+                ]}
+                activeOpacity={0.7}
+                onPress={() => setTool('pen')}
+              >
+                <Text
+                  style={[
+                    styles.toolIcon,
+                    tool === 'pen' && styles.toolIconActive,
+                  ]}
+                >
+                  ✏️
+                </Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    tool === 'pen' && styles.toolLabelActive,
+                  ]}
+                >
+                  Pen
+                </Text>
+              </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.toolItem}
-          activeOpacity={0.7}
-          onPress={handleTidy}
-        >
-          <Text style={[styles.toolIcon, styles.goldSparkle]}>✨</Text>
-          <Text style={styles.toolLabel}>Tidy</Text>
-        </TouchableOpacity>
+              {/* [Highlighter] */}
+              <TouchableOpacity
+                style={[
+                  styles.toolItem,
+                  tool === 'highlighter' && styles.toolItemActive,
+                ]}
+                activeOpacity={0.7}
+                onPress={() => setTool('highlighter')}
+              >
+                <Text
+                  style={[
+                    styles.toolIcon,
+                    tool === 'highlighter' && styles.toolIconActive,
+                  ]}
+                >
+                  🖍️
+                </Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    tool === 'highlighter' && styles.toolLabelActive,
+                  ]}
+                >
+                  Highlighter
+                </Text>
+              </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.toolItem}
-          activeOpacity={0.7}
-          onPress={handleToggleSqueeze}
-        >
-          <Text style={[styles.toolIcon, isSqueezed && styles.cyanText]}>
-            ≈
-          </Text>
-          <Text style={[styles.toolLabel, isSqueezed && styles.cyanText]}>
-            Squeeze
-          </Text>
-        </TouchableOpacity>
+              {/* [Eraser] */}
+              <TouchableOpacity
+                style={[
+                  styles.toolItem,
+                  tool === 'eraser' && styles.toolItemActive,
+                ]}
+                activeOpacity={0.7}
+                onPress={() => setTool('eraser')}
+              >
+                <Text
+                  style={[
+                    styles.toolIcon,
+                    tool === 'eraser' && styles.toolIconActive,
+                  ]}
+                >
+                  🧹
+                </Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    tool === 'eraser' && styles.toolLabelActive,
+                  ]}
+                >
+                  Eraser
+                </Text>
+              </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.toolItem}
-          activeOpacity={0.7}
-          onPress={handleCyclePattern}
-        >
-          <Text style={styles.toolIcon}>⠿</Text>
-          <Text style={styles.toolLabel}>Pattern</Text>
-        </TouchableOpacity>
+              {/* [Lasso] */}
+              <TouchableOpacity
+                style={[
+                  styles.toolItem,
+                  tool === 'lasso' && styles.toolItemActive,
+                ]}
+                activeOpacity={0.7}
+                onPress={() => setTool('lasso')}
+              >
+                <Text
+                  style={[
+                    styles.toolIcon,
+                    tool === 'lasso' && styles.toolIconActive,
+                  ]}
+                >
+                  ➰
+                </Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    tool === 'lasso' && styles.toolLabelActive,
+                  ]}
+                >
+                  Lasso
+                </Text>
+              </TouchableOpacity>
+            </>
+          )}
 
-        <TouchableOpacity
-          style={styles.toolItem}
-          activeOpacity={0.7}
-          onPress={() => {
-            thinkspaceRef.current?.zoomToFit?.();
-          }}
-        >
-          <Text style={styles.toolIcon}>⊝</Text>
-          <Text style={styles.toolLabel}>Zoom Out</Text>
-        </TouchableOpacity>
+          {activeNav === 'document' && (
+            <>
+              {/* [Lasso] */}
+              <TouchableOpacity
+                style={[
+                  styles.toolItem,
+                  tool === 'lasso' && styles.toolItemActive,
+                ]}
+                activeOpacity={0.7}
+                onPress={() => setTool('lasso')}
+              >
+                <Text
+                  style={[
+                    styles.toolIcon,
+                    tool === 'lasso' && styles.toolIconActive,
+                  ]}
+                >
+                  ➰
+                </Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    tool === 'lasso' && styles.toolLabelActive,
+                  ]}
+                >
+                  Lasso
+                </Text>
+              </TouchableOpacity>
 
-        {/* 
-          ── Add to Workspace / Notebook Page (Hidden for now) ──────────────────
-          Hidden for now as requested. To re-enable the "Add to Workspace / Add Page"
-          option in the bottom toolbar later, simply uncomment the TouchableOpacity below.
-        */}
-        {/*
-        <TouchableOpacity
-          style={styles.toolItem}
-          activeOpacity={0.7}
-          onPress={() => setIsAddMenuOpen(true)}
-        >
-          <Text style={[styles.toolIcon, styles.goldSparkle]}>📋</Text>
-          <Text style={[styles.toolLabel, styles.cyanText]}>Add Page</Text>
-        </TouchableOpacity>
-        */}
-      </View>
+              {/* [Documents] */}
+              <TouchableOpacity
+                style={[
+                  styles.toolItem,
+                  isDocsModalOpen && styles.toolItemActive,
+                ]}
+                activeOpacity={0.7}
+                onPress={() => setIsDocsModalOpen(true)}
+              >
+                <Text
+                  style={[
+                    styles.toolIcon,
+                    isDocsModalOpen && styles.toolIconActive,
+                  ]}
+                >
+                  📑
+                </Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    isDocsModalOpen && styles.toolLabelActive,
+                  ]}
+                >
+                  Documents
+                </Text>
+              </TouchableOpacity>
 
-      {/* ── Bottom Navigation Bar matching Screenshot ─────────────────────── */}
-      <View style={styles.bottomNav}>
-        <TouchableOpacity
-          style={[
-            styles.navTab,
-            activeNav === 'drawing' && styles.navTabActive,
-          ]}
-          activeOpacity={0.8}
-          onPress={() => handleSelectNav('drawing')}
-        >
-          <Text style={styles.navIcon}>✏️</Text>
-          <Text
+              {/* [HiLiteView] */}
+              <TouchableOpacity
+                style={[styles.toolItem, isSqueezed && styles.toolItemActive]}
+                activeOpacity={0.7}
+                onPress={handleToggleSqueeze}
+              >
+                <Text style={[styles.toolIcon, isSqueezed && styles.cyanText]}>
+                  ≈
+                </Text>
+                <Text style={[styles.toolLabel, isSqueezed && styles.cyanText]}>
+                  HiLiteView
+                </Text>
+              </TouchableOpacity>
+
+              {/* [Text Box] */}
+              <TouchableOpacity
+                style={styles.toolItem}
+                activeOpacity={0.7}
+                onPress={handleAddTextBox}
+              >
+                <Text style={[styles.toolIcon, styles.boldA]}>A</Text>
+                <Text style={styles.toolLabel}>Text Box</Text>
+              </TouchableOpacity>
+
+              {/* [Page Editor] */}
+              <TouchableOpacity
+                style={[
+                  styles.toolItem,
+                  isPageEditorOpen && styles.toolItemActive,
+                ]}
+                activeOpacity={0.7}
+                onPress={() => setIsPageEditorOpen(true)}
+              >
+                <Text
+                  style={[
+                    styles.toolIcon,
+                    isPageEditorOpen && styles.toolIconActive,
+                  ]}
+                >
+                  📄
+                </Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    isPageEditorOpen && styles.toolLabelActive,
+                  ]}
+                >
+                  Page Editor
+                </Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {activeNav === 'workspace' && (
+            <>
+              {/* [Workspaces] */}
+              <TouchableOpacity
+                style={[
+                  styles.toolItem,
+                  isWorkspacesModalOpen && styles.toolItemActive,
+                ]}
+                activeOpacity={0.7}
+                onPress={() => setIsWorkspacesModalOpen(true)}
+              >
+                <Text
+                  style={[
+                    styles.toolIcon,
+                    isWorkspacesModalOpen && styles.toolIconActive,
+                  ]}
+                >
+                  ⊞
+                </Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    isWorkspacesModalOpen && styles.toolLabelActive,
+                  ]}
+                >
+                  Workspaces
+                </Text>
+              </TouchableOpacity>
+
+              {/* [Text Box] */}
+              <TouchableOpacity
+                style={styles.toolItem}
+                activeOpacity={0.7}
+                onPress={handleAddTextBox}
+              >
+                <Text style={[styles.toolIcon, styles.boldA]}>A</Text>
+                <Text style={styles.toolLabel}>Text Box</Text>
+              </TouchableOpacity>
+
+              {/* [Zoom Out] */}
+              <TouchableOpacity
+                style={styles.toolItem}
+                activeOpacity={0.7}
+                onPress={() => {
+                  thinkspaceRef.current?.zoomToFit?.();
+                }}
+              >
+                <Text style={styles.toolIcon}>⊝</Text>
+                <Text style={styles.toolLabel}>Zoom Out</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+
+        {/* ── Bottom Navigation Bar matching Screenshot ─────────────────────── */}
+        <View style={styles.bottomNav}>
+          <TouchableOpacity
             style={[
-              styles.navLabel,
-              activeNav === 'drawing' && styles.navLabelActive,
+              styles.navTab,
+              activeNav === 'drawing' && styles.navTabActive,
             ]}
+            activeOpacity={0.8}
+            onPress={() => handleSelectNav('drawing')}
           >
-            Drawing
-          </Text>
-        </TouchableOpacity>
+            <Text style={styles.navIcon}>✏️</Text>
+            <Text
+              style={[
+                styles.navLabel,
+                activeNav === 'drawing' && styles.navLabelActive,
+              ]}
+            >
+              Drawing
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[
-            styles.navTab,
-            activeNav === 'document' && styles.navTabActive,
-          ]}
-          activeOpacity={0.8}
-          onPress={() => handleSelectNav('document')}
-        >
-          <Text style={styles.navIcon}>📄</Text>
-          <Text
+          <TouchableOpacity
             style={[
-              styles.navLabel,
-              activeNav === 'document' && styles.navLabelActive,
+              styles.navTab,
+              activeNav === 'document' && styles.navTabActive,
             ]}
+            activeOpacity={0.8}
+            onPress={() => handleSelectNav('document')}
           >
-            Document
-          </Text>
-        </TouchableOpacity>
+            <Text style={styles.navIcon}>📄</Text>
+            <Text
+              style={[
+                styles.navLabel,
+                activeNav === 'document' && styles.navLabelActive,
+              ]}
+            >
+              Document
+            </Text>
+          </TouchableOpacity>
 
+          <TouchableOpacity
+            style={[
+              styles.navTab,
+              activeNav === 'workspace' && styles.navTabActive,
+            ]}
+            activeOpacity={0.8}
+            onPress={() => handleSelectNav('workspace')}
+          >
+            <Text
+              style={[
+                styles.navIconHex,
+                activeNav === 'workspace' && styles.navIconActive,
+              ]}
+            >
+              ⬡
+            </Text>
+            <Text
+              style={[
+                styles.navLabel,
+                activeNav === 'workspace' && styles.navLabelActive,
+              ]}
+            >
+              Workspace
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </Animated.View>
+
+      {/* ── Documents Switcher & Manager Modal ─────────────────────────────── */}
+      <Modal
+        visible={isDocsModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsDocsModalOpen(false)}
+      >
         <TouchableOpacity
-          style={[
-            styles.navTab,
-            activeNav === 'workspace' && styles.navTabActive,
-          ]}
-          activeOpacity={0.8}
-          onPress={() => handleSelectNav('workspace')}
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setIsDocsModalOpen(false)}
         >
-          <Text
-            style={[
-              styles.navIconHex,
-              activeNav === 'workspace' && styles.navIconActive,
-            ]}
-          >
-            ⬡
-          </Text>
-          <Text
-            style={[
-              styles.navLabel,
-              activeNav === 'workspace' && styles.navLabelActive,
-            ]}
-          >
-            Workspace
-          </Text>
+          <View style={styles.addMenuCard}>
+            <View style={styles.menuHeader}>
+              <Text style={styles.menuTitle}>Documents in Workspace</Text>
+              <TouchableOpacity onPress={() => setIsDocsModalOpen(false)}>
+                <Text style={styles.closeBtn}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {workspaceDocs.length === 0 ? (
+              <View style={styles.emptyDocsContainer}>
+                <Text style={styles.emptyDocsText}>
+                  No documents in this workspace yet.
+                </Text>
+              </View>
+            ) : (
+              workspaceDocs.map((doc) => {
+                const isActive = doc.id === activeDocId;
+                return (
+                  <TouchableOpacity
+                    key={doc.id}
+                    style={[styles.docItem, isActive && styles.docItemActive]}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      setActiveDocId(doc.id);
+                      setPdfUri(doc.uri);
+                      setIsDocsModalOpen(false);
+                    }}
+                  >
+                    <View style={styles.menuItemRow}>
+                      <View
+                        style={[
+                          styles.docDot,
+                          { backgroundColor: doc.colorAccent || '#00ADB5' },
+                        ]}
+                      />
+                      <View>
+                        <Text style={styles.docTitleText}>{doc.title}</Text>
+                        <Text style={styles.docPagesText}>
+                          {doc.pageCount} pages
+                        </Text>
+                      </View>
+                    </View>
+                    {isActive && (
+                      <Text style={styles.activeBadge}>✓ Active</Text>
+                    )}
+                  </TouchableOpacity>
+                );
+              })
+            )}
+
+            <TouchableOpacity
+              style={styles.menuItemPrimary}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsDocsModalOpen(false);
+                handleImportPdf();
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>➕</Text>
+                <Text style={styles.menuItemTextPrimary}>
+                  Import PDF Document
+                </Text>
+              </View>
+              <Text style={styles.arrowIcon}>›</Text>
+            </TouchableOpacity>
+          </View>
         </TouchableOpacity>
-      </View>
+      </Modal>
+
+      {/* ── Workspaces Manager Modal ───────────────────────────────────────── */}
+      <Modal
+        visible={isWorkspacesModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsWorkspacesModalOpen(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setIsWorkspacesModalOpen(false)}
+        >
+          <View style={styles.addMenuCard}>
+            <View style={styles.menuHeader}>
+              <Text style={styles.menuTitle}>Workspaces</Text>
+              <TouchableOpacity onPress={() => setIsWorkspacesModalOpen(false)}>
+                <Text style={styles.closeBtn}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={[styles.docItem, styles.docItemActive]}>
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>⊞</Text>
+                <View>
+                  <Text style={styles.docTitleText}>
+                    Main Project Workspace
+                  </Text>
+                  <Text style={styles.docPagesText}>
+                    {workspaceDocs.length} Documents · {excerpts.length}{' '}
+                    Excerpts
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.activeBadge}>✓ Active</Text>
+            </View>
+
+            <TouchableOpacity
+              style={[styles.menuItem, styles.workspaceActionItem]}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsWorkspacesModalOpen(false);
+                thinkspaceRef.current?.zoomToFit?.();
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>⊝</Text>
+                <Text style={styles.menuItemText}>
+                  Zoom to Fit All Elements
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.menuItem, styles.workspaceActionItemSmall]}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsWorkspacesModalOpen(false);
+                handleTidy();
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>✨</Text>
+                <Text style={styles.menuItemText}>Tidy Workspace Canvas</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ── Page Editor Modal ──────────────────────────────────────────────── */}
+      <Modal
+        visible={isPageEditorOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsPageEditorOpen(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setIsPageEditorOpen(false)}
+        >
+          <View style={styles.addMenuCard}>
+            <View style={styles.menuHeader}>
+              <Text style={styles.menuTitle}>Page Editor</Text>
+              <TouchableOpacity onPress={() => setIsPageEditorOpen(false)}>
+                <Text style={styles.closeBtn}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.menuItemPrimary}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsPageEditorOpen(false);
+                setIsStylePickerOpen(true);
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>📄</Text>
+                <Text style={styles.menuItemTextPrimary}>
+                  Add Notebook Page
+                </Text>
+              </View>
+              <Text style={styles.arrowIcon}>›</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.menuItem}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsPageEditorOpen(false);
+                handleToggleSqueeze();
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>≈</Text>
+                <Text style={styles.menuItemText}>
+                  {isSqueezed
+                    ? 'Exit HiLiteView (Expand All)'
+                    : 'Toggle HiLiteView (Compress)'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.menuItem}
+              activeOpacity={0.8}
+              onPress={() => {
+                setIsPageEditorOpen(false);
+                handleCyclePattern();
+              }}
+            >
+              <View style={styles.menuItemRow}>
+                <Text style={styles.menuItemIcon}>⠿</Text>
+                <Text style={styles.menuItemText}>
+                  Change Canvas Pattern ({pattern})
+                </Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {/* ── Add to Workspace Modal (Step 2 of UX Reference) ─────────────── */}
       <Modal
@@ -715,6 +1242,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#0A101D',
   },
   topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
     paddingTop: StatusBar.currentHeight ?? 24,
     height: 48 + (StatusBar.currentHeight ?? 24),
     backgroundColor: '#0F172A',
@@ -753,8 +1284,17 @@ const styles = StyleSheet.create({
     color: '#64748B',
   },
   workspaceWrapper: {
-    flex: 1,
+    position: 'absolute',
+    left: 0,
+    right: 0,
     backgroundColor: '#0A101D',
+  },
+  bottomChromeContainer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    zIndex: 100,
   },
   nativeWorkspace: {
     flex: 1,
@@ -798,6 +1338,67 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     fontSize: 10.5,
     fontWeight: '500',
+  },
+  toolItemActive: {
+    backgroundColor: 'rgba(0, 173, 181, 0.16)',
+    borderRadius: 8,
+  },
+  toolIconActive: {
+    color: '#00ADB5',
+  },
+  toolLabelActive: {
+    color: '#00ADB5',
+    fontWeight: '700',
+  },
+  docItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: '#1E293B',
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  docItemActive: {
+    borderColor: '#00ADB5',
+    backgroundColor: 'rgba(0, 173, 181, 0.12)',
+  },
+  docDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  docTitleText: {
+    color: '#F8FAFC',
+    fontSize: 13.5,
+    fontWeight: '600',
+  },
+  docPagesText: {
+    color: '#94A3B8',
+    fontSize: 11.5,
+    marginTop: 2,
+  },
+  activeBadge: {
+    color: '#00ADB5',
+    fontSize: 12.5,
+    fontWeight: '700',
+  },
+  emptyDocsContainer: {
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  emptyDocsText: {
+    color: '#94A3B8',
+    fontSize: 13,
+  },
+  workspaceActionItem: {
+    marginTop: 8,
+  },
+  workspaceActionItemSmall: {
+    marginTop: 4,
   },
   bottomNav: {
     height: 54,

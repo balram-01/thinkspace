@@ -103,6 +103,10 @@ export type NotebookPageDeletedEvent = Readonly<{
   id: string;
 }>;
 
+export type ToggleImmersiveEvent = Readonly<{
+  isImmersive: boolean;
+}>;
+
 export interface NativeProps extends ViewProps {
   documentJson?: string;
   annotationsJson?: string;
@@ -111,6 +115,8 @@ export interface NativeProps extends ViewProps {
   /** The document ID currently active in the PDF viewport. */
   activeDocumentId?: string;
   isSqueezed?: boolean;
+  /** Immersive distraction-free full content mode. */
+  isImmersive?: boolean;
   splitRatio?: Float;
   activeTool?: string;
   selectedColor?: string;
@@ -140,6 +146,8 @@ export interface NativeProps extends ViewProps {
   onNotebookPageDeleted?: DirectEventHandler<NotebookPageDeletedEvent>;
   /** Fired when user taps a source badge on a card — native requests doc switch. */
   onRequestDocumentSwitch?: DirectEventHandler<RequestDocumentSwitchEvent>;
+  /** Fired when user taps content to toggle immersive mode. */
+  onToggleImmersive?: DirectEventHandler<ToggleImmersiveEvent>;
 }
 
 export default codegenNativeComponent<NativeProps>('ThinkspaceView');

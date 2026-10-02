@@ -30,6 +30,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     activeDocumentId,
     annotations = [],
     isSqueezed = false,
+    isImmersive = false,
     splitRatio = 0.45,
     activeTool = 'select',
     selectedColor = '#00ADB5',
@@ -58,6 +59,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     onNotebookPageMoved,
     onNotebookPageDeleted,
     onRequestDocumentSwitch,
+    onToggleImmersive,
   } = props;
 
   const nativeRef = useRef<any>(null);
@@ -127,6 +129,24 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         ]);
       }
     },
+    toggleImmersiveMode: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.toggleImmersiveMode ?? 9;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, []);
+      }
+    },
+    setImmersiveMode: (enabled: boolean) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.setImmersiveMode ?? 10;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [enabled]);
+      }
+    },
   }));
 
   // ── Serialized JSON props ─────────────────────────────────────────────────
@@ -177,6 +197,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
       }
       annotationsJson={annotationsJson}
       isSqueezed={isSqueezed}
+      isImmersive={isImmersive}
       splitRatio={splitRatio}
       activeTool={activeTool}
       selectedColor={selectedColor}
@@ -341,6 +362,13 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
           ? (e: any) => {
               const { documentId, sourcePageNumber, cardId } = e.nativeEvent;
               onRequestDocumentSwitch({ documentId, sourcePageNumber, cardId });
+            }
+          : undefined
+      }
+      onToggleImmersive={
+        onToggleImmersive
+          ? (e: any) => {
+              onToggleImmersive(e.nativeEvent.isImmersive);
             }
           : undefined
       }

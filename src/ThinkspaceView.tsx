@@ -302,6 +302,8 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
     onNotebookPageAdded,
     onNotebookPageMoved: _onNotebookPageMoved, // eslint-disable-line @typescript-eslint/no-unused-vars
     onNotebookPageDeleted: _onNotebookPageDeleted, // eslint-disable-line @typescript-eslint/no-unused-vars
+    isImmersive: propIsImmersive = false,
+    onToggleImmersive,
   } = props;
   const canvasRef = useRef<any>(null);
 
@@ -323,6 +325,27 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
 
   const historyStack = useRef<{ undo: () => void; redo: () => void }[]>([]);
   const redoStack = useRef<{ undo: () => void; redo: () => void }[]>([]);
+
+  const [_isImmersive, setIsImmersive] = useState(propIsImmersive);
+  useEffect(() => {
+    setIsImmersive(propIsImmersive);
+  }, [propIsImmersive]);
+
+  const toggleImmersiveMode = useCallback(() => {
+    setIsImmersive((prev) => {
+      const next = !prev;
+      onToggleImmersive?.(next);
+      return next;
+    });
+  }, [onToggleImmersive]);
+
+  const setImmersiveMode = useCallback(
+    (enabled: boolean) => {
+      setIsImmersive(enabled);
+      onToggleImmersive?.(enabled);
+    },
+    [onToggleImmersive]
+  );
 
   const [localNotebookPages, setLocalNotebookPages] =
     useState<any[]>(notebookPages);
@@ -373,6 +396,8 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
       setLocalNotebookPages((prev) => [...prev, newPage]);
       onNotebookPageAdded?.(newPage);
     },
+    toggleImmersiveMode,
+    setImmersiveMode,
   }));
 
   const [splitRatio, setSplitRatio] = useState(propSplitRatio);
