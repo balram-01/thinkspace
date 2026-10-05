@@ -276,24 +276,30 @@ data class NativePdfSelection(
   val calloutTagsBtn: RectF = RectF(),
   val calloutSubCardRect: RectF = RectF(),
   val calloutMainCardRect: RectF = RectF(),
-  val calloutRainbowBtn: RectF = RectF()
+  val calloutRainbowBtn: RectF = RectF(),
+  val calloutCommentBtn: RectF = RectF(),
+  val calloutBookmarkBtn: RectF = RectF(),
+  val calloutClearBtn: RectF = RectF()
 )
 
 data class CalloutLayoutResult(
   val calloutRect: RectF,
-  val closeBtn: RectF,
+  val closeBtn: RectF = RectF(),
   val excerptBtn: RectF,
-  val copyBtn: RectF,
-  val highlightBtn: RectF,
-  val addWordLeftBtn: RectF,
-  val addWordRightBtn: RectF,
-  val selectAllBtn: RectF,
+  val copyBtn: RectF = RectF(),
+  val highlightBtn: RectF = RectF(),
+  val addWordLeftBtn: RectF = RectF(),
+  val addWordRightBtn: RectF = RectF(),
+  val selectAllBtn: RectF = RectF(),
   val colorBtns: List<Pair<RectF, Int>>,
   val moreBtn: RectF = RectF(),
   val tagsBtn: RectF = RectF(),
   val subCardRect: RectF = RectF(),
   val mainCardRect: RectF = RectF(),
-  val rainbowBtn: RectF = RectF()
+  val rainbowBtn: RectF = RectF(),
+  val commentBtn: RectF = RectF(),
+  val bookmarkBtn: RectF = RectF(),
+  val clearBtn: RectF = RectF()
 )
 
 data class NativeCropSelection(
@@ -310,7 +316,10 @@ data class NativeCropSelection(
   var color: Int = Color.parseColor("#3B82F6"),
   val dimensionsText: String = "",
   val holdAndDragRect: RectF = RectF(),
-  val calloutColorBtns: MutableList<Pair<RectF, Int>> = mutableListOf()
+  val calloutColorBtns: MutableList<Pair<RectF, Int>> = mutableListOf(),
+  val calloutMoreBtn: RectF = RectF(),
+  val calloutRainbowBtn: RectF = RectF(),
+  val calloutClearBtn: RectF = RectF()
 )
 
 /**
@@ -682,8 +691,13 @@ class ThinkspaceView : View {
   private var docMode: String = "text"
 
   // Display density & subheader metrics
+  var showDocumentHeader: Boolean = false
+    set(value) {
+      field = value
+      invalidate()
+    }
   private val density: Float get() = context.resources.displayMetrics.density
-  private val subheaderH: Float get() = 48f * density
+  private val subheaderH: Float get() = if (showDocumentHeader) 48f * density else 0f
 
   // LiquidText Real PDF Document Compression Engine
   val compressionEngine by lazy { DocumentCompressionEngine(density) }
@@ -1349,43 +1363,62 @@ class ThinkspaceView : View {
   }
 
   private fun recomputeCropCalloutRects(sel: NativeCropSelection) {
-    val cW = min(width - 24f * density, 340f * density)
-    val cH = 64f * density
-    val cLeft = (sel.screenRect.centerX() - cW / 2f).coerceIn(12f * density, width - cW - 12f * density)
+    val d = density
+    val maxAvailW = width - 24f * d
+    val cW = min(maxAvailW, 316f * d)
+    val cH = 66f * d
+    val cLeft = (sel.screenRect.centerX() - cW / 2f).coerceIn(12f * d, max(12f * d, width - cW - 12f * d))
     val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
-    val cTop = if (sel.screenRect.top - cH - 12f * density >= subheaderH) {
-      sel.screenRect.top - cH - 12f * density
+    val cTop = if (sel.screenRect.top - cH - 12f * d >= subheaderH) {
+      sel.screenRect.top - cH - 12f * d
     } else {
-      min(sel.screenRect.bottom + 12f * density, (splitY - cH - 14f * density).coerceAtLeast(subheaderH))
+      min(sel.screenRect.bottom + 12f * d, (splitY - cH - 14f * d).coerceAtLeast(subheaderH))
     }
     sel.calloutRect.set(cLeft, cTop, cLeft + cW, cTop + cH)
 
-    // Row 1: Actions (Highlight, AutoExcerpt, Comment, Bookmark, Close)
-    sel.calloutHighlightBtn.set(cLeft + 8f * density, cTop + 6f * density, cLeft + 72f * density, cTop + 30f * density)
-    sel.calloutExcerptBtn.set(cLeft + 76f * density, cTop + 6f * density, cLeft + 164f * density, cTop + 30f * density)
-    sel.calloutCommentBtn.set(cLeft + 168f * density, cTop + 6f * density, cLeft + 232f * density, cTop + 30f * density)
-    sel.calloutBookmarkBtn.set(cLeft + 236f * density, cTop + 6f * density, cLeft + 304f * density, cTop + 30f * density)
-    sel.calloutCloseBtn.set(cLeft + cW - 32f * density, cTop + 6f * density, cLeft + cW - 6f * density, cTop + 30f * density)
+    // Row 1: Comment | AutoExcerpt | Bookmark | •••
+    val r1Top = cTop + 4f * d
+    val r1Bottom = cTop + 32f * d
+    val moreBtnW = 32f * d
+    sel.calloutMoreBtn.set(cLeft + cW - 12f * d - moreBtnW, r1Top, cLeft + cW - 10f * d, r1Bottom)
 
-    // Row 2: Color swatches & Tags
+    val r1Left = cLeft + 12f * d
+    val commentBtnW = 70f * d
+    val excerptBtnW = 92f * d
+    val bookmarkBtnW = 76f * d
+
+    sel.calloutCommentBtn.set(r1Left, r1Top, r1Left + commentBtnW, r1Bottom)
+    sel.calloutExcerptBtn.set(sel.calloutCommentBtn.right + 4f * d, r1Top, sel.calloutCommentBtn.right + 4f * d + excerptBtnW, r1Bottom)
+    sel.calloutBookmarkBtn.set(sel.calloutExcerptBtn.right + 4f * d, r1Top, min(sel.calloutMoreBtn.left - 4f * d, sel.calloutExcerptBtn.right + 4f * d + bookmarkBtnW), r1Bottom)
+
+    // Row 2: Color swatches (5) + Clear swatch + Rainbow swatch + Divider + Tags
+    val r2CenterY = cTop + 48f * d
+    val touchRad = 13f * d
+    val pitch = ((cW - 130f * d) / 7f).coerceIn(21f * d, 25f * d)
+    val swatchStartX = cLeft + 18f * d
+
     sel.calloutColorBtns.clear()
     val palette = listOf(
       Color.parseColor("#EF4444"), // Red
       Color.parseColor("#22C55E"), // Green
       Color.parseColor("#3B82F6"), // Blue
-      Color.parseColor("#EAB308"), // Yellow
-      Color.parseColor("#EC4899"), // Pink
-      Color.parseColor("#FFFFFF")  // White
+      Color.parseColor("#F59E0B"), // Yellow
+      Color.parseColor("#EC4899")  // Pink
     )
-    val rad = 9f * density
-    val spacing = 24f * density
     for (i in palette.indices) {
-      val cx = cLeft + 18f * density + i * spacing
-      val cy = cTop + 47f * density
-      sel.calloutColorBtns.add(Pair(RectF(cx - rad - 4f * density, cy - rad - 4f * density, cx + rad + 4f * density, cy + rad + 4f * density), palette[i]))
+      val cx = swatchStartX + i * pitch
+      sel.calloutColorBtns.add(Pair(RectF(cx - touchRad, r2CenterY - touchRad, cx + touchRad, r2CenterY + touchRad), palette[i]))
     }
-    sel.calloutTagsBtn.set(cLeft + 180f * density, cTop + 35f * density, cLeft + 242f * density, cTop + 57f * density)
-    sel.holdAndDragRect.set(sel.screenRect.left, sel.screenRect.top - 24f * density, sel.screenRect.left + 115f * density, sel.screenRect.top - 4f * density)
+    val clearCx = swatchStartX + palette.size * pitch
+    sel.calloutClearBtn.set(clearCx - touchRad, r2CenterY - touchRad, clearCx + touchRad, r2CenterY + touchRad)
+
+    val rainbowCx = clearCx + pitch
+    sel.calloutRainbowBtn.set(rainbowCx - touchRad, r2CenterY - touchRad, rainbowCx + touchRad, r2CenterY + touchRad)
+
+    val tagsLeft = rainbowCx + touchRad + 8f * d
+    sel.calloutTagsBtn.set(tagsLeft, cTop + 34f * d, cLeft + cW - 10f * d, cTop + 62f * d)
+
+    sel.holdAndDragRect.set(sel.screenRect.left, sel.screenRect.top - 24f * d, sel.screenRect.left + 115f * d, sel.screenRect.top - 4f * d)
   }
 
   /**
@@ -1650,18 +1683,14 @@ class ThinkspaceView : View {
     val colors = customColors ?: listOf(
       Color.parseColor("#EF4444"), // Red
       Color.parseColor("#22C55E"), // Green
-      Color.parseColor("#2563EB"), // Blue
-      Color.parseColor("#FACC15"), // Yellow
-      Color.parseColor("#EC4899"), // Magenta / Pink
-      Color.WHITE                  // White
+      Color.parseColor("#3B82F6"), // Blue
+      Color.parseColor("#F59E0B"), // Yellow
+      Color.parseColor("#EC4899")  // Pink
     )
 
-    val maxAvailW = width - 16f * d
-    val cW = maxAvailW.coerceIn(340f * d, 420f * d)
-    val card1H = 104f * d
-    val subCardH = 46f * d
-    val subCardGap = 8f * d
-    val totalH = card1H + subCardGap + subCardH
+    val maxAvailW = width - 24f * d
+    val cW = min(maxAvailW, 316f * d)
+    val cH = 66f * d
 
     val minX = rects.minOfOrNull { it.left } ?: (width / 2f)
     val maxX = rects.maxOfOrNull { it.right } ?: (width / 2f)
@@ -1669,110 +1698,69 @@ class ThinkspaceView : View {
     val lastR = rects.lastOrNull() ?: firstR
 
     val idealLeft = (minX + maxX) / 2f - cW / 2f
-    val cLeft = idealLeft.coerceIn(8f * d, max(8f * d, width - cW - 8f * d))
+    val cLeft = idealLeft.coerceIn(12f * d, max(12f * d, width - cW - 12f * d))
 
     val gapY = 12f * d
-    val minTop = subheaderH + 4f * d
-    val maxBottom = height * splitRatio - totalH - 8f * d
-    val cTop = (if (firstR.top - totalH - gapY > subheaderH) firstR.top - totalH - gapY else lastR.bottom + gapY).coerceIn(minTop, max(minTop, maxBottom))
-    
-    val mainCardR = RectF(cLeft, cTop, cLeft + cW, cTop + card1H)
+    val minTop = subheaderH + 6f * d
+    val maxBottom = height * splitRatio - cH - 10f * d
+    val cTop = (if (firstR.top - cH - gapY > subheaderH) firstR.top - cH - gapY else lastR.bottom + gapY).coerceIn(minTop, max(minTop, maxBottom))
 
-    // Row 1: Chevron Down Close Button on top-right
-    val closeHitSize = 30f * d
-    val closeBtn = RectF(cLeft + cW - closeHitSize - 8f * d, cTop + 8f * d, cLeft + cW - 8f * d, cTop + 8f * d + closeHitSize)
+    val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
 
-    // Row 2: Actions (+ Excerpt, Copy, Highlight) and Aux controls (< Word, Word >, All, •••)
-    val padX = 10f * d
-    val row2Top = cTop + 58f * d
-    val row2H = 36f * d
-    val row2Bottom = row2Top + row2H
-    val innerW = cW - 2 * padX
+    // Row 1: Comment | AutoExcerpt | Bookmark | •••
+    val r1Top = cTop + 4f * d
+    val r1Bottom = cTop + 32f * d
+    val moreBtnW = 32f * d
+    val moreBtn = RectF(cLeft + cW - 12f * d - moreBtnW, r1Top, cLeft + cW - 10f * d, r1Bottom)
 
-    // Aux group on the right: divider (1dp), < Word, Word >, All, •••
-    val auxBtnH = 34f * d
-    val auxTop = row2Top + 1f * d
-    val auxBottom = auxTop + auxBtnH
-    
-    val wordBtnW = 40f * d
-    val allBtnW = 28f * d
-    val moreBtnW = 28f * d
-    val btnGap = 4f * d
-    val dividerW = 1f * d
-    val dividerMargin = 6f * d
-    
-    val auxTotalW = dividerMargin + dividerW + dividerMargin + wordBtnW + btnGap + wordBtnW + btnGap + allBtnW + btnGap + moreBtnW
-    
-    // Action group on the left: Excerpt, Copy, Highlight
-    val actionGroupW = innerW - auxTotalW - 6f * d
-    val actGap = 5f * d
-    val remActW = actionGroupW - 2 * actGap
-    val excerptW = remActW * 0.38f
-    val copyW = remActW * 0.28f
-    val hlW = remActW - excerptW - copyW
+    val r1Left = cLeft + 12f * d
+    val commentBtnW = 70f * d
+    val excerptBtnW = 92f * d
+    val bookmarkBtnW = 76f * d
 
-    val excerptBtn = RectF(cLeft + padX, row2Top, cLeft + padX + excerptW, row2Bottom)
-    val copyBtn = RectF(excerptBtn.right + actGap, row2Top, excerptBtn.right + actGap + copyW, row2Bottom)
-    val hlBtn = RectF(copyBtn.right + actGap, row2Top, copyBtn.right + actGap + hlW, row2Bottom)
+    val commentBtn = RectF(r1Left, r1Top, r1Left + commentBtnW, r1Bottom)
+    val excerptBtn = RectF(commentBtn.right + 4f * d, r1Top, commentBtn.right + 4f * d + excerptBtnW, r1Bottom)
+    val bookmarkBtn = RectF(excerptBtn.right + 4f * d, r1Top, min(moreBtn.left - 4f * d, excerptBtn.right + 4f * d + bookmarkBtnW), r1Bottom)
 
-    val auxStartX = hlBtn.right + 6f * d + dividerMargin + dividerW + dividerMargin
-    val addWordLeftBtn = RectF(auxStartX, auxTop, auxStartX + wordBtnW, auxBottom)
-    val addWordRightBtn = RectF(addWordLeftBtn.right + btnGap, auxTop, addWordLeftBtn.right + btnGap + wordBtnW, auxBottom)
-    val selectAllBtn = RectF(addWordRightBtn.right + btnGap, auxTop, addWordRightBtn.right + btnGap + allBtnW, auxBottom)
-    val moreBtn = RectF(selectAllBtn.right + btnGap, auxTop, selectAllBtn.right + btnGap + moreBtnW, auxBottom)
-
-    // Card 2: Sub-Card below Highlight
-    val subCardTop = mainCardR.bottom + subCardGap
-    val subCardBottom = subCardTop + subCardH
-    val subCardW = (320f * d).coerceAtMost(cW - 12f * d).coerceAtLeast(290f * d)
-    val idealSubLeft = hlBtn.centerX() - subCardW * 0.46f
-    val subCardLeft = idealSubLeft.coerceIn(cLeft + 6f * d, cLeft + cW - subCardW - 6f * d)
-    val subCardR = RectF(subCardLeft, subCardTop, subCardLeft + subCardW, subCardBottom)
-
-    // Swatches inside sub-card (7 swatches: 6 solid + 1 rainbow)
-    val swatchTouchRadius = 14f * d
-    val swatchRadius = 11f * d
-    val swatchPitch = 28f * d
-    val swatchStartX = subCardLeft + 14f * d + swatchRadius
-    val swatchCenterY = subCardTop + subCardH / 2f
+    // Row 2: Color swatches (5) + Clear swatch + Rainbow swatch + Divider + Tags
+    val r2CenterY = cTop + 48f * d
+    val touchRad = 13f * d
+    val pitch = ((cW - 130f * d) / 7f).coerceIn(21f * d, 25f * d)
+    val swatchStartX = cLeft + 18f * d
 
     val colorBtns = mutableListOf<Pair<RectF, Int>>()
     for (i in colors.indices) {
-      val cx = swatchStartX + i * swatchPitch
-      val touchRect = RectF(cx - swatchTouchRadius, swatchCenterY - swatchTouchRadius, cx + swatchTouchRadius, swatchCenterY + swatchTouchRadius)
-      colorBtns.add(Pair(touchRect, colors[i]))
+      val cx = swatchStartX + i * pitch
+      colorBtns.add(Pair(RectF(cx - touchRad, r2CenterY - touchRad, cx + touchRad, r2CenterY + touchRad), colors[i]))
     }
 
-    // 7th: Rainbow swatch
-    val rainbowCx = swatchStartX + colors.size * swatchPitch
-    val rainbowBtn = RectF(rainbowCx - swatchTouchRadius, swatchCenterY - swatchTouchRadius, rainbowCx + swatchTouchRadius, swatchCenterY + swatchTouchRadius)
+    val clearCx = swatchStartX + colors.size * pitch
+    val clearBtn = RectF(clearCx - touchRad, r2CenterY - touchRad, clearCx + touchRad, r2CenterY + touchRad)
 
-    // Tags button on right side of subCard
-    val tagsBtnLeft = rainbowBtn.right + 12f * d
-    val tagsBtn = RectF(tagsBtnLeft, subCardTop + 6f * d, subCardR.right - 8f * d, subCardBottom - 6f * d)
+    val rainbowCx = clearCx + pitch
+    val rainbowBtn = RectF(rainbowCx - touchRad, r2CenterY - touchRad, rainbowCx + touchRad, r2CenterY + touchRad)
 
-    val overallCalloutR = RectF(
-      min(mainCardR.left, subCardR.left),
-      mainCardR.top,
-      max(mainCardR.right, subCardR.right),
-      subCardR.bottom + 4f * d
-    )
+    val tagsLeft = rainbowCx + touchRad + 8f * d
+    val tagsBtn = RectF(tagsLeft, cTop + 34f * d, cLeft + cW - 10f * d, cTop + 62f * d)
 
     return CalloutLayoutResult(
-      calloutRect = overallCalloutR,
-      closeBtn = closeBtn,
+      calloutRect = calloutR,
+      closeBtn = RectF(),
       excerptBtn = excerptBtn,
-      copyBtn = copyBtn,
-      highlightBtn = hlBtn,
-      addWordLeftBtn = addWordLeftBtn,
-      addWordRightBtn = addWordRightBtn,
-      selectAllBtn = selectAllBtn,
+      copyBtn = moreBtn,
+      highlightBtn = colorBtns.firstOrNull()?.first ?: RectF(),
+      addWordLeftBtn = RectF(),
+      addWordRightBtn = RectF(),
+      selectAllBtn = RectF(),
       colorBtns = colorBtns,
       moreBtn = moreBtn,
       tagsBtn = tagsBtn,
-      subCardRect = subCardR,
-      mainCardRect = mainCardR,
-      rainbowBtn = rainbowBtn
+      subCardRect = RectF(),
+      mainCardRect = calloutR,
+      rainbowBtn = rainbowBtn,
+      commentBtn = commentBtn,
+      bookmarkBtn = bookmarkBtn,
+      clearBtn = clearBtn
     )
   }
 
@@ -1837,7 +1825,10 @@ class ThinkspaceView : View {
       calloutTagsBtn = layout.tagsBtn,
       calloutSubCardRect = layout.subCardRect,
       calloutMainCardRect = layout.mainCardRect,
-      calloutRainbowBtn = layout.rainbowBtn
+      calloutRainbowBtn = layout.rainbowBtn,
+      calloutCommentBtn = layout.commentBtn,
+      calloutBookmarkBtn = layout.bookmarkBtn,
+      calloutClearBtn = layout.clearBtn
     )
     invalidate()
   }
@@ -2451,6 +2442,180 @@ class ThinkspaceView : View {
     return Pair(camera.worldToScreenX(wx), camera.worldToScreenY(wy, canvasTopY))
   }
 
+  /**
+   * Draws the sleek, minimalist LiquidText-style selection callout bar matching competitor screenshot:
+   * - Rounded slate-gray pill background (#5A6B82) with subtle crisp border (#72849B) and layered drop shadows
+   * - Row 1: "Comment" | "AutoExcerpt" | "Bookmark" | "•••" (cyan dots)
+   * - Row 2: 5 bright color dots | Clear dot (white with slash) | Rainbow spectrum dot | "|" | "Tags"
+   */
+  private fun drawCompetitorSelectionCallout(
+    canvas: Canvas,
+    calloutR: RectF,
+    commentBtn: RectF,
+    excerptBtn: RectF,
+    bookmarkBtn: RectF,
+    moreBtn: RectF,
+    colorBtns: List<Pair<RectF, Int>>,
+    clearBtn: RectF,
+    rainbowBtn: RectF,
+    tagsBtn: RectF,
+    activeColor: Int
+  ) {
+    val d = density
+
+    // 1. Layered soft drop shadows
+    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    shadowPaint.color = Color.argb(35, 0, 0, 0)
+    canvas.drawRoundRect(calloutR.left - 1f * d, calloutR.top + 2f * d, calloutR.right + 1f * d, calloutR.bottom + 8f * d, 16f * d, 16f * d, shadowPaint)
+    shadowPaint.color = Color.argb(45, 0, 0, 0)
+    canvas.drawRoundRect(calloutR.left, calloutR.top + 1f * d, calloutR.right, calloutR.bottom + 4f * d, 14f * d, 14f * d, shadowPaint)
+
+    // 2. Slate-gray Card Background & Crisp Border
+    val cardBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#5A6B82")
+      style = Paint.Style.FILL
+    }
+    val cardBrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#72849B")
+      strokeWidth = 1f * d
+      style = Paint.Style.STROKE
+    }
+    canvas.drawRoundRect(calloutR, 14f * d, 14f * d, cardBgPaint)
+    canvas.drawRoundRect(calloutR, 14f * d, 14f * d, cardBrdPaint)
+
+    // 3. Row 1: Actions (Comment, AutoExcerpt, Bookmark, •••)
+    val actionTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      textSize = 12.5f * d
+      typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+      textAlign = Paint.Align.CENTER
+    }
+    val actFm = actionTextPaint.fontMetrics
+    val actShift = (actFm.descent + actFm.ascent) / 2f
+
+    // "Comment"
+    canvas.drawText("Comment", commentBtn.centerX(), commentBtn.centerY() - actShift, actionTextPaint)
+
+    // "AutoExcerpt"
+    canvas.drawText("AutoExcerpt", excerptBtn.centerX(), excerptBtn.centerY() - actShift, actionTextPaint)
+
+    // "Bookmark"
+    canvas.drawText("Bookmark", bookmarkBtn.centerX(), bookmarkBtn.centerY() - actShift, actionTextPaint)
+
+    // "•••" (More) in light cyan / blue dots matching reference screenshot
+    val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#38BDF8")
+      style = Paint.Style.FILL
+    }
+    val moreCx = moreBtn.centerX()
+    val moreCy = moreBtn.centerY()
+    val dotR = 2.2f * d
+    val dotSpacing = 5f * d
+    canvas.drawCircle(moreCx - dotSpacing, moreCy, dotR, dotPaint)
+    canvas.drawCircle(moreCx, moreCy, dotR, dotPaint)
+    canvas.drawCircle(moreCx + dotSpacing, moreCy, dotR, dotPaint)
+
+    // 4. Row 2: Color Swatches
+    val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    val swatchRad = 9.5f * d
+
+    for (cb in colorBtns) {
+      val cx = cb.first.centerX()
+      val cy = cb.first.centerY()
+      val col = cb.second
+      val isSelected = (col == activeColor)
+
+      // Active selection ring
+      if (isSelected) {
+        val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.WHITE
+          strokeWidth = 2f * d
+          style = Paint.Style.STROKE
+        }
+        canvas.drawCircle(cx, cy, swatchRad + 3f * d, haloPaint)
+      }
+
+      circlePaint.color = col
+      canvas.drawCircle(cx, cy, swatchRad, circlePaint)
+    }
+
+    // 5. Clear / Remove Highlight Swatch (White circle with diagonal slash)
+    val clearCx = clearBtn.centerX()
+    val clearCy = clearBtn.centerY()
+    circlePaint.color = Color.WHITE
+    canvas.drawCircle(clearCx, clearCy, swatchRad, circlePaint)
+    val slashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#64748B")
+      strokeWidth = 1.8f * d
+      strokeCap = Paint.Cap.ROUND
+    }
+    val slashLen = 5.5f * d
+    canvas.drawLine(clearCx - slashLen, clearCy + slashLen, clearCx + slashLen, clearCy - slashLen, slashPaint)
+
+    // 6. Rainbow Spectrum Swatch
+    val rainCx = rainbowBtn.centerX()
+    val rainCy = rainbowBtn.centerY()
+    val rainbowShader = android.graphics.SweepGradient(
+      rainCx, rainCy,
+      intArrayOf(
+        Color.parseColor("#EF4444"),
+        Color.parseColor("#F59E0B"),
+        Color.parseColor("#10B981"),
+        Color.parseColor("#3B82F6"),
+        Color.parseColor("#8B5CF6"),
+        Color.parseColor("#EC4899"),
+        Color.parseColor("#EF4444")
+      ),
+      null
+    )
+    val rainPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      shader = rainbowShader
+      style = Paint.Style.FILL
+    }
+    canvas.drawCircle(rainCx, rainCy, swatchRad, rainPaint)
+
+    // 7. Vertical Divider Line `|` before Tags
+    val divX = (rainCx + swatchRad + tagsBtn.left) / 2f
+    val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#78889B")
+      strokeWidth = 1f * d
+    }
+    canvas.drawLine(divX, clearCy - 9f * d, divX, clearCy + 9f * d, divPaint)
+
+    // 8. Tags Button: 🏷️ Tags
+    val tagPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      strokeWidth = 1.3f * d
+      strokeCap = Paint.Cap.ROUND
+      strokeJoin = Paint.Join.ROUND
+      style = Paint.Style.STROKE
+    }
+    val tagCy = clearCy
+    val tagLeft = tagsBtn.left + 2f * d
+    val tagPath = Path().apply {
+      moveTo(tagLeft + 2.5f * d, tagCy - 4.5f * d)
+      lineTo(tagLeft + 7.5f * d, tagCy - 4.5f * d)
+      lineTo(tagLeft + 11.5f * d, tagCy)
+      lineTo(tagLeft + 5.5f * d, tagCy + 5.5f * d)
+      lineTo(tagLeft + 2.5f * d, tagCy + 1.5f * d)
+      close()
+    }
+    canvas.drawPath(tagPath, tagPaint)
+    val tagHole = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      style = Paint.Style.FILL
+    }
+    canvas.drawCircle(tagLeft + 4.8f * d, tagCy - 1.8f * d, 0.9f * d, tagHole)
+
+    val tagsTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      textSize = 12f * d
+      typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+    val tagFm = tagsTextPaint.fontMetrics
+    canvas.drawText("Tags", tagLeft + 15f * d, tagCy - (tagFm.descent + tagFm.ascent) / 2f, tagsTextPaint)
+  }
+
   // ---------------------------------------------------------------------------
   // Master OnDraw (100% Native Kotlin Workspace)
   // ---------------------------------------------------------------------------
@@ -2479,127 +2644,129 @@ class ThinkspaceView : View {
       canvas.clipRect(0f, 0f, viewW, docBottomY)
       canvas.drawRect(0f, 0f, viewW, docBottomY, docBgPaint)
 
-      headerRect.set(0f, 0f, viewW, subheaderH)
-      canvas.drawRect(headerRect, docSubheaderBgPaint)
+      if (showDocumentHeader) {
+        headerRect.set(0f, 0f, viewW, subheaderH)
+        canvas.drawRect(headerRect, docSubheaderBgPaint)
 
-      val titleStr = activePdfDoc?.metadata?.title?.takeIf { it.isNotEmpty() }
-        ?: activeDocument?.title?.takeIf { it.isNotEmpty() }
-        ?: "PDF Document"
-      val pageTotal = activePdfDoc?.pageCount ?: activeDocument?.pageCount ?: 1
+        val titleStr = activePdfDoc?.metadata?.title?.takeIf { it.isNotEmpty() }
+          ?: activeDocument?.title?.takeIf { it.isNotEmpty() }
+          ?: "PDF Document"
+        val pageTotal = activePdfDoc?.pageCount ?: activeDocument?.pageCount ?: 1
 
-      // 1. Document Pill matching Screenshot [Kshitija_Resume (34) ▾]
-      val displayTitle = if (titleStr.length > 22) titleStr.substring(0, 20) + "... ▾" else "$titleStr ▾"
-      val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#00ADB5")
-        textSize = 13f * density
-        isFakeBoldText = true
+        // 1. Document Pill matching Screenshot [Kshitija_Resume (34) ▾]
+        val displayTitle = if (titleStr.length > 22) titleStr.substring(0, 20) + "... ▾" else "$titleStr ▾"
+        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#00ADB5")
+          textSize = 13f * density
+          isFakeBoldText = true
+        }
+        val pillW = titlePaint.measureText(displayTitle) + 20f * density
+        val btnTop = (subheaderH - 30f * density) / 2f
+        val btnBottom = btnTop + 30f * density
+
+        headerDocPillRect.set(12f * density, btnTop, 12f * density + pillW, btnBottom)
+        val docPillBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#0A2430")
+          style = Paint.Style.FILL
+        }
+        val docPillBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#00ADB5")
+          alpha = 150
+          strokeWidth = 1f * density
+          style = Paint.Style.STROKE
+        }
+        canvas.drawRoundRect(headerDocPillRect, 8f * density, 8f * density, docPillBg)
+        canvas.drawRoundRect(headerDocPillRect, 8f * density, 8f * density, docPillBorder)
+        titlePaint.textAlign = Paint.Align.CENTER
+        canvas.drawText(displayTitle, headerDocPillRect.centerX(), btnTop + 19.5f * density, titlePaint)
+
+        // Page Pill: p. 1/1
+        val curPageNum = (pageLayouts.firstOrNull { it.boundsOnScreen.bottom > subheaderH + 20f }?.pageNumber ?: 1).coerceIn(1, pageTotal)
+        val pageInd = "p. $curPageNum/$pageTotal"
+        val pageIndPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#94A3B8")
+          textSize = 12f * density
+          isFakeBoldText = true
+        }
+        canvas.drawText(pageInd, headerDocPillRect.right + 12f * density, btnTop + 19.5f * density, pageIndPaint)
+
+        // Right Side Controls matching Screenshot: [🔍 Search] then [✂ Crop] then [- 1:1 +] on far right
+        val zoomPillW = 86f * density
+        val zoomPillLeft = viewW - 12f * density - zoomPillW
+
+        val cropBtnW = 76f * density
+        val cropBtnLeft = zoomPillLeft - 8f * density - cropBtnW
+
+        val searchBtnW = if (viewW > 450f * density) 76f * density else 36f * density
+        val searchBtnLeft = cropBtnLeft - 8f * density - searchBtnW
+
+        // Search Mode Toggle [🔍 Search]
+        headerSearchRect.set(searchBtnLeft, btnTop, searchBtnLeft + searchBtnW, btnBottom)
+        val searchBg = if (isSearchActive) Color.parseColor("#00ADB5") else Color.parseColor("#0F172A")
+        val searchBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#00ADB5")
+          strokeWidth = 1.2f * density
+          style = Paint.Style.STROKE
+        }
+        canvas.drawRoundRect(headerSearchRect, 8f * density, 8f * density, Paint().apply { color = searchBg })
+        canvas.drawRoundRect(headerSearchRect, 8f * density, 8f * density, searchBorderPaint)
+        val searchIconPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = if (isSearchActive) Color.WHITE else Color.parseColor("#00ADB5")
+          textSize = 12f * density
+          textAlign = Paint.Align.CENTER
+          isFakeBoldText = true
+        }
+        val searchLabel = if (viewW > 450f * density) "🔍 Search" else "🔍"
+        canvas.drawText(searchLabel, headerSearchRect.centerX(), btnTop + 19.5f * density, searchIconPaint)
+
+        // Crop Mode Toggle [✂ Crop]
+        headerModeCropRect.set(cropBtnLeft, btnTop, cropBtnLeft + cropBtnW, btnBottom)
+        val cropBg = if (docMode == "crop") Color.parseColor("#00ADB5") else Color.parseColor("#0F172A")
+        val cropBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#00ADB5")
+          strokeWidth = 1.2f * density
+          style = Paint.Style.STROKE
+        }
+        canvas.drawRoundRect(headerModeCropRect, 8f * density, 8f * density, Paint().apply { color = cropBg })
+        canvas.drawRoundRect(headerModeCropRect, 8f * density, 8f * density, cropBorderPaint)
+        val cropTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = if (docMode == "crop") Color.WHITE else Color.parseColor("#00ADB5")
+          textSize = 12.5f * density
+          textAlign = Paint.Align.CENTER
+          isFakeBoldText = true
+        }
+        canvas.drawText("✂ Crop", headerModeCropRect.centerX(), btnTop + 19.5f * density, cropTextPaint)
+
+        // Segmented Zoom Pill [- 1:1 +] on far right
+        val zoomBgPaint = Paint().apply { color = Color.parseColor("#0F172A") }
+        val zoomBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#334155")
+          strokeWidth = 1f * density
+          style = Paint.Style.STROKE
+        }
+        val zoomFullRect = RectF(zoomPillLeft, btnTop, zoomPillLeft + zoomPillW, btnBottom)
+        canvas.drawRoundRect(zoomFullRect, 8f * density, 8f * density, zoomBgPaint)
+        canvas.drawRoundRect(zoomFullRect, 8f * density, 8f * density, zoomBorderPaint)
+
+        val zoomSegW = zoomPillW / 3f
+        headerZoomOutRect.set(zoomPillLeft, btnTop, zoomPillLeft + zoomSegW, btnBottom)
+        headerZoomResetRect.set(zoomPillLeft + zoomSegW, btnTop, zoomPillLeft + zoomSegW * 2f, btnBottom)
+        headerZoomInRect.set(zoomPillLeft + zoomSegW * 2f, btnTop, zoomPillLeft + zoomPillW, btnBottom)
+
+        // Segment dividing lines
+        canvas.drawLine(zoomPillLeft + zoomSegW, btnTop + 4f * density, zoomPillLeft + zoomSegW, btnBottom - 4f * density, zoomBorderPaint)
+        canvas.drawLine(zoomPillLeft + zoomSegW * 2f, btnTop + 4f * density, zoomPillLeft + zoomSegW * 2f, btnBottom - 4f * density, zoomBorderPaint)
+
+        val zoomTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#00ADB5")
+          textSize = 12f * density
+          textAlign = Paint.Align.CENTER
+          isFakeBoldText = true
+        }
+        canvas.drawText("-", headerZoomOutRect.centerX(), btnTop + 19.5f * density, zoomTextPaint)
+        canvas.drawText("1:1", headerZoomResetRect.centerX(), btnTop + 19.5f * density, zoomTextPaint)
+        canvas.drawText("+", headerZoomInRect.centerX(), btnTop + 19.5f * density, zoomTextPaint)
       }
-      val pillW = titlePaint.measureText(displayTitle) + 20f * density
-      val btnTop = (subheaderH - 30f * density) / 2f
-      val btnBottom = btnTop + 30f * density
-
-      headerDocPillRect.set(12f * density, btnTop, 12f * density + pillW, btnBottom)
-      val docPillBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#0A2430")
-        style = Paint.Style.FILL
-      }
-      val docPillBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#00ADB5")
-        alpha = 150
-        strokeWidth = 1f * density
-        style = Paint.Style.STROKE
-      }
-      canvas.drawRoundRect(headerDocPillRect, 8f * density, 8f * density, docPillBg)
-      canvas.drawRoundRect(headerDocPillRect, 8f * density, 8f * density, docPillBorder)
-      titlePaint.textAlign = Paint.Align.CENTER
-      canvas.drawText(displayTitle, headerDocPillRect.centerX(), btnTop + 19.5f * density, titlePaint)
-
-      // Page Pill: p. 1/1
-      val curPageNum = (pageLayouts.firstOrNull { it.boundsOnScreen.bottom > subheaderH + 20f }?.pageNumber ?: 1).coerceIn(1, pageTotal)
-      val pageInd = "p. $curPageNum/$pageTotal"
-      val pageIndPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#94A3B8")
-        textSize = 12f * density
-        isFakeBoldText = true
-      }
-      canvas.drawText(pageInd, headerDocPillRect.right + 12f * density, btnTop + 19.5f * density, pageIndPaint)
-
-      // Right Side Controls matching Screenshot: [🔍 Search] then [✂ Crop] then [- 1:1 +] on far right
-      val zoomPillW = 86f * density
-      val zoomPillLeft = viewW - 12f * density - zoomPillW
-
-      val cropBtnW = 76f * density
-      val cropBtnLeft = zoomPillLeft - 8f * density - cropBtnW
-
-      val searchBtnW = if (viewW > 450f * density) 76f * density else 36f * density
-      val searchBtnLeft = cropBtnLeft - 8f * density - searchBtnW
-
-      // Search Mode Toggle [🔍 Search]
-      headerSearchRect.set(searchBtnLeft, btnTop, searchBtnLeft + searchBtnW, btnBottom)
-      val searchBg = if (isSearchActive) Color.parseColor("#00ADB5") else Color.parseColor("#0F172A")
-      val searchBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#00ADB5")
-        strokeWidth = 1.2f * density
-        style = Paint.Style.STROKE
-      }
-      canvas.drawRoundRect(headerSearchRect, 8f * density, 8f * density, Paint().apply { color = searchBg })
-      canvas.drawRoundRect(headerSearchRect, 8f * density, 8f * density, searchBorderPaint)
-      val searchIconPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = if (isSearchActive) Color.WHITE else Color.parseColor("#00ADB5")
-        textSize = 12f * density
-        textAlign = Paint.Align.CENTER
-        isFakeBoldText = true
-      }
-      val searchLabel = if (viewW > 450f * density) "🔍 Search" else "🔍"
-      canvas.drawText(searchLabel, headerSearchRect.centerX(), btnTop + 19.5f * density, searchIconPaint)
-
-      // Crop Mode Toggle [✂ Crop]
-      headerModeCropRect.set(cropBtnLeft, btnTop, cropBtnLeft + cropBtnW, btnBottom)
-      val cropBg = if (docMode == "crop") Color.parseColor("#00ADB5") else Color.parseColor("#0F172A")
-      val cropBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#00ADB5")
-        strokeWidth = 1.2f * density
-        style = Paint.Style.STROKE
-      }
-      canvas.drawRoundRect(headerModeCropRect, 8f * density, 8f * density, Paint().apply { color = cropBg })
-      canvas.drawRoundRect(headerModeCropRect, 8f * density, 8f * density, cropBorderPaint)
-      val cropTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = if (docMode == "crop") Color.WHITE else Color.parseColor("#00ADB5")
-        textSize = 12.5f * density
-        textAlign = Paint.Align.CENTER
-        isFakeBoldText = true
-      }
-      canvas.drawText("✂ Crop", headerModeCropRect.centerX(), btnTop + 19.5f * density, cropTextPaint)
-
-      // Segmented Zoom Pill [- 1:1 +] on far right
-      val zoomBgPaint = Paint().apply { color = Color.parseColor("#0F172A") }
-      val zoomBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#334155")
-        strokeWidth = 1f * density
-        style = Paint.Style.STROKE
-      }
-      val zoomFullRect = RectF(zoomPillLeft, btnTop, zoomPillLeft + zoomPillW, btnBottom)
-      canvas.drawRoundRect(zoomFullRect, 8f * density, 8f * density, zoomBgPaint)
-      canvas.drawRoundRect(zoomFullRect, 8f * density, 8f * density, zoomBorderPaint)
-
-      val zoomSegW = zoomPillW / 3f
-      headerZoomOutRect.set(zoomPillLeft, btnTop, zoomPillLeft + zoomSegW, btnBottom)
-      headerZoomResetRect.set(zoomPillLeft + zoomSegW, btnTop, zoomPillLeft + zoomSegW * 2f, btnBottom)
-      headerZoomInRect.set(zoomPillLeft + zoomSegW * 2f, btnTop, zoomPillLeft + zoomPillW, btnBottom)
-
-      // Segment dividing lines
-      canvas.drawLine(zoomPillLeft + zoomSegW, btnTop + 4f * density, zoomPillLeft + zoomSegW, btnBottom - 4f * density, zoomBorderPaint)
-      canvas.drawLine(zoomPillLeft + zoomSegW * 2f, btnTop + 4f * density, zoomPillLeft + zoomSegW * 2f, btnBottom - 4f * density, zoomBorderPaint)
-
-      val zoomTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#00ADB5")
-        textSize = 12f * density
-        textAlign = Paint.Align.CENTER
-        isFakeBoldText = true
-      }
-      canvas.drawText("-", headerZoomOutRect.centerX(), btnTop + 19.5f * density, zoomTextPaint)
-      canvas.drawText("1:1", headerZoomResetRect.centerX(), btnTop + 19.5f * density, zoomTextPaint)
-      canvas.drawText("+", headerZoomInRect.centerX(), btnTop + 19.5f * density, zoomTextPaint)
 
       // -----------------------------------------------------------------------
       // Render Document Pages (Real PDF Document or Fallback Structured Sections)
@@ -3185,375 +3352,21 @@ class ThinkspaceView : View {
             canvas.drawCircle(lastR.right + 4f * density, lastR.bottom + 8f * density, 8f * density, pinPaint)
           }
 
-          // Premium Apple-grade Floating Text-Selection Contextual Toolbar matching Reference Screenshot
+          // Sleek LiquidText-style Floating Text-Selection Toolbar matching Competitor Screenshot
           if (!isDraggingStartHandle && !isDraggingEndHandle) {
-            val mainCard = if (!pdfSel.calloutMainCardRect.isEmpty) pdfSel.calloutMainCardRect else pdfSel.calloutRect
-            val subCard = pdfSel.calloutSubCardRect
-
-            // 1. Layered ambient drop shadows for Main Card
-            val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-            shadowPaint.color = Color.argb(10, 0, 0, 0)
-            canvas.drawRoundRect(mainCard.left - 2f * density, mainCard.top + 2f * density, mainCard.right + 2f * density, mainCard.bottom + 8f * density, 22f * density, 22f * density, shadowPaint)
-            shadowPaint.color = Color.argb(22, 0, 0, 0)
-            canvas.drawRoundRect(mainCard.left, mainCard.top + 1.5f * density, mainCard.right, mainCard.bottom + 4f * density, 20f * density, 20f * density, shadowPaint)
-
-            // Main Card Background & Crisp Border
-            val card1BgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.WHITE
-              style = Paint.Style.FILL
-            }
-            val card1BrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#E2E8F0")
-              strokeWidth = 1f * density
-              style = Paint.Style.STROKE
-            }
-            canvas.drawRoundRect(mainCard, 20f * density, 20f * density, card1BgPaint)
-            canvas.drawRoundRect(mainCard, 20f * density, 20f * density, card1BrdPaint)
-
-            // 2. Row 1: Selection Badge & Multi-line Preview Quote + Chevron Close Button
-            val charCount = pdfSel.text.length
-            val countLabel = "$charCount chars"
-            val countPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#0284C7")
-              textSize = 11f * density
-              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            }
-            val countFm = countPaint.fontMetrics
-            val countW = countPaint.measureText(countLabel)
-            val badgeW = countW + 16f * density
-            val badgeH = 24f * density
-            val badgeRect = RectF(mainCard.left + 14f * density, mainCard.top + 12f * density, mainCard.left + 14f * density + badgeW, mainCard.top + 12f * density + badgeH)
-            val badgeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#E0F2FE")
-              style = Paint.Style.FILL
-            }
-            canvas.drawRoundRect(badgeRect, 12f * density, 12f * density, badgeBgPaint)
-            canvas.drawText(countLabel, badgeRect.centerX() - countW / 2f, badgeRect.centerY() - (countFm.descent + countFm.ascent) / 2f, countPaint)
-
-            // Selected text preview
-            val closeBtn = pdfSel.calloutCloseBtn
-            val previewLeft = badgeRect.right + 10f * density
-            val previewRight = closeBtn.left - 8f * density
-            val maxPreviewW = previewRight - previewLeft
-            val cleanSnippet = pdfSel.text.replace('\n', ' ').replace('\r', ' ').trim()
-            val previewStr = "\"$cleanSnippet\""
-            if (maxPreviewW > 24f * density) {
-              val quotePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#334155")
-                textSize = 10.5f * density
-              }
-              val quoteFm = quotePaint.fontMetrics
-              val lineH = quoteFm.descent - quoteFm.ascent + 1f * density
-              val line1 = android.text.TextUtils.ellipsize(previewStr, quotePaint, maxPreviewW, android.text.TextUtils.TruncateAt.END).toString()
-              canvas.drawText(line1, previewLeft, mainCard.top + 20f * density, quotePaint)
-              if (previewStr.length > 36 && line1.endsWith("…")) {
-                val remText = previewStr.substring(min(previewStr.length, 34)).trim()
-                val line2 = android.text.TextUtils.ellipsize(remText, quotePaint, maxPreviewW, android.text.TextUtils.TruncateAt.END).toString()
-                canvas.drawText(line2, previewLeft, mainCard.top + 20f * density + lineH, quotePaint)
-              }
-            }
-
-            // Chevron Down Close Icon
-            val chevPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#475569")
-              strokeWidth = 2f * density
-              strokeCap = Paint.Cap.ROUND
-              strokeJoin = Paint.Join.ROUND
-              style = Paint.Style.STROKE
-            }
-            val chevCx = closeBtn.centerX()
-            val chevCy = badgeRect.centerY()
-            val chevPath = Path().apply {
-              moveTo(chevCx - 5f * density, chevCy - 2.5f * density)
-              lineTo(chevCx, chevCy + 2.5f * density)
-              lineTo(chevCx + 5f * density, chevCy - 2.5f * density)
-            }
-            canvas.drawPath(chevPath, chevPaint)
-
-            // Horizontal Divider Line between Row 1 and Row 2
-            val hDivY = mainCard.top + 50f * density
-            val hDivPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#F1F5F9")
-              strokeWidth = 1f * density
-            }
-            canvas.drawLine(mainCard.left + 14f * density, hDivY, mainCard.right - 14f * density, hDivY, hDivPaint)
-
-            // 3. Row 2 Actions: [📄 + Excerpt], [📋 Copy], [✏️ Highlight]
-            // + Excerpt Button
-            val excerptBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#2563EB")
-              style = Paint.Style.FILL
-            }
-            canvas.drawRoundRect(pdfSel.calloutExcerptBtn, 10f * density, 10f * density, excerptBgPaint)
-            val exCy = pdfSel.calloutExcerptBtn.centerY()
-            val exLeft = pdfSel.calloutExcerptBtn.left + 9f * density
-            val docW = 9f * density
-            val docH = 12f * density
-            val docR = RectF(exLeft, exCy - docH / 2f, exLeft + docW, exCy + docH / 2f)
-            val docIconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.WHITE
-              strokeWidth = 1.3f * density
-              style = Paint.Style.STROKE
-            }
-            canvas.drawRoundRect(docR, 1.5f * density, 1.5f * density, docIconPaint)
-            canvas.drawLine(docR.left + 2f * density, docR.top + 3.5f * density, docR.right - 2f * density, docR.top + 3.5f * density, docIconPaint)
-            canvas.drawLine(docR.left + 2f * density, docR.top + 6.5f * density, docR.right - 2f * density, docR.top + 6.5f * density, docIconPaint)
-            val exTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.WHITE
-              textSize = 12f * density
-              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            }
-            val exFm = exTextPaint.fontMetrics
-            canvas.drawText("+ Excerpt", exLeft + docW + 6f * density, exCy - (exFm.descent + exFm.ascent) / 2f, exTextPaint)
-
-            // Copy Button (dynamic state feedback when copied)
-            val isCopied = copiedToastText != null
-            val copyBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = if (isCopied) Color.parseColor("#DCFCE7") else Color.parseColor("#F1F5F9")
-              style = Paint.Style.FILL
-            }
-            canvas.drawRoundRect(pdfSel.calloutCopyBtn, 10f * density, 10f * density, copyBgPaint)
-            val cpCy = pdfSel.calloutCopyBtn.centerY()
-            val cpLeft = pdfSel.calloutCopyBtn.left + 9f * density
-            val cpW = 8f * density
-            val cpH = 10f * density
-            val copyIconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = if (isCopied) Color.parseColor("#15803D") else Color.parseColor("#1E293B")
-              strokeWidth = 1.3f * density
-              style = Paint.Style.STROKE
-            }
-            canvas.drawRoundRect(RectF(cpLeft + 3f * density, cpCy - cpH / 2f - 2f * density, cpLeft + 3f * density + cpW, cpCy + cpH / 2f - 2f * density), 1.5f * density, 1.5f * density, copyIconPaint)
-            val frontR = RectF(cpLeft, cpCy - cpH / 2f + 1f * density, cpLeft + cpW, cpCy + cpH / 2f + 1f * density)
-            canvas.drawRoundRect(frontR, 1.5f * density, 1.5f * density, copyBgPaint)
-            canvas.drawRoundRect(frontR, 1.5f * density, 1.5f * density, copyIconPaint)
-            val copyTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = if (isCopied) Color.parseColor("#15803D") else Color.parseColor("#1E293B")
-              textSize = 12f * density
-              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            }
-            val cpFm = copyTextPaint.fontMetrics
-            canvas.drawText(copiedToastText ?: "Copy", cpLeft + cpW + 6f * density, cpCy - (cpFm.descent + cpFm.ascent) / 2f, copyTextPaint)
-
-            // Highlight Button
-            val hlBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#FED7AA") // Warm peach
-              style = Paint.Style.FILL
-            }
-            val hlBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#FB923C") // Orange border
-              strokeWidth = 1.2f * density
-              style = Paint.Style.STROKE
-            }
-            canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 10f * density, 10f * density, hlBgPaint)
-            canvas.drawRoundRect(pdfSel.calloutHighlightBtn, 10f * density, 10f * density, hlBorderPaint)
-
-            // Pencil / marker icon
-            val penPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#1E293B")
-              strokeWidth = 1.4f * density
-              style = Paint.Style.STROKE
-            }
-            val hlCy = pdfSel.calloutHighlightBtn.centerY()
-            val hlLeft = pdfSel.calloutHighlightBtn.left + 9f * density
-            val penPath = Path().apply {
-              moveTo(hlLeft + 2f * density, hlCy + 5f * density)
-              lineTo(hlLeft + 9f * density, hlCy - 5f * density)
-              lineTo(hlLeft + 12f * density, hlCy - 3f * density)
-              lineTo(hlLeft + 4.5f * density, hlCy + 7f * density)
-              close()
-            }
-            canvas.drawPath(penPath, penPaint)
-
-            val hlTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#1E293B")
-              textSize = 12f * density
-              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            }
-            val hlFm = hlTextPaint.fontMetrics
-            canvas.drawText("Highlight", hlLeft + 16f * density, hlCy - (hlFm.descent + hlFm.ascent) / 2f, hlTextPaint)
-
-            // Vertical Divider line between Highlight and Aux controls
-            val vDivX = pdfSel.calloutHighlightBtn.right + 6f * density
-            val vDivPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#E2E8F0")
-              strokeWidth = 1.2f * density
-            }
-            canvas.drawLine(vDivX, pdfSel.calloutHighlightBtn.centerY() - 11f * density, vDivX, pdfSel.calloutHighlightBtn.centerY() + 11f * density, vDivPaint)
-
-            // 4. Aux Controls (< Word, Word >, All, •••)
-            val auxBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#F8FAFC")
-              style = Paint.Style.FILL
-            }
-            val auxBrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#E2E8F0")
-              strokeWidth = 1f * density
-              style = Paint.Style.STROKE
-            }
-            val auxTxtPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#334155")
-              textSize = 11f * density
-              textAlign = Paint.Align.CENTER
-              typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            }
-            val auxFm = auxTxtPaint.fontMetrics
-            val auxShift = (auxFm.descent + auxFm.ascent) / 2f
-
-            // < Word
-            canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 8f * density, 8f * density, auxBgPaint)
-            canvas.drawRoundRect(pdfSel.calloutAddWordLeftBtn, 8f * density, 8f * density, auxBrdPaint)
-            canvas.drawText("< Word", pdfSel.calloutAddWordLeftBtn.centerX(), pdfSel.calloutAddWordLeftBtn.centerY() - auxShift, auxTxtPaint)
-
-            // Word >
-            canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 8f * density, 8f * density, auxBgPaint)
-            canvas.drawRoundRect(pdfSel.calloutAddWordRightBtn, 8f * density, 8f * density, auxBrdPaint)
-            canvas.drawText("Word >", pdfSel.calloutAddWordRightBtn.centerX(), pdfSel.calloutAddWordRightBtn.centerY() - auxShift, auxTxtPaint)
-
-            // All
-            canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 8f * density, 8f * density, auxBgPaint)
-            canvas.drawRoundRect(pdfSel.calloutSelectAllBtn, 8f * density, 8f * density, auxBrdPaint)
-            canvas.drawText("All", pdfSel.calloutSelectAllBtn.centerX(), pdfSel.calloutSelectAllBtn.centerY() - auxShift, auxTxtPaint)
-
-            // ••• (More)
-            canvas.drawRoundRect(pdfSel.calloutMoreBtn, 8f * density, 8f * density, auxBgPaint)
-            canvas.drawRoundRect(pdfSel.calloutMoreBtn, 8f * density, 8f * density, auxBrdPaint)
-            val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = Color.parseColor("#475569")
-              style = Paint.Style.FILL
-            }
-            val moreCx = pdfSel.calloutMoreBtn.centerX()
-            val moreCy = pdfSel.calloutMoreBtn.centerY()
-            val dotR = 1.8f * density
-            val dotSpacing = 4.5f * density
-            canvas.drawCircle(moreCx - dotSpacing, moreCy, dotR, dotPaint)
-            canvas.drawCircle(moreCx, moreCy, dotR, dotPaint)
-            canvas.drawCircle(moreCx + dotSpacing, moreCy, dotR, dotPaint)
-
-            // 5. Card 2: Sub-Card Color Tray below Highlight
-            if (!subCard.isEmpty) {
-              // Triangular Beak connecting Highlight button to Sub-Card
-              val beakCx = pdfSel.calloutHighlightBtn.centerX().coerceIn(subCard.left + 16f * density, subCard.right - 16f * density)
-              val beakPath = Path().apply {
-                moveTo(beakCx - 7f * density, subCard.top)
-                lineTo(beakCx, subCard.top - 6f * density)
-                lineTo(beakCx + 7f * density, subCard.top)
-                close()
-              }
-
-              // Sub-card shadow
-              shadowPaint.color = Color.argb(10, 0, 0, 0)
-              canvas.drawRoundRect(subCard.left - 2f * density, subCard.top + 2f * density, subCard.right + 2f * density, subCard.bottom + 6f * density, 18f * density, 18f * density, shadowPaint)
-              shadowPaint.color = Color.argb(20, 0, 0, 0)
-              canvas.drawRoundRect(subCard.left, subCard.top + 1f * density, subCard.right, subCard.bottom + 3f * density, 16f * density, 16f * density, shadowPaint)
-
-              // Sub-card background and border
-              val subBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.WHITE
-                style = Paint.Style.FILL
-              }
-              val subBrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#E2E8F0")
-                strokeWidth = 1f * density
-                style = Paint.Style.STROKE
-              }
-              canvas.drawRoundRect(subCard, 16f * density, 16f * density, subBgPaint)
-              canvas.drawPath(beakPath, subBgPaint)
-              canvas.drawRoundRect(subCard, 16f * density, 16f * density, subBrdPaint)
-              canvas.drawLine(beakCx - 7f * density, subCard.top, beakCx, subCard.top - 6f * density, subBrdPaint)
-              canvas.drawLine(beakCx, subCard.top - 6f * density, beakCx + 7f * density, subCard.top, subBrdPaint)
-
-              // Swatches inside Sub-Card
-              val swatchR = 11f * density
-              val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-              val whiteBrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#CBD5E1")
-                strokeWidth = 1.2f * density
-                style = Paint.Style.STROKE
-              }
-              val activeHaloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#38BDF8")
-                strokeWidth = 2.2f * density
-                style = Paint.Style.STROKE
-              }
-
-              for (cb in pdfSel.calloutColorBtns) {
-                val cx = cb.first.centerX()
-                val cy = cb.first.centerY()
-                val col = cb.second
-                val isSelected = (col == selectedColor) || (col == Color.WHITE && selectedColor == Color.WHITE)
-
-                if (isSelected) {
-                  canvas.drawCircle(cx, cy, swatchR + 3.5f * density, activeHaloPaint)
-                }
-
-                circlePaint.color = col
-                canvas.drawCircle(cx, cy, swatchR, circlePaint)
-                if (col == Color.WHITE) {
-                  canvas.drawCircle(cx, cy, swatchR, whiteBrdPaint)
-                }
-              }
-
-              // 7th: Rainbow Gradient Swatch
-              val rainBtn = pdfSel.calloutRainbowBtn
-              val rainCx = rainBtn.centerX()
-              val rainCy = rainBtn.centerY()
-              val rainbowShader = android.graphics.SweepGradient(
-                rainCx, rainCy,
-                intArrayOf(
-                  Color.parseColor("#EF4444"),
-                  Color.parseColor("#F59E0B"),
-                  Color.parseColor("#10B981"),
-                  Color.parseColor("#3B82F6"),
-                  Color.parseColor("#8B5CF6"),
-                  Color.parseColor("#EC4899"),
-                  Color.parseColor("#EF4444")
-                ),
-                null
-              )
-              val rainbowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                shader = rainbowShader
-                style = Paint.Style.FILL
-              }
-              canvas.drawCircle(rainCx, rainCy, swatchR, rainbowPaint)
-
-              // Vertical Divider inside Sub-Card
-              val subDivX = rainBtn.right + 8f * density
-              canvas.drawLine(subDivX, subCard.centerY() - 10f * density, subDivX, subCard.centerY() + 10f * density, vDivPaint)
-
-              // Tags Button: 🏷️ Tags
-              val tagsBtn = pdfSel.calloutTagsBtn
-              val tagPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#334155")
-                strokeWidth = 1.4f * density
-                strokeCap = Paint.Cap.ROUND
-                strokeJoin = Paint.Join.ROUND
-                style = Paint.Style.STROKE
-              }
-              val tagCy = tagsBtn.centerY()
-              val tagLeft = tagsBtn.left + 4f * density
-              val tagPath = Path().apply {
-                moveTo(tagLeft + 3f * density, tagCy - 5f * density)
-                lineTo(tagLeft + 9f * density, tagCy - 5f * density)
-                lineTo(tagLeft + 13f * density, tagCy)
-                lineTo(tagLeft + 6.5f * density, tagCy + 6f * density)
-                lineTo(tagLeft + 3f * density, tagCy + 2f * density)
-                close()
-              }
-              canvas.drawPath(tagPath, tagPaint)
-              val tagHole = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#334155")
-                style = Paint.Style.FILL
-              }
-              canvas.drawCircle(tagLeft + 5.5f * density, tagCy - 2f * density, 1f * density, tagHole)
-
-              val tagsTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#334155")
-                textSize = 12f * density
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-              }
-              val tagFm = tagsTextPaint.fontMetrics
-              canvas.drawText("Tags", tagLeft + 17f * density, tagCy - (tagFm.descent + tagFm.ascent) / 2f, tagsTextPaint)
-            }
+            drawCompetitorSelectionCallout(
+              canvas = canvas,
+              calloutR = pdfSel.calloutRect,
+              commentBtn = pdfSel.calloutCommentBtn,
+              excerptBtn = pdfSel.calloutExcerptBtn,
+              bookmarkBtn = pdfSel.calloutBookmarkBtn,
+              moreBtn = pdfSel.calloutMoreBtn,
+              colorBtns = pdfSel.calloutColorBtns,
+              clearBtn = pdfSel.calloutClearBtn,
+              rainbowBtn = pdfSel.calloutRainbowBtn,
+              tagsBtn = pdfSel.calloutTagsBtn,
+              activeColor = selectedColor
+            )
           }
       }
     }
@@ -3603,99 +3416,21 @@ class ThinkspaceView : View {
         canvas.drawCircle(brX, brY, handleR, handleFill)
         canvas.drawCircle(brX, brY, handleR, handleBorder)
 
-        // LiquidText Top Contextual Toolbar (hidden while actively dragging/sizing for clean feedback)
+        // Sleek LiquidText-style Floating Crop-Selection Toolbar matching Competitor Screenshot
         if (!isDraggingCrop && !isDraggingCropTopLeftHandle && !isDraggingCropBottomRightHandle) {
-          val holdBadgeRect = cropSel.holdAndDragRect
-          val holdBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0F172A"); style = Paint.Style.FILL }
-          val holdBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = cropColor; strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
-          canvas.drawRoundRect(holdBadgeRect, 5f * density, 5f * density, holdBg)
-          canvas.drawRoundRect(holdBadgeRect, 5f * density, 5f * density, holdBorder)
-          val holdTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 10.5f * density
-            isFakeBoldText = true
-          }
-          canvas.drawText("✋ Move / Drag to Canvas", holdBadgeRect.left + 8f * density, holdBadgeRect.centerY() + 3.5f * density, holdTextPaint)
-
-          canvas.drawRoundRect(cropSel.calloutRect, 12f * density, 12f * density, calloutBgPaint)
-          canvas.drawRoundRect(cropSel.calloutRect, 12f * density, 12f * density, calloutBorderPaint)
-
-          // Row 1: Actions (Highlight, AutoExcerpt, Comment, Bookmark, Close)
-          val actionPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 12f * density
-            isFakeBoldText = true
-          }
-
-          // Highlight button: styled pill with accent color
-          val hlPillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#EAB308")
-            style = Paint.Style.FILL
-          }
-          canvas.drawRoundRect(cropSel.calloutHighlightBtn, 5f * density, 5f * density, hlPillPaint)
-          val hlTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0F172A")
-            textSize = 11.5f * density
-            isFakeBoldText = true
-          }
-          canvas.drawText("Highlight", cropSel.calloutHighlightBtn.left + 6f * density, cropSel.calloutHighlightBtn.centerY() + 4f * density, hlTextPaint)
-
-          // AutoExcerpt button: styled pill with accent color
-          val excerptPillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = cropColor
-            style = Paint.Style.FILL
-          }
-          canvas.drawRoundRect(cropSel.calloutExcerptBtn, 5f * density, 5f * density, excerptPillPaint)
-          val autoExcerptTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 11.5f * density
-            isFakeBoldText = true
-          }
-          canvas.drawText("AutoExcerpt", cropSel.calloutExcerptBtn.left + 6f * density, cropSel.calloutExcerptBtn.centerY() + 4f * density, autoExcerptTextPaint)
-
-          canvas.drawText("Comment", cropSel.calloutCommentBtn.left + 4f * density, cropSel.calloutCommentBtn.centerY() + 4f * density, actionPaint)
-          canvas.drawText("Bookmark", cropSel.calloutBookmarkBtn.left + 4f * density, cropSel.calloutBookmarkBtn.centerY() + 4f * density, actionPaint)
-
-          val closePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#94A3B8")
-            textSize = 13f * density
-            isFakeBoldText = true
-          }
-          canvas.drawText("✕", cropSel.calloutCloseBtn.left + 6f * density, cropSel.calloutCloseBtn.centerY() + 4.5f * density, closePaint)
-
-          // Row 2: Color Swatches & Tags
-          for (pair in cropSel.calloutColorBtns) {
-            val btnR = pair.first
-            val col = pair.second
-            val swPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-              color = col
-              style = Paint.Style.FILL
-            }
-            val rad = btnR.width() / 2f - 4f * density
-            canvas.drawCircle(btnR.centerX(), btnR.centerY(), rad, swPaint)
-            if (col == cropColor) {
-              val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.WHITE
-                strokeWidth = 2f * density
-                style = Paint.Style.STROKE
-              }
-              canvas.drawCircle(btnR.centerX(), btnR.centerY(), rad + 2.5f * density, ringPaint)
-            }
-          }
-
-          // Divider line before Tags
-          val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#334155")
-            strokeWidth = 1f * density
-          }
-          canvas.drawLine(cropSel.calloutTagsBtn.left - 8f * density, cropSel.calloutTagsBtn.top + 2f * density, cropSel.calloutTagsBtn.left - 8f * density, cropSel.calloutTagsBtn.bottom - 2f * density, divPaint)
-
-          val tagPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#94A3B8")
-            textSize = 12f * density
-            isFakeBoldText = true
-          }
-          canvas.drawText("Tags", cropSel.calloutTagsBtn.left + 4f * density, cropSel.calloutTagsBtn.centerY() + 4f * density, tagPaint)
+          drawCompetitorSelectionCallout(
+            canvas = canvas,
+            calloutR = cropSel.calloutRect,
+            commentBtn = cropSel.calloutCommentBtn,
+            excerptBtn = cropSel.calloutExcerptBtn,
+            bookmarkBtn = cropSel.calloutBookmarkBtn,
+            moreBtn = cropSel.calloutMoreBtn,
+            colorBtns = cropSel.calloutColorBtns,
+            clearBtn = cropSel.calloutClearBtn,
+            rainbowBtn = cropSel.calloutRainbowBtn,
+            tagsBtn = cropSel.calloutTagsBtn,
+            activeColor = cropSel.color
+          )
         }
       }
 
@@ -6018,7 +5753,7 @@ class ThinkspaceView : View {
         }
 
         // Check Top Subheader UI Clicks matching Video
-        if (inDocZone && sy < subheaderH) {
+        if (showDocumentHeader && inDocZone && sy < subheaderH) {
           if (headerSearchRect.contains(sx, sy)) {
             promptSearchDialog()
             return true
@@ -6263,8 +5998,19 @@ class ThinkspaceView : View {
             }
           }
 
-          // 2. Check Callout Clicks matching Video (+Word, Word+, All, Excerpt, Copy, Highlight, Close)
+          // 2. Check Callout Clicks matching Competitor Bar (Comment, AutoExcerpt, Bookmark, More, Colors, Clear, Rainbow, Tags)
           if (pdfSel != null && pdfSel.calloutRect.contains(sx, sy)) {
+            // 1. Comment
+            if (pdfSel.calloutCommentBtn.contains(sx, sy)) {
+              extractExcerptToCanvas(pdfSel.text, pdfSel.pageIndex + 1, selectedColor, pdfSel.pdfRects)
+              activePdfSelection = null
+              activeStructuredPInfo = null
+              hudToast.show("Comment added to excerpt")
+              performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
+            }
+            // 2. AutoExcerpt
             if (pdfSel.calloutExcerptBtn.contains(sx, sy)) {
               extractExcerptToCanvas(pdfSel.text, pdfSel.pageIndex + 1, selectedColor, pdfSel.pdfRects)
               activePdfSelection = null
@@ -6273,22 +6019,26 @@ class ThinkspaceView : View {
               invalidate()
               return true
             }
-            if (pdfSel.calloutCopyBtn.contains(sx, sy)) {
-              copyToClipboard(pdfSel.text)
-              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-              return true
-            }
-            if (pdfSel.calloutHighlightBtn.contains(sx, sy)) {
-              addAnnotation(pdfSel.text, pdfSel.pageIndex + 1, selectedColor, pdfSel.pdfRects)
+            // 3. Bookmark
+            if (pdfSel.calloutBookmarkBtn.contains(sx, sy)) {
+              hudToast.show("Bookmark saved on page ${pdfSel.pageIndex + 1}")
+              performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
               activePdfSelection = null
               activeStructuredPInfo = null
-              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
               invalidate()
               return true
             }
+            // 4. More (•••) / Copy
+            if (pdfSel.calloutMoreBtn.contains(sx, sy) || pdfSel.calloutCopyBtn.contains(sx, sy)) {
+              copyToClipboard(pdfSel.text)
+              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+              hudToast.show("Text copied to clipboard")
+              return true
+            }
+            // 5. Color Swatches
             for (cb in pdfSel.calloutColorBtns) {
               if (cb.first.contains(sx, sy)) {
-                val colorToUse = if (cb.second == android.graphics.Color.WHITE) android.graphics.Color.parseColor("#F59E0B") else cb.second
+                val colorToUse = cb.second
                 selectedColor = colorToUse
                 addAnnotation(pdfSel.text, pdfSel.pageIndex + 1, colorToUse, pdfSel.pdfRects)
                 activePdfSelection = null
@@ -6298,6 +6048,15 @@ class ThinkspaceView : View {
                 return true
               }
             }
+            // 6. Clear Swatch (White circle with diagonal slash)
+            if (pdfSel.calloutClearBtn.contains(sx, sy)) {
+              activePdfSelection = null
+              activeStructuredPInfo = null
+              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+              invalidate()
+              return true
+            }
+            // 7. Rainbow Swatch
             if (pdfSel.calloutRainbowBtn.contains(sx, sy)) {
               val colorToUse = android.graphics.Color.parseColor("#8B5CF6")
               selectedColor = colorToUse
@@ -6308,72 +6067,10 @@ class ThinkspaceView : View {
               invalidate()
               return true
             }
+            // 8. Tags
             if (pdfSel.calloutTagsBtn.contains(sx, sy)) {
               performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-              hudToast.show("Tags: #keypoint #research")
-              return true
-            }
-            if (pdfSel.calloutMoreBtn.contains(sx, sy)) {
-              performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-              hudToast.show("More options")
-              return true
-            }
-            if (pdfSel.calloutAddWordLeftBtn.contains(sx, sy)) {
-              if (activePdfDoc != null) {
-                val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
-                if (pl != null && pdfSel.startWordIndex > 0) {
-                  updatePdfSelectionByIndex(pl, pdfSel.startWordIndex - 1, pdfSel.endWordIndex)
-                  performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                }
-              } else if (activeStructuredPInfo != null) {
-                val pInfo = activeStructuredPInfo!!
-                var newStart = (activeStructuredStartOffset - 1).coerceAtLeast(0)
-                while (newStart > 0 && pInfo.text[newStart].isWhitespace()) {
-                  newStart--
-                }
-                while (newStart > 0 && !pInfo.text[newStart - 1].isWhitespace()) {
-                  newStart--
-                }
-                updateStructuredSelectionByOffsets(pInfo, newStart, activeStructuredEndOffset)
-                performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-              }
-              return true
-            }
-            if (pdfSel.calloutAddWordRightBtn.contains(sx, sy)) {
-              if (activePdfDoc != null) {
-                val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
-                val words = pageWordsCache[pdfSel.pageIndex]
-                if (pl != null && words != null && pdfSel.endWordIndex < words.size - 1) {
-                  updatePdfSelectionByIndex(pl, pdfSel.startWordIndex, pdfSel.endWordIndex + 1)
-                  performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                }
-              } else if (activeStructuredPInfo != null) {
-                val pInfo = activeStructuredPInfo!!
-                var newEnd = (activeStructuredEndOffset + 1).coerceAtMost(pInfo.text.length)
-                while (newEnd < pInfo.text.length && pInfo.text[newEnd].isWhitespace()) {
-                  newEnd++
-                }
-                while (newEnd < pInfo.text.length && !pInfo.text[newEnd].isWhitespace()) {
-                  newEnd++
-                }
-                updateStructuredSelectionByOffsets(pInfo, activeStructuredStartOffset, newEnd)
-                performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-              }
-              return true
-            }
-            if (pdfSel.calloutSelectAllBtn.contains(sx, sy)) {
-              if (activePdfDoc != null) {
-                val pl = pageLayouts.firstOrNull { it.pageIndex == pdfSel.pageIndex }
-                val words = pageWordsCache[pdfSel.pageIndex]
-                if (pl != null && !words.isNullOrEmpty()) {
-                  updatePdfSelectionByIndex(pl, 0, words.size - 1)
-                  performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                }
-              } else if (activeStructuredPInfo != null) {
-                val pInfo = activeStructuredPInfo!!
-                updateStructuredSelectionByOffsets(pInfo, 0, pInfo.text.length)
-                performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-              }
+              hudToast.show("Tag added to excerpt")
               return true
             }
             if (pdfSel.calloutCloseBtn.contains(sx, sy)) {
@@ -6463,13 +6160,12 @@ class ThinkspaceView : View {
           if (cropSel != null) {
             // 1. Toolbar clicks
             if (cropSel.calloutRect.contains(sx, sy)) {
-              if (cropSel.calloutHighlightBtn.contains(sx, sy)) {
-                val colorToUse = if (cropSel.color == Color.WHITE) Color.parseColor("#EAB308") else cropSel.color
-                val r = RectF(cropSel.pageBounds.left, cropSel.pageBounds.top, cropSel.pageBounds.right, cropSel.pageBounds.bottom)
-                addAnnotation(cropSel.dimensionsText.ifEmpty { "Highlighted Region" }, cropSel.pageIndex + 1, colorToUse, listOf(r))
-                hudToast.show("Highlighted on Page ${cropSel.pageIndex + 1}")
-                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              if (cropSel.calloutCommentBtn.contains(sx, sy)) {
+                extractCropToCanvas(cropSel)
                 activeCropSelection = null
+                docMode = "text"
+                hudToast.show("Comment added to excerpt")
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 invalidate()
                 return true
               }
@@ -6477,30 +6173,29 @@ class ThinkspaceView : View {
                 extractCropToCanvas(cropSel)
                 activeCropSelection = null
                 docMode = "text"
-                invalidate()
-                return true
-              }
-              if (cropSel.calloutCloseBtn.contains(sx, sy)) {
-                activeCropSelection = null
-                docMode = "text"
-                invalidate()
-                return true
-              }
-              if (cropSel.calloutCommentBtn.contains(sx, sy)) {
-                hudToast.show("Comment added to excerpt")
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                 invalidate()
                 return true
               }
               if (cropSel.calloutBookmarkBtn.contains(sx, sy)) {
                 hudToast.show("Bookmark saved on page ${cropSel.pageIndex + 1}")
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                activeCropSelection = null
+                invalidate()
+                return true
+              }
+              if (cropSel.calloutMoreBtn.contains(sx, sy)) {
+                extractCropToCanvas(cropSel)
+                activeCropSelection = null
+                docMode = "text"
+                hudToast.show("Crop saved to canvas")
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                 invalidate()
                 return true
               }
               val clickedColorPair = cropSel.calloutColorBtns.find { it.first.contains(sx, sy) }
               if (clickedColorPair != null) {
-                val colorToUse = if (clickedColorPair.second == Color.WHITE) Color.parseColor("#EAB308") else clickedColorPair.second
+                val colorToUse = clickedColorPair.second
                 selectedColor = colorToUse
                 cropSel.color = colorToUse
                 val r = RectF(cropSel.pageBounds.left, cropSel.pageBounds.top, cropSel.pageBounds.right, cropSel.pageBounds.bottom)
@@ -6508,6 +6203,35 @@ class ThinkspaceView : View {
                 hudToast.show("Highlighted on Page ${cropSel.pageIndex + 1}")
                 performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                 activeCropSelection = null
+                invalidate()
+                return true
+              }
+              if (cropSel.calloutClearBtn.contains(sx, sy)) {
+                activeCropSelection = null
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                invalidate()
+                return true
+              }
+              if (cropSel.calloutRainbowBtn.contains(sx, sy)) {
+                val colorToUse = Color.parseColor("#8B5CF6")
+                selectedColor = colorToUse
+                cropSel.color = colorToUse
+                val r = RectF(cropSel.pageBounds.left, cropSel.pageBounds.top, cropSel.pageBounds.right, cropSel.pageBounds.bottom)
+                addAnnotation(cropSel.dimensionsText.ifEmpty { "Highlighted Region" }, cropSel.pageIndex + 1, colorToUse, listOf(r))
+                hudToast.show("Highlighted on Page ${cropSel.pageIndex + 1}")
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                activeCropSelection = null
+                invalidate()
+                return true
+              }
+              if (cropSel.calloutTagsBtn.contains(sx, sy)) {
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                hudToast.show("Tag added to crop")
+                return true
+              }
+              if (cropSel.calloutCloseBtn.contains(sx, sy)) {
+                activeCropSelection = null
+                docMode = "text"
                 invalidate()
                 return true
               }
@@ -7983,7 +7707,10 @@ class ThinkspaceView : View {
             calloutTagsBtn = layout.tagsBtn,
             calloutSubCardRect = layout.subCardRect,
             calloutMainCardRect = layout.mainCardRect,
-            calloutRainbowBtn = layout.rainbowBtn
+            calloutRainbowBtn = layout.rainbowBtn,
+            calloutCommentBtn = layout.commentBtn,
+            calloutBookmarkBtn = layout.bookmarkBtn,
+            calloutClearBtn = layout.clearBtn
           )
           invalidate()
           return
@@ -8121,7 +7848,10 @@ class ThinkspaceView : View {
       calloutTagsBtn = layout.tagsBtn,
       calloutSubCardRect = layout.subCardRect,
       calloutMainCardRect = layout.mainCardRect,
-      calloutRainbowBtn = layout.rainbowBtn
+      calloutRainbowBtn = layout.rainbowBtn,
+      calloutCommentBtn = layout.commentBtn,
+      calloutBookmarkBtn = layout.bookmarkBtn,
+      calloutClearBtn = layout.clearBtn
     )
   }
 
@@ -8173,7 +7903,10 @@ class ThinkspaceView : View {
       calloutTagsBtn = layout.tagsBtn,
       calloutSubCardRect = layout.subCardRect,
       calloutMainCardRect = layout.mainCardRect,
-      calloutRainbowBtn = layout.rainbowBtn
+      calloutRainbowBtn = layout.rainbowBtn,
+      calloutCommentBtn = layout.commentBtn,
+      calloutBookmarkBtn = layout.bookmarkBtn,
+      calloutClearBtn = layout.clearBtn
     )
   }
 

@@ -64,6 +64,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     panX = 0,
     panY = 0,
     scale = 1,
+    showDocumentHeader = false,
     onAddStroke,
     onEraseStroke,
     onExcerptMoveEnd,
@@ -405,6 +406,7 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
       panX={panX}
       panY={panY}
       scale={scale}
+      showDocumentHeader={showDocumentHeader}
       onAddStroke={
         onAddStroke
           ? (e: any) => {

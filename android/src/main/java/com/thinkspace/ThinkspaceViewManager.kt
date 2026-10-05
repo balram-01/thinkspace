@@ -138,6 +138,11 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
     view.penThickness = value
   }
 
+  @ReactProp(name = "showDocumentHeader", defaultBoolean = false)
+  override fun setShowDocumentHeader(view: ThinkspaceView?, value: Boolean) {
+    view?.showDocumentHeader = value
+  }
+
   @ReactProp(name = "penFavoritesJson")
   override fun setPenFavoritesJson(view: ThinkspaceView?, value: String?) {
     view?.setPenFavoritesFromJson(value)

@@ -14,6 +14,7 @@ import {
   ThinkspaceView,
   PdfEngine,
   PenSettingsPanel,
+  DocumentsSheet,
   DEFAULT_PEN_FAVORITES,
   type ThinkspaceViewRef,
   type WorkspaceTool,
@@ -47,6 +48,17 @@ const DOC_COLORS = [
   '#8B5CF6',
   '#F97316',
   '#3B82F6',
+];
+
+const INITIAL_WORKSPACE_DOCS: WorkspaceDocumentEntry[] = [
+  {
+    id: 'doc-discovery-of-india',
+    title: 'The-Discovery-Of-India-Jawaharlal-Nehru',
+    pageCount: 384,
+    uri: 'file:///android_asset/sample.pdf',
+    colorAccent: '#3B82F6',
+    addedAt: new Date().toISOString(),
+  },
 ];
 
 export default function App() {
@@ -116,11 +128,13 @@ export default function App() {
    * This is the multi-document API. Each entry has a unique ID, title, pageCount, and uri.
    */
   const [workspaceDocs, setWorkspaceDocs] = useState<WorkspaceDocumentEntry[]>(
-    []
+    INITIAL_WORKSPACE_DOCS
   );
 
   /** ID of the document currently shown in the PDF viewport */
-  const [activeDocId, setActiveDocId] = useState<string | null>(null);
+  const [activeDocId, setActiveDocId] = useState<string | null>(
+    'doc-discovery-of-india'
+  );
 
   // Legacy single-doc state kept for internal tracking
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentInfo | null>(null);
@@ -229,6 +243,70 @@ export default function App() {
       // User cancelled or error handled
     }
   }, [workspaceDocs]);
+
+  const handleDeleteDocument = useCallback(
+    (docId: string) => {
+      setWorkspaceDocs((prev) => {
+        const next = prev.filter((d) => d.id !== docId);
+        if (activeDocId === docId) {
+          const nextDoc = next[0];
+          const nextId = nextDoc ? nextDoc.id : null;
+          setActiveDocId(nextId);
+          if (nextDoc) {
+            setPdfUri(nextDoc.uri);
+            thinkspaceRef.current?.switchToDocument(nextDoc.id);
+          }
+        }
+        return next;
+      });
+    },
+    [activeDocId]
+  );
+
+  const handleRenameDocument = useCallback(
+    (docId: string, newTitle: string) => {
+      setWorkspaceDocs((prev) =>
+        prev.map((d) => (d.id === docId ? { ...d, title: newTitle } : d))
+      );
+    },
+    []
+  );
+
+  const handleReplaceDocument = useCallback(
+    async (docId: string) => {
+      try {
+        const file = await PdfEngine.pickPdfFile();
+        const opened = await PdfEngine.openDocument(file.uri);
+        setWorkspaceDocs((prev) =>
+          prev.map((d) =>
+            d.id === docId
+              ? {
+                  ...d,
+                  title:
+                    opened.title ||
+                    file.uri.split('/').pop()?.replace('.pdf', '') ||
+                    d.title,
+                  pageCount: opened.pageCount,
+                  uri: file.uri,
+                }
+              : d
+          )
+        );
+        if (activeDocId === docId) {
+          setPdfUri(file.uri);
+          setPdfDoc(opened);
+        }
+      } catch (e) {
+        console.warn('Replace document cancelled or failed', e);
+      }
+    },
+    [activeDocId]
+  );
+
+  const handleAddTag = useCallback((docId: string, tag: string) => {
+    // Tag added for docId
+    console.log(`Tag added to ${docId}:`, tag);
+  }, []);
 
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
@@ -1008,87 +1086,27 @@ export default function App() {
         )}
       </Animated.View>
 
-      {/* ── Documents Switcher & Manager Modal ─────────────────────────────── */}
-      <Modal
+      {/* ── Documents Sheet matching Screenshots 1 & 2 ────────────────────────── */}
+      <DocumentsSheet
         visible={isDocsModalOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsDocsModalOpen(false)}
-      >
-        <TouchableOpacity
-          style={styles.modalBackdrop}
-          activeOpacity={1}
-          onPress={() => setIsDocsModalOpen(false)}
-        >
-          <View style={styles.addMenuCard}>
-            <View style={styles.menuHeader}>
-              <Text style={styles.menuTitle}>Documents in Workspace</Text>
-              <TouchableOpacity onPress={() => setIsDocsModalOpen(false)}>
-                <Text style={styles.closeBtn}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            {workspaceDocs.length === 0 ? (
-              <View style={styles.emptyDocsContainer}>
-                <Text style={styles.emptyDocsText}>
-                  No documents in this workspace yet.
-                </Text>
-              </View>
-            ) : (
-              workspaceDocs.map((doc) => {
-                const isActive = doc.id === activeDocId;
-                return (
-                  <TouchableOpacity
-                    key={doc.id}
-                    style={[styles.docItem, isActive && styles.docItemActive]}
-                    activeOpacity={0.7}
-                    onPress={() => {
-                      setActiveDocId(doc.id);
-                      setPdfUri(doc.uri);
-                      setIsDocsModalOpen(false);
-                    }}
-                  >
-                    <View style={styles.menuItemRow}>
-                      <View
-                        style={[
-                          styles.docDot,
-                          { backgroundColor: doc.colorAccent || '#00ADB5' },
-                        ]}
-                      />
-                      <View>
-                        <Text style={styles.docTitleText}>{doc.title}</Text>
-                        <Text style={styles.docPagesText}>
-                          {doc.pageCount} pages
-                        </Text>
-                      </View>
-                    </View>
-                    {isActive && (
-                      <Text style={styles.activeBadge}>✓ Active</Text>
-                    )}
-                  </TouchableOpacity>
-                );
-              })
-            )}
-
-            <TouchableOpacity
-              style={styles.menuItemPrimary}
-              activeOpacity={0.8}
-              onPress={() => {
-                setIsDocsModalOpen(false);
-                handleImportPdf();
-              }}
-            >
-              <View style={styles.menuItemRow}>
-                <Text style={styles.menuItemIcon}>➕</Text>
-                <Text style={styles.menuItemTextPrimary}>
-                  Import PDF Document
-                </Text>
-              </View>
-              <Text style={styles.arrowIcon}>›</Text>
-            </TouchableOpacity>
-          </View>
-        </TouchableOpacity>
-      </Modal>
+        onClose={() => setIsDocsModalOpen(false)}
+        documents={workspaceDocs}
+        activeDocumentId={activeDocId}
+        onSelectDocument={(docId) => {
+          setActiveDocId(docId);
+          const found = workspaceDocs.find((d) => d.id === docId);
+          if (found) {
+            setPdfUri(found.uri);
+          }
+          thinkspaceRef.current?.switchToDocument(docId);
+        }}
+        onAddDocument={handleImportPdf}
+        onDeleteDocument={handleDeleteDocument}
+        onRenameDocument={handleRenameDocument}
+        onReplaceDocument={handleReplaceDocument}
+        onOpenPageEditor={() => setIsPageEditorOpen(true)}
+        onAddTag={handleAddTag}
+      />
 
       {/* ── Workspaces Manager Modal ───────────────────────────────────────── */}
       <Modal

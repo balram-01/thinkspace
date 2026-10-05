@@ -405,6 +405,8 @@ export interface ThinkspaceViewProps {
   penFavorites?: string[];
   isPenSettingsOpen?: boolean;
   semanticInkLinks?: SemanticInkLink[];
+  /** Whether to show the native PDF subheader bar. Defaults to false (hidden). */
+  showDocumentHeader?: boolean;
   onPenStateChange?: (state: PenState) => void;
   onInkLinkCreate?: (link: SemanticInkLink) => void;
   onInkLinkDelete?: (linkId: string) => void;

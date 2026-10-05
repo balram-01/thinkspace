@@ -149,6 +149,7 @@ export interface NativeProps extends ViewProps {
   penThickness?: Float;
   penFavoritesJson?: string;
   semanticInkLinksJson?: string;
+  showDocumentHeader?: boolean;
   onAddStroke?: DirectEventHandler<StrokeEvent>;
   onEraseStroke?: DirectEventHandler<StrokeIdEvent>;
   onExcerptMoveEnd?: DirectEventHandler<ExcerptMoveEvent>;

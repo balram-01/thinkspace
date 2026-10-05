@@ -3,6 +3,7 @@ export { default as DocumentViewer } from './DocumentViewer';
 export { default as SplitDivider } from './SplitDivider';
 export { default as LiquidTextWorkspace } from './LiquidTextWorkspace';
 export { PenSettingsPanel } from './PenSettingsPanel';
+export { DocumentsSheet, type DocumentsSheetProps } from './DocumentsSheet';
 export * from './types';
 
 // PDF Engine — Android-native PDF processing, rendering, search & text extraction
