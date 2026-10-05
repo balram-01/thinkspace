@@ -408,23 +408,44 @@ export interface ThinkspaceViewProps {
 }
 
 export interface ThinkspaceViewRef {
+  // Search & Navigation
   openSearch: () => void;
   closeSearch: () => void;
   nextMatch: () => void;
   prevMatch: () => void;
+  search: (query: string) => void;
+  // History
   undo: () => void;
   redo: () => void;
+  // Canvas Viewport & Camera
   zoomToFit: () => void;
   zoomOut: () => void;
+  setViewport: (x: number, y: number, scale: number) => void;
+  // Split & Squeeze
+  setSplitRatio: (ratio: number) => void;
+  toggleSqueezeMode: () => void;
+  // Tools & Selection
+  setActiveTool: (tool: WorkspaceTool) => void;
+  clearSelection: () => void;
+  // Notebook
   addNotebookPage: (style?: NotebookPageStyle, title?: string) => void;
+  // Immersive / Focus Mode
   toggleImmersiveMode: () => void;
   setImmersiveMode: (enabled: boolean) => void;
-  // ── Pen / Inking System Methods ─────────────────────────────────────────
+  // Pen / Inking System
   setPenMode: (mode: PenDrawingMode) => void;
   setPenColor: (color: string) => void;
   setPenThickness: (thickness: number) => void;
   setPenFavorites: (favorites: string[]) => void;
   togglePenSettings: () => void;
+  // Document Navigation
+  switchToDocument: (documentId: string) => void;
+  scrollToPage: (pageNumber: number) => void;
+  // Workspace Item Operations
+  deleteCard: (cardId: string) => void;
+  deleteInkLink: (linkId: string) => void;
+  clearAllCards: () => void;
+  clearAllStrokes: () => void;
 }
 
 export interface DocumentViewerProps {

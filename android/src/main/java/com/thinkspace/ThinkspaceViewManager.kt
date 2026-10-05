@@ -220,7 +220,20 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "setPenColor" to 12,
       "setPenThickness" to 13,
       "setPenFavorites" to 14,
-      "togglePenSettings" to 15
+      "togglePenSettings" to 15,
+      "switchToDocument" to 16,
+      "scrollToPage" to 17,
+      "performSearch" to 18,
+      "search" to 18,
+      "clearSelection" to 19,
+      "deleteCard" to 20,
+      "deleteInkLink" to 21,
+      "clearAllCards" to 22,
+      "clearAllStrokes" to 23,
+      "setViewport" to 24,
+      "setSplitRatio" to 25,
+      "toggleSqueezeMode" to 26,
+      "setActiveTool" to 27
     )
   }
 
@@ -250,6 +263,45 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "setPenThickness", "13" -> root.penThickness = args?.getDouble(0)?.toFloat() ?: 3.5f
       "setPenFavorites", "14" -> root.setPenFavoritesFromJson(args?.getString(0))
       "togglePenSettings", "15" -> root.togglePenSettings()
+      "switchToDocument", "16" -> {
+        val docId = args?.getString(0)
+        if (!docId.isNullOrEmpty()) root.switchToDocument(docId)
+      }
+      "scrollToPage", "17" -> {
+        val pageNum = args?.getInt(0) ?: 1
+        root.scrollToPage(pageNum)
+      }
+      "performSearch", "search", "18" -> {
+        val q = args?.getString(0) ?: ""
+        root.performSearch(q)
+      }
+      "clearSelection", "19" -> root.clearSelection()
+      "deleteCard", "20" -> {
+        val cardId = args?.getString(0) ?: ""
+        if (cardId.isNotEmpty()) root.deleteCard(cardId)
+      }
+      "deleteInkLink", "21" -> {
+        val linkId = args?.getString(0) ?: ""
+        if (linkId.isNotEmpty()) root.deleteInkLink(linkId)
+      }
+      "clearAllCards", "22" -> root.clearAllCards()
+      "clearAllStrokes", "23" -> root.clearAllStrokes()
+      "setViewport", "24" -> {
+        val x = args?.getDouble(0)?.toFloat() ?: 0f
+        val y = args?.getDouble(1)?.toFloat() ?: 0f
+        val scale = args?.getDouble(2)?.toFloat() ?: 1f
+        root.setViewport(x, y, scale)
+      }
+      "setSplitRatio", "25" -> {
+        val ratio = args?.getDouble(0)?.toFloat() ?: 0.45f
+        root.setSplitRatioProgrammatic(ratio)
+      }
+      "toggleSqueezeMode", "26" -> root.toggleSqueezeMode()
+      "setActiveTool", "27" -> {
+        val tool = args?.getString(0) ?: "select"
+        root.activeTool = tool
+        root.invalidate()
+      }
     }
   }
 
@@ -279,6 +331,45 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       13 -> root.penThickness = args?.getDouble(0)?.toFloat() ?: 3.5f
       14 -> root.setPenFavoritesFromJson(args?.getString(0))
       15 -> root.togglePenSettings()
+      16 -> {
+        val docId = args?.getString(0)
+        if (!docId.isNullOrEmpty()) root.switchToDocument(docId)
+      }
+      17 -> {
+        val pageNum = args?.getInt(0) ?: 1
+        root.scrollToPage(pageNum)
+      }
+      18 -> {
+        val q = args?.getString(0) ?: ""
+        root.performSearch(q)
+      }
+      19 -> root.clearSelection()
+      20 -> {
+        val cardId = args?.getString(0) ?: ""
+        if (cardId.isNotEmpty()) root.deleteCard(cardId)
+      }
+      21 -> {
+        val linkId = args?.getString(0) ?: ""
+        if (linkId.isNotEmpty()) root.deleteInkLink(linkId)
+      }
+      22 -> root.clearAllCards()
+      23 -> root.clearAllStrokes()
+      24 -> {
+        val x = args?.getDouble(0)?.toFloat() ?: 0f
+        val y = args?.getDouble(1)?.toFloat() ?: 0f
+        val scale = args?.getDouble(2)?.toFloat() ?: 1f
+        root.setViewport(x, y, scale)
+      }
+      25 -> {
+        val ratio = args?.getDouble(0)?.toFloat() ?: 0.45f
+        root.setSplitRatioProgrammatic(ratio)
+      }
+      26 -> root.toggleSqueezeMode()
+      27 -> {
+        val tool = args?.getString(0) ?: "select"
+        root.activeTool = tool
+        root.invalidate()
+      }
     }
   }
 

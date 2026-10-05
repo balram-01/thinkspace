@@ -7,6 +7,7 @@ import type {
   WorkspaceDocumentEntry,
   PenDrawingMode,
   SemanticInkLink,
+  WorkspaceTool,
 } from './types';
 
 export interface ThinkspaceViewRef {
@@ -14,10 +15,16 @@ export interface ThinkspaceViewRef {
   closeSearch: () => void;
   nextMatch: () => void;
   prevMatch: () => void;
+  search: (query: string) => void;
   undo: () => void;
   redo: () => void;
   zoomToFit: () => void;
   zoomOut: () => void;
+  setViewport: (x: number, y: number, scale: number) => void;
+  setSplitRatio: (ratio: number) => void;
+  toggleSqueezeMode: () => void;
+  setActiveTool: (tool: WorkspaceTool) => void;
+  clearSelection: () => void;
   addNotebookPage: (style?: string, title?: string) => void;
   toggleImmersiveMode: () => void;
   setImmersiveMode: (enabled: boolean) => void;
@@ -26,6 +33,12 @@ export interface ThinkspaceViewRef {
   setPenThickness: (thickness: number) => void;
   setPenFavorites: (favorites: string[]) => void;
   togglePenSettings: () => void;
+  switchToDocument: (documentId: string) => void;
+  scrollToPage: (pageNumber: number) => void;
+  deleteCard: (cardId: string) => void;
+  deleteInkLink: (linkId: string) => void;
+  clearAllCards: () => void;
+  clearAllStrokes: () => void;
 }
 
 export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
@@ -209,6 +222,118 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
           (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
             ?.togglePenSettings ?? 15;
         (UIManager as any).dispatchViewManagerCommand(handle, cmd, []);
+      }
+    },
+    switchToDocument: (docId: string) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.switchToDocument ?? 16;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [docId]);
+      }
+    },
+    scrollToPage: (pageNum: number) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.scrollToPage ?? 17;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [pageNum]);
+      }
+    },
+    search: (query: string) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.performSearch ?? 18;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [query]);
+      }
+    },
+    clearSelection: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.clearSelection ?? 19;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, []);
+      }
+    },
+    deleteCard: (cardId: string) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.deleteCard ?? 20;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [cardId]);
+      }
+    },
+    deleteInkLink: (linkId: string) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.deleteInkLink ?? 21;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [linkId]);
+      }
+    },
+    clearAllCards: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.clearAllCards ?? 22;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, []);
+      }
+    },
+    clearAllStrokes: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.clearAllStrokes ?? 23;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, []);
+      }
+    },
+    setViewport: (x: number, y: number, zoomScale: number) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.setViewport ?? 24;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [
+          x,
+          y,
+          zoomScale,
+        ]);
+      }
+    },
+    setSplitRatio: (ratio: number) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.setSplitRatio ?? 25;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [ratio]);
+      }
+    },
+    toggleSqueezeMode: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.toggleSqueezeMode ?? 26;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, []);
+      }
+    },
+    setActiveTool: (tool: WorkspaceTool) => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.setActiveTool ?? 27;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, [tool]);
       }
     },
   }));

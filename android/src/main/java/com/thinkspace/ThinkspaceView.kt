@@ -8573,6 +8573,13 @@ class ThinkspaceView : View {
   private var pulseAnimator: ValueAnimator? = null
   private var canvasAnimator: ValueAnimator? = null
 
+  fun scrollToPage(targetPageNum: Int) {
+    post {
+      scrollToDocumentPage(targetPageNum)
+      invalidate()
+    }
+  }
+
   private fun scrollToDocumentPage(targetPageNum: Int, sourceRects: List<RectF> = emptyList()) {
     val viewW = width.toFloat().coerceAtLeast(100f)
     val viewH = height.toFloat().coerceAtLeast(100f)
@@ -9945,6 +9952,63 @@ class ThinkspaceView : View {
       putString("color", String.format("#%06X", 0xFFFFFF and color))
     }
     eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topChangeCardColor", data))
+  }
+
+  fun clearSelection() {
+    activeCropSelection = null
+    activePdfSelection = null
+    activeSelection = null
+    invalidate()
+  }
+
+  fun deleteCard(cardId: String) {
+    val card = cards.find { it.id == cardId } ?: return
+    cards.remove(card)
+    semanticInkLinks.removeAll { it.targetCardId == cardId }
+    dispatchCardDeleteEvent(cardId)
+    persistSemanticInkLinksLocally()
+    invalidate()
+  }
+
+  fun deleteInkLink(linkId: String) {
+    val link = semanticInkLinks.find { it.id == linkId } ?: return
+    semanticInkLinks.remove(link)
+    dispatchInkLinkDeleteEvent(linkId)
+    persistSemanticInkLinksLocally()
+    invalidate()
+  }
+
+  fun clearAllCards() {
+    cards.clear()
+    semanticInkLinks.clear()
+    persistSemanticInkLinksLocally()
+    invalidate()
+  }
+
+  fun clearAllStrokes() {
+    strokes.clear()
+    invalidate()
+  }
+
+  fun setViewport(x: Float, y: Float, scale: Float) {
+    panX = x
+    panY = y
+    scaleFactor = scale.coerceIn(camera.minScale, camera.maxScale)
+    dispatchTransformEvent()
+    invalidate()
+  }
+
+  fun setSplitRatioProgrammatic(ratio: Float) {
+    val clamped = ratio.coerceIn(0.1f, 0.9f)
+    splitRatio = clamped
+    dispatchSplitRatioEvent(clamped)
+    invalidate()
+  }
+
+  fun toggleSqueezeMode() {
+    isSqueezed = !isSqueezed
+    dispatchToggleSqueezeEvent(isSqueezed)
+    invalidate()
   }
 
   // ---------------------------------------------------------------------------

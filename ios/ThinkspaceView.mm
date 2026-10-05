@@ -35,13 +35,6 @@ using namespace facebook::react;
 
 - (void)updateProps:(Props::Shared const &)props oldProps:(Props::Shared const &)oldProps
 {
-    const auto &oldViewProps = *std::static_pointer_cast<ThinkspaceViewProps const>(_props);
-    const auto &newViewProps = *std::static_pointer_cast<ThinkspaceViewProps const>(props);
-
-    if (oldViewProps.color != newViewProps.color) {
-        [_view setBackgroundColor: RCTUIColorFromSharedColor(newViewProps.color)];
-    }
-
     [super updateProps:props oldProps:oldProps];
 }
 
