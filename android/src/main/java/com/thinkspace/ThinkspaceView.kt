@@ -229,8 +229,11 @@ data class NativeInkLink(
   val targetCardId: String,
   val color: Int,
   val strokeWidth: Float,
-  val style: String = "elastic",
-  val createdAt: Long = System.currentTimeMillis()
+  val style: String = "straight",
+  val createdAt: Long = System.currentTimeMillis(),
+  val targetCardPoint: NativePoint? = null,
+  val cardAnchorX: Float = 0.5f,
+  val cardAnchorY: Float = 0.5f
 )
 
 data class NativeDocumentSelection(
@@ -930,6 +933,10 @@ class ThinkspaceView : View {
   private var rippleColor = Color.parseColor("#00ADB5")
   private var rippleProgress = 1f
   private var rippleAnimator: ValueAnimator? = null
+
+  // LiquidText-style V Link Marker tap ripple feedback
+  data class VLinkRipple(val x: Float, val y: Float, val color: Int, val timestamp: Long)
+  private var activeVLinkRipple: VLinkRipple? = null
 
   // Toast feedback & HUD Notification Engine
   private var copiedToastText: String? = null
@@ -2012,7 +2019,8 @@ class ThinkspaceView : View {
     }
     try {
       val obj = JSONObject(json)
-      val id = obj.optString("id", obj.optString("documentId", ""))
+      val id = obj.optString("id", obj.optString("documentId", "default-doc")).ifEmpty { "default-doc" }
+      activeDocumentId = id
       val uri = obj.optString("uri", "")
       val title = obj.optString("title", "Document")
       val pageCount = obj.optInt("pageCount", 1)
@@ -2870,7 +2878,7 @@ class ThinkspaceView : View {
                   }
                 }
 
-                if (hasActiveOnThisPage) {
+                if (hasActiveOnThisPage && !isDrawingCrossZoneLink) {
                   val isHl = activeTool == "highlighter"
                   val activePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                     color = if (isHl) selectedColor else penColor
@@ -3940,30 +3948,11 @@ class ThinkspaceView : View {
       canvas.drawCircle(rippleOriginX, rippleOriginY, currentRadius, ripplePaint)
     }
 
-    // Dynamic Bezier Ink Links (LiquidText connector cords - §8 of spec)
-    val docAnchorScreenX = viewW / 2f
-    val worldDocAnchorX = camera.screenToWorldX(docAnchorScreenX)
-    val worldDocAnchorY = camera.screenToWorldY(splitY, canvasTopY)
-
-    for (link in links) {
-      val card = cards.find { it.id == link.sourceExcerptId } ?: continue
-      val isCardActive = draggingCard?.id == card.id || heldCardId == card.id || selectedCardId == card.id || magneticTargetCardId == card.id
-      // Only show the connecting string for the clicked/selected or active card to prevent visual clutter
-      if (!isCardActive) continue
-
-      val cardTargetX = card.x + 14f
-      val cardTargetY = card.y + 16f
-
-      inkLinkRenderer.drawTether(
-        canvas = canvas,
-        startX = worldDocAnchorX,
-        startY = worldDocAnchorY,
-        endX = cardTargetX,
-        endY = cardTargetY,
-        color = link.color,
-        isHeld = true
-      )
-    }
+    // Dynamic Bezier Ink Links to split divider removed:
+    // When a user selects or clicks any card, no artificial string line is drawn across
+    // the workspace, keeping the card and action toolbar clean and unobscured.
+    // Source navigation is cleanly accessible via the card's source badge (↗ p. X)
+    // and extraction arrow (>) without visual clutter.
 
 
 
@@ -4161,60 +4150,48 @@ class ThinkspaceView : View {
       // Store world hit rect — tap detection uses this in onTouchEvent
       cardJumpBtnRects[card.id] = RectF(jumpBtnRect)
 
-      // ── Card Original Extraction Source `>` Arrow Affordance ───────────────
-      // Every extracted card that has an original PDF source has a small `>` navigation
-      // affordance on the RIGHT-MIDDLE EDGE of the card.
-      val hasPdfSource = card.pageNumber > 0 || card.sourceRects.isNotEmpty() || card.documentId.isNotEmpty()
+      // ── Card Original Extraction Source / Pen InkLink `▶` Arrow Affordance ───
+      // Every card with a PDF source or pen connection displays a sleek right-pointing
+      // arrow affordance on its right edge matching the LiquidText reference video.
+      val cardPenLink = semanticInkLinks.findLast { it.targetCardId == card.id }
+      val hasPdfSource = card.pageNumber > 0 || card.sourceRects.isNotEmpty() || card.documentId.isNotEmpty() || cardPenLink != null
       if (hasPdfSource) {
-        val midY = cardRect.centerY()
-
-        // Stem connecting card right-middle edge to `>` tab: `── >`
-        val stemPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = docAccentColor
-          strokeWidth = 2.2f
-          style = Paint.Style.STROKE
-          strokeCap = Paint.Cap.ROUND
+        val arrowH = 16f * density
+        val arrowW = 8.5f * density
+        val arrowY = if (cardPenLink?.targetCardPoint != null) {
+          (cardRect.top + cardPenLink.targetCardPoint.y).coerceIn(cardRect.top + 16f * density, cardRect.bottom - 16f * density)
+        } else {
+          cardRect.centerY()
         }
-        canvas.drawLine(cardRect.right - 1f, midY, cardRect.right + 7f, midY, stemPaint)
 
-        // Right-pointing chevron pill/tab
-        val tabW = 20f
-        val tabH = 22f
-        val arrowTabRect = RectF(cardRect.right + 7f, midY - tabH / 2f, cardRect.right + 7f + tabW, midY + tabH / 2f)
+        // Sleek right-pointing triangle attached directly to the card's right border
+        val arrowPath = Path().apply {
+          moveTo(cardRect.right, arrowY - arrowH / 2f)
+          lineTo(cardRect.right + arrowW, arrowY)
+          lineTo(cardRect.right, arrowY + arrowH / 2f)
+          close()
+        }
 
-        val tabBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#0F172A")
+        val arrowBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#E2E8F0") // Clean off-white matching reference video
           style = Paint.Style.FILL
         }
-        val tabBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = docAccentColor
-          strokeWidth = 1.6f
-          style = Paint.Style.STROKE
-        }
-        canvas.drawRoundRect(arrowTabRect, 6f, 6f, tabBgPaint)
-        canvas.drawRoundRect(arrowTabRect, 6f, 6f, tabBorderPaint)
+        canvas.drawPath(arrowPath, arrowBgPaint)
 
-        // Chevron `>`
-        val chevronPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.WHITE
-          strokeWidth = 2f
+        val arrowStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#94A3B8") // Subtle outline
+          strokeWidth = 1f * density
           style = Paint.Style.STROKE
-          strokeCap = Paint.Cap.ROUND
           strokeJoin = Paint.Join.ROUND
         }
-        val chP = Path().apply {
-          moveTo(arrowTabRect.left + 7f, arrowTabRect.centerY() - 4.5f)
-          lineTo(arrowTabRect.left + 12.5f, arrowTabRect.centerY())
-          lineTo(arrowTabRect.left + 7f, arrowTabRect.centerY() + 4.5f)
-        }
-        canvas.drawPath(chP, chevronPaint)
+        canvas.drawPath(arrowPath, arrowStrokePaint)
 
-        // Hit rect with comfortable touch margin
+        // Hit rect with comfortable touch margin for effortless tapping
         cardExtractionArrowRects[card.id] = RectF(
-          arrowTabRect.left - 6f,
-          arrowTabRect.top - 8f,
-          arrowTabRect.right + 12f,
-          arrowTabRect.bottom + 8f
+          cardRect.right - 10f * density,
+          arrowY - 18f * density,
+          cardRect.right + 24f * density,
+          arrowY + 18f * density
         )
       }
 
@@ -4449,20 +4426,32 @@ class ThinkspaceView : View {
       canvas.restore() // Clip canvas rect
 
       // =========================================================================
-      // 4B. PERSISTENT SEMANTIC INKLINKS (Unclipped Cross-Zone Connections)
+      // 4B. PERSISTENT SEMANTIC INKLINKS (Clean Pen Stroke Connections - LiquidText)
       // =========================================================================
       inkLinkPdfAnchorScreenRects.clear()
       inkLinkCardAnchorScreenRects.clear()
 
+      val linkStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+      }
+      val linkDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+      }
+
       for (link in semanticInkLinks) {
         val card = cards.find { it.id == link.targetCardId } ?: continue
-        val isCardActive = draggingCard?.id == card.id || heldCardId == card.id || selectedCardId == card.id || magneticTargetCardId == card.id
 
         // 1. Compute PDF source in screen coordinates
         var srcSx = viewW / 2f
         var srcSy = if (effectiveSplitRatio > 0f) height * effectiveSplitRatio - 14f else height.toFloat()
+        var isSourceVisible = false
 
-        if (link.sourceDocId == activeDocumentId) {
+        val isCurrentDoc = link.sourceDocId.isEmpty() || activeDocumentId.isEmpty() ||
+          link.sourceDocId == activeDocumentId || link.sourceDocId == "default-doc" || activeDocumentId == "default-doc"
+
+        if (isCurrentDoc) {
           val pl = pageLayouts.find { it.pageIndex == link.sourcePageIndex }
           if (pl != null) {
             val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
@@ -4471,130 +4460,244 @@ class ThinkspaceView : View {
             val rawSy = pl.boundsOnScreen.top + (link.sourcePdfPoint.y / pSize.height) * pl.boundsOnScreen.height()
 
             val docBottom = if (effectiveSplitRatio > 0f) height * effectiveSplitRatio - 14f else height.toFloat()
-            // Clamp to document viewport if page is partially scrolled off
-            srcSx = rawSx.coerceIn(24f, viewW - 24f)
-            srcSy = rawSy.coerceIn(subheaderH + 8f, docBottom)
+            // In LiquidText: Line is drawn if the source text is within the visible document viewport
+            if (rawSy >= subheaderH - 30f && rawSy <= docBottom + 30f) {
+              srcSx = rawSx
+              srcSy = rawSy
+              isSourceVisible = true
+            }
           }
         }
 
-        // 2. Compute Card edge anchor facing the source in screen coordinates
-        val srcWorldX = camera.screenToWorldX(srcSx)
-        val srcWorldY = camera.screenToWorldY(srcSy, canvasTopY)
-        val edgeAnchorWorld = getCardEdgeAnchor(card, srcWorldX, srcWorldY)
+        // 2. Compute Card anchor position in screen coordinates from normalized anchors
+        val targetWx = card.x + (link.cardAnchorX * card.width)
+        val targetWy = card.y + (link.cardAnchorY * card.getHeight())
 
-        val cardTargetSx = edgeAnchorWorld.x * scaleFactor + panX
-        val cardTargetSy = canvasTopY + edgeAnchorWorld.y * scaleFactor + panY
+        val cardTargetSx = targetWx * scaleFactor + panX
+        val cardTargetSy = canvasTopY + targetWy * scaleFactor + panY
 
-        // 3. Draw the direct connection line
-        inkLinkRenderer.drawTether(
-          canvas = canvas,
-          startX = srcSx,
-          startY = srcSy,
-          endX = cardTargetSx,
-          endY = cardTargetSy,
-          color = link.color,
-          isHeld = isCardActive
-        )
+        // 3. Render PDF Source Soft Highlight Pill & Solid Connecting Pen Line
+        val linkLineColor = Color.parseColor("#10B981") // Vibrant emerald green matching penenginev.png
+        val sWidth = (3.5f * density).coerceAtLeast(3f)
 
-        // 4. Source anchor pin `●` (PDF end)
-        val pinOuterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = link.color
+        if (isSourceVisible) {
+          // Draw PDF source soft highlight pill over the text in PDF
+          if (link.sourcePdfRect.width() > 0) {
+            val pl = pageLayouts.find { it.pageIndex == link.sourcePageIndex }
+            if (pl != null) {
+              val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
+                ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+              val hlLeft = pl.boundsOnScreen.left + (link.sourcePdfRect.left / pSize.width) * pl.boundsOnScreen.width()
+              val hlTop = pl.boundsOnScreen.top + (link.sourcePdfRect.top / pSize.height) * pl.boundsOnScreen.height()
+              val hlRight = pl.boundsOnScreen.left + (link.sourcePdfRect.right / pSize.width) * pl.boundsOnScreen.width()
+              val hlBottom = pl.boundsOnScreen.top + (link.sourcePdfRect.bottom / pSize.height) * pl.boundsOnScreen.height()
+
+              val pdfHlPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#38BDF8") // Sky blue highlight matching penenginev.png panel 6
+                alpha = 115
+                style = Paint.Style.FILL
+              }
+              val hlRect = RectF(hlLeft - 3f * density, hlTop - 1.5f * density, hlRight + 3f * density, hlBottom + 1.5f * density)
+              canvas.drawRoundRect(hlRect, 4f * density, 4f * density, pdfHlPaint)
+            }
+          }
+
+          // Connecting solid pen line
+          linkStrokePaint.color = linkLineColor
+          linkStrokePaint.strokeWidth = sWidth
+          canvas.drawLine(srcSx, srcSy, cardTargetSx, cardTargetSy, linkStrokePaint)
+
+          // Smooth rounded endpoint at PDF
+          linkDotPaint.color = linkLineColor
+          canvas.drawCircle(srcSx, srcSy, 5f * density, linkDotPaint)
+        }
+
+        // 4. LiquidText-style Circular V Link Marker Badge at the Card Endpoint
+        // Scaled dynamically with workspace camera so it stays proportional to card content
+        val badgeRadius = (13f * density).coerceAtLeast(18f)
+        val vStrokeW = (2.8f * density).coerceAtLeast(3.2f)
+
+        // Drop shadow for crisp elevation
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.argb(70, 0, 0, 0)
           style = Paint.Style.FILL
         }
-        val pinInnerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.WHITE
+        canvas.drawCircle(cardTargetSx, cardTargetSy + 1.5f * density, badgeRadius, shadowPaint)
+
+        // Vibrant solid green circular badge background (matching penenginev.png)
+        val badgeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#10B981")
           style = Paint.Style.FILL
         }
-        val pinBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#0F172A")
-          strokeWidth = 1.2f * density
+        canvas.drawCircle(cardTargetSx, cardTargetSy, badgeRadius, badgeBgPaint)
+
+        // Crisp border ring
+        val badgeBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#047857")
+          strokeWidth = 1.6f * density
           style = Paint.Style.STROKE
         }
-        canvas.drawCircle(srcSx, srcSy, 6f * density, pinOuterPaint)
-        canvas.drawCircle(srcSx, srcSy, 6f * density, pinBorderPaint)
-        canvas.drawCircle(srcSx, srcSy, 2.5f * density, pinInnerPaint)
+        canvas.drawCircle(cardTargetSx, cardTargetSy, badgeRadius, badgeBorderPaint)
 
-        // 5. Target anchor pin `●` (Card edge end)
-        canvas.drawCircle(cardTargetSx, cardTargetSy, 5.5f * density, pinOuterPaint)
-        canvas.drawCircle(cardTargetSx, cardTargetSy, 5.5f * density, pinBorderPaint)
-        canvas.drawCircle(cardTargetSx, cardTargetSy, 2.2f * density, pinInnerPaint)
+        // Distinct, bold capital "V" inside the circular badge (matching penenginev.png)
+        val vSpan = badgeRadius * 0.58f
+        val vPath = Path().apply {
+          moveTo(cardTargetSx - vSpan * 0.72f, cardTargetSy - vSpan * 0.65f)
+          lineTo(cardTargetSx, cardTargetSy + vSpan * 0.70f)
+          lineTo(cardTargetSx + vSpan * 0.72f, cardTargetSy - vSpan * 0.65f)
+        }
+
+        val vPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#0F172A") // Deep black/slate for maximum punchy contrast
+          strokeWidth = vStrokeW
+          style = Paint.Style.STROKE
+          strokeCap = Paint.Cap.ROUND
+          strokeJoin = Paint.Join.ROUND
+        }
+        canvas.drawPath(vPath, vPaint)
 
         // Store hit rects for bidirectional tap navigation
-        inkLinkPdfAnchorScreenRects[link.id] = RectF(
-          srcSx - 22f * density, srcSy - 22f * density,
-          srcSx + 22f * density, srcSy + 22f * density
-        )
+        if (isSourceVisible) {
+          inkLinkPdfAnchorScreenRects[link.id] = RectF(
+            srcSx - 24f * density, srcSy - 24f * density,
+            srcSx + 24f * density, srcSy + 24f * density
+          )
+        }
         inkLinkCardAnchorScreenRects[link.id] = RectF(
-          cardTargetSx - 22f * density, cardTargetSy - 22f * density,
-          cardTargetSx + 22f * density, cardTargetSy + 22f * density
+          cardTargetSx - 26f * density, cardTargetSy - 26f * density,
+          cardTargetSx + 26f * density, cardTargetSy + 26f * density
         )
       }
 
-      // Live preview during cross-zone drawing
+      // Draw V Link Marker Tap Ripple if active
+      activeVLinkRipple?.let { r ->
+        val elapsed = System.currentTimeMillis() - r.timestamp
+        if (elapsed < 320) {
+          val prog = elapsed / 320f
+          val radius = (10f + prog * 18f) * density
+          val alpha = ((1f - prog) * 140).toInt().coerceIn(0, 255)
+          val rPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = r.color
+            this.alpha = alpha
+            style = Paint.Style.FILL
+          }
+          canvas.drawCircle(r.x, r.y, radius, rPaint)
+          postInvalidateOnAnimation()
+        } else {
+          activeVLinkRipple = null
+        }
+      }
+
+      // Live preview during cross-zone drawing (from PDF across divider into Canvas Card)
       if (isDrawingCrossZoneLink) {
-        val startSx = inkLinkSourceScreenStart.x
-        val startSy = inkLinkSourceScreenStart.y
+        val pl = pageLayouts.find { it.pageIndex == inkLinkSourcePageIndex }
+        val startSx = if (pl != null) {
+          val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
+            ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+          pl.boundsOnScreen.left + (inkLinkSourcePdfPoint.x / pSize.width) * pl.boundsOnScreen.width()
+        } else inkLinkSourceScreenStart.x
+
+        val startSy = if (pl != null) {
+          val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
+            ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+          pl.boundsOnScreen.top + (inkLinkSourcePdfPoint.y / pSize.height) * pl.boundsOnScreen.height()
+        } else inkLinkSourceScreenStart.y
+
+        // Draw soft source highlight over the text in the PDF during dragging
+        if (pl != null && inkLinkSourcePdfRect.width() > 0f) {
+          val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
+            ?: com.thinkspace.pdfengine.model.PageSize.LETTER
+          val hlLeft = pl.boundsOnScreen.left + (inkLinkSourcePdfRect.left / pSize.width) * pl.boundsOnScreen.width()
+          val hlTop = pl.boundsOnScreen.top + (inkLinkSourcePdfRect.top / pSize.height) * pl.boundsOnScreen.height()
+          val hlRight = pl.boundsOnScreen.left + (inkLinkSourcePdfRect.right / pSize.width) * pl.boundsOnScreen.width()
+          val hlBottom = pl.boundsOnScreen.top + (inkLinkSourcePdfRect.bottom / pSize.height) * pl.boundsOnScreen.height()
+          val liveHlPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = penColor
+            alpha = 100
+            style = Paint.Style.FILL
+          }
+          canvas.drawRoundRect(RectF(hlLeft - 3f * density, hlTop - 1.5f * density, hlRight + 3f * density, hlBottom + 1.5f * density), 4f * density, 4f * density, liveHlPaint)
+        }
+
         val curSx = inkLinkCurrentScreenTouch.x
         val curSy = inkLinkCurrentScreenTouch.y
 
         val (curWx, curWy) = canvasScreenToWorld(curSx, curSy, canvasTopY)
+        val worldMargin = (32f * density) / scaleFactor
         val hoverCard = cards.find {
-          val margin = 36f * density
-          curWx >= it.x - margin && curWx <= it.x + it.width + margin &&
-          curWy >= it.y - margin && curWy <= it.y + it.getHeight() + margin
+          curWx >= it.x - worldMargin && curWx <= it.x + it.width + worldMargin &&
+          curWy >= it.y - worldMargin && curWy <= it.y + it.getHeight() + worldMargin
         }
 
-        val finalTargetSx: Float
-        val finalTargetSy: Float
+        inkLinkTargetCardId = hoverCard?.id
+
+
+        val liveColor = Color.parseColor("#10B981")
+        val livePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = liveColor
+          strokeWidth = (3.5f * density).coerceAtLeast(3f)
+          style = Paint.Style.STROKE
+          strokeCap = Paint.Cap.ROUND
+          strokeJoin = Paint.Join.ROUND
+        }
+
+        val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = liveColor
+          style = Paint.Style.FILL
+        }
+        canvas.drawCircle(startSx, startSy, 5f * density, dotPaint)
 
         if (hoverCard != null) {
-          inkLinkTargetCardId = hoverCard.id
-          val srcWorldX = camera.screenToWorldX(startSx)
-          val srcWorldY = camera.screenToWorldY(startSy, canvasTopY)
-          val edgeWorld = getCardEdgeAnchor(hoverCard, srcWorldX, srcWorldY)
-          finalTargetSx = edgeWorld.x * scaleFactor + panX
-          finalTargetSy = canvasTopY + edgeWorld.y * scaleFactor + panY
+          // Snap connection endpoint to exact Card attachment point (clamped to card bounds)
+          val cardPointX = (curWx - hoverCard.x).coerceIn(0f, hoverCard.width)
+          val cardPointY = (curWy - hoverCard.y).coerceIn(0f, hoverCard.getHeight())
+          val anchorSx = (hoverCard.x + cardPointX) * scaleFactor + panX
+          val anchorSy = canvasTopY + (hoverCard.y + cardPointY) * scaleFactor + panY
 
-          // Draw card hover glow
-          val cardSx = hoverCard.x * scaleFactor + panX
-          val cardSy = canvasTopY + hoverCard.y * scaleFactor + panY
-          val cardSw = hoverCard.width * scaleFactor
-          val cardSh = hoverCard.getHeight() * scaleFactor
-          val hoverRect = RectF(cardSx - 4f * density, cardSy - 4f * density, cardSx + cardSw + 4f * density, cardSy + cardSh + 4f * density)
-          val hoverPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = penColor
-            strokeWidth = 3f * density
+          // Draw dynamic connection line directly to Card attachment point
+          canvas.drawLine(startSx, startSy, anchorSx, anchorSy, livePaint)
+
+          // Preview Circular V Marker at the attachment point (matching penenginev.png panel 3)
+          val previewRadius = (13f * density).coerceAtLeast(18f)
+          val previewHalo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = liveColor
+            alpha = 70
+            style = Paint.Style.FILL
+          }
+          canvas.drawCircle(anchorSx, anchorSy, previewRadius + 4f * density, previewHalo)
+
+          val previewBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = liveColor
+            style = Paint.Style.FILL
+          }
+          canvas.drawCircle(anchorSx, anchorSy, previewRadius, previewBg)
+
+          val previewBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#047857")
+            strokeWidth = 1.6f * density
             style = Paint.Style.STROKE
           }
-          canvas.drawRoundRect(hoverRect, 14f * density, 14f * density, hoverPaint)
+          canvas.drawCircle(anchorSx, anchorSy, previewRadius, previewBorder)
+
+          val pvSpan = previewRadius * 0.58f
+          val pvPath = Path().apply {
+            moveTo(anchorSx - pvSpan * 0.72f, anchorSy - pvSpan * 0.65f)
+            lineTo(anchorSx, anchorSy + pvSpan * 0.70f)
+            lineTo(anchorSx + pvSpan * 0.72f, anchorSy - pvSpan * 0.65f)
+          }
+          val pvPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#0F172A")
+            strokeWidth = (2.8f * density).coerceAtLeast(3.2f)
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+          }
+          canvas.drawPath(pvPath, pvPaint)
         } else {
-          inkLinkTargetCardId = null
-          finalTargetSx = curSx
-          finalTargetSy = curSy
+          // Dynamic live connection line toward finger
+          canvas.drawLine(startSx, startSy, curSx, curSy, livePaint)
+          canvas.drawCircle(curSx, curSy, (3.5f * density) / 2f, dotPaint)
         }
-
-        inkLinkRenderer.drawTether(
-          canvas = canvas,
-          startX = startSx,
-          startY = startSy,
-          endX = finalTargetSx,
-          endY = finalTargetSy,
-          color = penColor,
-          isHeld = true
-        )
-
-        val livePinPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = penColor
-          style = Paint.Style.FILL
-        }
-        val livePinInner = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.WHITE
-          style = Paint.Style.FILL
-        }
-        canvas.drawCircle(startSx, startSy, 6f * density, livePinPaint)
-        canvas.drawCircle(startSx, startSy, 2.5f * density, livePinInner)
-        canvas.drawCircle(finalTargetSx, finalTargetSy, 5.5f * density, livePinPaint)
-        canvas.drawCircle(finalTargetSx, finalTargetSy, 2.2f * density, livePinInner)
       }
 
       // =========================================================================
@@ -5861,11 +5964,12 @@ class ThinkspaceView : View {
           }
         }
 
-        // 0B. Check InkLink Card Anchor Pin Tap (Screen space)
+        // 0B. Check InkLink Card Anchor Pin / V Marker Tap (Screen space)
         val hitCardLinkEntry = inkLinkCardAnchorScreenRects.entries.find { it.value.contains(sx, sy) }
         if (hitCardLinkEntry != null) {
           val link = semanticInkLinks.find { it.id == hitCardLinkEntry.key }
           if (link != null) {
+            activeVLinkRipple = VLinkRipple(sx, sy, link.color, System.currentTimeMillis())
             val cardDocId = link.sourceDocId.takeIf { it.isNotEmpty() } ?: activeDocumentId
             val isCrossDoc = cardDocId.isNotEmpty() && cardDocId != activeDocumentId
             if (isCrossDoc) {
@@ -5879,6 +5983,8 @@ class ThinkspaceView : View {
               performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
               hudToast.show("Navigated to PDF Source p.${link.sourcePageIndex + 1}")
             }
+            selectedCardId = null
+            draggingCard = null
             invalidate()
             return true
           }
@@ -6066,18 +6172,36 @@ class ThinkspaceView : View {
               activeDocPath.moveTo(px, py)
 
               if (activeTool == "pen") {
-                inkLinkSourceDocId = activeDocumentId
+                inkLinkSourceDocId = activeDocumentId.ifEmpty { "default-doc" }
                 inkLinkSourcePageIndex = pl.pageIndex
                 inkLinkSourcePdfPoint = NativePoint(px, py)
                 val words = pageWordsCache[pl.pageIndex]
-                val nearbyWord = words?.find { w ->
+                val matchingWord = words?.find { w ->
                   val b = w.bounds
-                  px in (b.left - 24f)..(b.right + 24f) && py in (b.top - 18f)..(b.bottom + 18f)
+                  px in (b.left - 18f)..(b.right + 18f) && py in (b.top - 14f)..(b.bottom + 14f)
                 }
-                inkLinkSourcePdfRect = if (nearbyWord != null) {
-                  RectF(nearbyWord.bounds.left, nearbyWord.bounds.top, nearbyWord.bounds.right, nearbyWord.bounds.bottom)
+                inkLinkSourcePdfRect = if (matchingWord != null) {
+                  val mb = matchingWord.bounds
+                  val mCenterY = (mb.top + mb.bottom) / 2f
+                  val mCenterX = (mb.left + mb.right) / 2f
+                  val lineWords = words?.filter { w ->
+                    val b = w.bounds
+                    val cy = (b.top + b.bottom) / 2f
+                    val cx = (b.left + b.right) / 2f
+                    kotlin.math.abs(cy - mCenterY) < 8f && kotlin.math.abs(cx - mCenterX) < 180f
+                  }?.sortedBy { it.bounds.left }
+                  if (!lineWords.isNullOrEmpty()) {
+                    RectF(
+                      lineWords.first().bounds.left,
+                      lineWords.minOf { it.bounds.top },
+                      lineWords.last().bounds.right,
+                      lineWords.maxOf { it.bounds.bottom }
+                    )
+                  } else {
+                    RectF(mb.left, mb.top, mb.right, mb.bottom)
+                  }
                 } else {
-                  RectF(px - 30f, py - 10f, px + 30f, py + 10f)
+                  RectF(px - 36f, py - 12f, px + 36f, py + 12f)
                 }
                 inkLinkSourceScreenStart.set(sx, sy)
                 inkLinkCurrentScreenTouch.set(sx, sy)
@@ -6595,40 +6719,58 @@ class ThinkspaceView : View {
             }
           }
 
-          // 1. Check Excerpt Card Clicks
+          // 1. Check Excerpt Card Clicks (including arrow or jump badge bounds)
           val clickedCard = cards.findLast { c ->
             val ch = c.getHeight()
-            wx >= c.x && wx <= c.x + c.width && wy >= c.y && wy <= c.y + ch
+            val insideBody = wx >= c.x && wx <= c.x + c.width && wy >= c.y && wy <= c.y + ch
+            val insideArrow = cardExtractionArrowRects[c.id]?.contains(wx, wy) == true
+            val insideJump = cardJumpBtnRects[c.id]?.contains(wx, wy) == true
+            insideBody || insideArrow || insideJump
           }
 
           if (clickedCard != null) {
             selectedCardId = clickedCard.id
 
-            // Check if user tapped the dedicated `>` Extraction Arrow or source badge
+            // Check if user tapped the dedicated `▶` Extraction Arrow or source badge
             val arrowRect = cardExtractionArrowRects[clickedCard.id]
             val jumpRect = cardJumpBtnRects[clickedCard.id]
             val isExtractionArrowTap = arrowRect != null && arrowRect.contains(wx, wy)
             val isJumpBadgeTap = jumpRect != null && jumpRect.contains(wx, wy)
             val isSourceNavigationTap = isExtractionArrowTap || isJumpBadgeTap
 
+            val penLink = semanticInkLinks.findLast { it.targetCardId == clickedCard.id }
+
             // Multi-document: check if this card belongs to a different document
-            val cardDocId = clickedCard.documentId.takeIf { it.isNotEmpty() } ?: activeDocumentId
+            val cardDocId = clickedCard.documentId.takeIf { it.isNotEmpty() }
+              ?: penLink?.sourceDocId?.takeIf { it.isNotEmpty() }
+              ?: activeDocumentId
             val isCrossDocJump = isSourceNavigationTap && cardDocId.isNotEmpty() && cardDocId != activeDocumentId
 
             if (isSourceNavigationTap) {
+              val targetPageNum = if (penLink != null) {
+                (penLink.sourcePageIndex + 1).coerceAtLeast(1)
+              } else {
+                clickedCard.pageNumber.coerceAtLeast(1)
+              }
+              val targetRects = if (penLink != null && penLink.sourcePdfRect.width() > 0) {
+                listOf(penLink.sourcePdfRect)
+              } else {
+                clickedCard.sourceRects
+              }
+
               if (isCrossDocJump) {
                 // Store pending page navigation so that when the document activates, it scrolls to the page
-                pendingScrollToPage = clickedCard.pageNumber
-                pendingPulseRects = clickedCard.sourceRects
+                pendingScrollToPage = targetPageNum
+                pendingPulseRects = targetRects
                 // Cross-document source jump: ask RN to switch documents, then scroll
-                dispatchRequestDocumentSwitchEvent(clickedCard.id, cardDocId, clickedCard.pageNumber)
+                dispatchRequestDocumentSwitchEvent(clickedCard.id, cardDocId, targetPageNum)
                 performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                hudToast.show("Switching to source document · p.${clickedCard.pageNumber}")
+                hudToast.show("Switching to source document · p.$targetPageNum")
               } else {
                 // Same-document: Bidirectional Navigation — scroll document to card's page & pulse highlight
-                scrollToDocumentPage(clickedCard.pageNumber, clickedCard.sourceRects)
+                scrollToDocumentPage(targetPageNum, targetRects)
                 performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                hudToast.show("Source: p.${clickedCard.pageNumber}")
+                hudToast.show("Source: p.$targetPageNum")
               }
               invalidate()
               return true
@@ -7128,15 +7270,20 @@ class ThinkspaceView : View {
         }
 
         // Cross-zone InkLink drag detection (from Doc across divider to Canvas)
-        val curSplitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
-        if (isDrawingOnDoc && (sy > curSplitY || isDrawingCrossZoneLink) && activeTool == "pen") {
-          isDrawingCrossZoneLink = true
+        val curSplitY = if (hasDoc) viewH * effectiveSplitRatio else 0f
+        val inCanvas = sy >= curSplitY - 16f || (canvasTopY > 0f && sy >= canvasTopY - 16f) || isDrawingCrossZoneLink
+        if (isDrawingOnDoc && inCanvas && activeTool == "pen") {
+          if (!isDrawingCrossZoneLink) {
+            isDrawingCrossZoneLink = true
+            activeDocPoints.clear()
+            activeDocPath.reset()
+          }
           inkLinkCurrentScreenTouch.set(sx, sy)
           val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          val worldMargin = (36f * density) / scaleFactor
           val hoverCard = cards.find {
-            val margin = 28f * density
-            wx >= it.x - margin && wx <= it.x + it.width + margin &&
-            wy >= it.y - margin && wy <= it.y + it.getHeight() + margin
+            wx >= it.x - worldMargin && wx <= it.x + it.width + worldMargin &&
+            wy >= it.y - worldMargin && wy <= it.y + it.getHeight() + worldMargin
           }
           inkLinkTargetCardId = hoverCard?.id
           invalidate()
@@ -7531,25 +7678,33 @@ class ThinkspaceView : View {
         }
 
         // Finalize Cross-Zone Semantic InkLink
-        if (isDrawingCrossZoneLink && inkLinkSourceDocId.isNotEmpty()) {
+        if (isDrawingCrossZoneLink) {
           val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
+          val worldMargin = (36f * density) / scaleFactor
           val targetCard = cards.find {
-            val margin = 36f * density
-            wx >= it.x - margin && wx <= it.x + it.width + margin &&
-            wy >= it.y - margin && wy <= it.y + it.getHeight() + margin
-          }
+            wx >= it.x - worldMargin && wx <= it.x + it.width + worldMargin &&
+            wy >= it.y - worldMargin && wy <= it.y + it.getHeight() + worldMargin
+          } ?: (inkLinkTargetCardId?.let { tid -> cards.find { it.id == tid } })
           if (targetCard != null) {
+            val cardPointX = (wx - targetCard.x).coerceIn(0f, targetCard.width)
+            val cardPointY = (wy - targetCard.y).coerceIn(0f, targetCard.getHeight())
+            val normX = (cardPointX / targetCard.width.coerceAtLeast(1f)).coerceIn(0.02f, 0.98f)
+            val normY = (cardPointY / targetCard.getHeight().coerceAtLeast(1f)).coerceIn(0.02f, 0.98f)
+            val srcDocId = inkLinkSourceDocId.ifEmpty { activeDocumentId.ifEmpty { "default-doc" } }
             val newLink = NativeInkLink(
               id = "inklink-${System.currentTimeMillis()}",
-              sourceDocId = inkLinkSourceDocId,
+              sourceDocId = srcDocId,
               sourcePageIndex = inkLinkSourcePageIndex,
               sourcePdfRect = inkLinkSourcePdfRect,
               sourcePdfPoint = inkLinkSourcePdfPoint,
               targetCardId = targetCard.id,
-              color = penColor,
-              strokeWidth = penThickness,
-              style = "elastic",
-              createdAt = System.currentTimeMillis()
+              color = Color.parseColor("#10B981"),
+              strokeWidth = penThickness.coerceAtLeast(3.5f),
+              style = "straight",
+              createdAt = System.currentTimeMillis(),
+              targetCardPoint = NativePoint(cardPointX, cardPointY),
+              cardAnchorX = normX,
+              cardAnchorY = normY
             )
             semanticInkLinks.add(newLink)
             undoRedoManager.record(CreateSemanticInkLinkAction(
@@ -7571,6 +7726,8 @@ class ThinkspaceView : View {
             performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
             hudToast.show("Linked Document p.${inkLinkSourcePageIndex + 1} to Card")
           }
+          selectedCardId = null
+          draggingCard = null
           isDrawingCrossZoneLink = false
           inkLinkTargetCardId = null
           activeDocPoints.clear()
@@ -9849,13 +10006,26 @@ class ThinkspaceView : View {
     if (json.isNullOrEmpty()) return
     try {
       val arr = JSONArray(json)
-      semanticInkLinks.clear()
+      val parsedLinks = mutableListOf<NativeInkLink>()
       for (i in 0 until arr.length()) {
         val obj = arr.getJSONObject(i)
-        val id = obj.getString("id")
-        val srcDoc = obj.optString("sourceDocId", activeDocumentId)
-        val srcPage = obj.optInt("sourcePageIndex", 0)
-        val rectObj = obj.optJSONObject("sourcePdfRect")
+        val id = obj.optString("id", "inklink-${System.currentTimeMillis()}-$i")
+        val srcEnd = obj.optJSONObject("sourceEndpoint")
+        val tgtEnd = obj.optJSONObject("targetEndpoint")
+
+        val srcDoc = if (obj.has("sourceDocId") && obj.optString("sourceDocId").isNotEmpty()) {
+          obj.optString("sourceDocId")
+        } else {
+          srcEnd?.optString("documentId", activeDocumentId.ifEmpty { "default-doc" }) ?: activeDocumentId.ifEmpty { "default-doc" }
+        }
+
+        val srcPage = if (obj.has("sourcePageIndex")) {
+          obj.optInt("sourcePageIndex", 0)
+        } else {
+          srcEnd?.optInt("pageIndex", 0) ?: 0
+        }
+
+        val rectObj = obj.optJSONObject("sourcePdfRect") ?: srcEnd?.optJSONObject("sourceRect")
         val rect = if (rectObj != null) {
           RectF(
             rectObj.optDouble("left", 0.0).toFloat(),
@@ -9864,30 +10034,73 @@ class ThinkspaceView : View {
             rectObj.optDouble("bottom", 0.0).toFloat()
           )
         } else RectF(0f, 0f, 100f, 20f)
-        val ptObj = obj.optJSONObject("sourcePdfPoint")
+
+        val ptObj = obj.optJSONObject("sourcePdfPoint") ?: srcEnd?.optJSONObject("anchorPoint")
         val pt = if (ptObj != null) {
           NativePoint(ptObj.optDouble("x", 0.0).toFloat(), ptObj.optDouble("y", 0.0).toFloat())
         } else NativePoint(rect.centerX(), rect.centerY())
-        val targetCard = obj.getString("targetCardId")
-        val color = try { Color.parseColor(obj.optString("color", "#00ADB5")) } catch (_: Exception) { Color.parseColor("#00ADB5") }
-        val strokeW = obj.optDouble("strokeWidth", 3.5).toFloat()
-        val style = obj.optString("style", "elastic")
+
+        val targetCard = if (obj.has("targetCardId") && obj.optString("targetCardId").isNotEmpty()) {
+          obj.optString("targetCardId")
+        } else {
+          tgtEnd?.optString("cardId", "") ?: ""
+        }
+        if (targetCard.isEmpty()) continue
+
+        val anchorX = if (obj.has("cardAnchorX")) {
+          obj.optDouble("cardAnchorX", 0.5).toFloat()
+        } else if (tgtEnd != null && tgtEnd.has("cardAnchorX")) {
+          tgtEnd.optDouble("cardAnchorX", 0.5).toFloat()
+        } else if (tgtEnd?.optJSONObject("anchorPoint") != null) {
+          tgtEnd.optJSONObject("anchorPoint")?.optDouble("x", 0.5)?.toFloat() ?: 0.5f
+        } else 0.5f
+
+        val anchorY = if (obj.has("cardAnchorY")) {
+          obj.optDouble("cardAnchorY", 0.5).toFloat()
+        } else if (tgtEnd != null && tgtEnd.has("cardAnchorY")) {
+          tgtEnd.optDouble("cardAnchorY", 0.5).toFloat()
+        } else if (tgtEnd?.optJSONObject("anchorPoint") != null) {
+          tgtEnd.optJSONObject("anchorPoint")?.optDouble("y", 0.5)?.toFloat() ?: 0.5f
+        } else 0.5f
+
+        val targetCardPtObj = obj.optJSONObject("targetCardPoint") ?: tgtEnd?.optJSONObject("anchorPoint")
+        val targetCardPt = if (targetCardPtObj != null) {
+          NativePoint(targetCardPtObj.optDouble("x", 0.0).toFloat(), targetCardPtObj.optDouble("y", 0.0).toFloat())
+        } else null
+
+        val color = try {
+          val colStr = obj.optString("color", "#10B981")
+          Color.parseColor(colStr)
+        } catch (_: Exception) {
+          Color.parseColor("#10B981")
+        }
+
+        val strokeW = obj.optDouble("strokeWidth", obj.optDouble("thickness", 3.5)).toFloat()
+        val style = obj.optString("style", "straight")
         val createdAt = obj.optLong("createdAt", System.currentTimeMillis())
 
-        semanticInkLinks.add(NativeInkLink(
+        parsedLinks.add(NativeInkLink(
           id = id,
           sourceDocId = srcDoc,
           sourcePageIndex = srcPage,
           sourcePdfRect = rect,
           sourcePdfPoint = pt,
           targetCardId = targetCard,
+          targetCardPoint = targetCardPt,
           color = color,
           strokeWidth = strokeW,
           style = style,
-          createdAt = createdAt
+          createdAt = createdAt,
+          cardAnchorX = anchorX,
+          cardAnchorY = anchorY
         ))
       }
-      invalidate()
+
+      if (parsedLinks.isNotEmpty() || arr.length() == 0) {
+        semanticInkLinks.clear()
+        semanticInkLinks.addAll(parsedLinks)
+        invalidate()
+      }
     } catch (_: Exception) {}
   }
 
@@ -9956,6 +10169,14 @@ class ThinkspaceView : View {
             put("y", link.sourcePdfPoint.y.toDouble())
           })
           put("targetCardId", link.targetCardId)
+          put("cardAnchorX", link.cardAnchorX.toDouble())
+          put("cardAnchorY", link.cardAnchorY.toDouble())
+          if (link.targetCardPoint != null) {
+            put("targetCardPoint", JSONObject().apply {
+              put("x", link.targetCardPoint.x.toDouble())
+              put("y", link.targetCardPoint.y.toDouble())
+            })
+          }
           put("color", String.format("#%06X", (0xFFFFFF and link.color)))
           put("strokeWidth", link.strokeWidth.toDouble())
           put("style", link.style)
@@ -9998,13 +10219,55 @@ class ThinkspaceView : View {
     val surfaceId = UIManagerHelper.getSurfaceId(this)
     val eventDispatcher = getEventDispatcher()
     val hexColor = String.format("#%06X", (0xFFFFFF and link.color))
+
+    val fullJson = JSONObject().apply {
+      put("id", link.id)
+      put("sourceDocId", link.sourceDocId)
+      put("sourcePageIndex", link.sourcePageIndex)
+      put("targetCardId", link.targetCardId)
+      put("cardAnchorX", link.cardAnchorX.toDouble())
+      put("cardAnchorY", link.cardAnchorY.toDouble())
+      put("sourceEndpoint", JSONObject().apply {
+        put("type", "pdf")
+        put("documentId", link.sourceDocId)
+        put("pageIndex", link.sourcePageIndex)
+        put("sourceRect", JSONObject().apply {
+          put("left", link.sourcePdfRect.left.toDouble())
+          put("top", link.sourcePdfRect.top.toDouble())
+          put("right", link.sourcePdfRect.right.toDouble())
+          put("bottom", link.sourcePdfRect.bottom.toDouble())
+        })
+        put("anchorPoint", JSONObject().apply {
+          put("x", link.sourcePdfPoint.x.toDouble())
+          put("y", link.sourcePdfPoint.y.toDouble())
+        })
+      })
+      put("targetEndpoint", JSONObject().apply {
+        put("type", "card")
+        put("cardId", link.targetCardId)
+        put("cardAnchorX", link.cardAnchorX.toDouble())
+        put("cardAnchorY", link.cardAnchorY.toDouble())
+        put("anchorPoint", JSONObject().apply {
+          put("x", link.cardAnchorX.toDouble())
+          put("y", link.cardAnchorY.toDouble())
+        })
+      })
+      put("color", hexColor)
+      put("thickness", link.strokeWidth.toDouble())
+      put("style", link.style)
+      put("createdAt", link.createdAt.toString())
+    }.toString()
+
     val data = Arguments.createMap().apply {
+      putString("linkJson", fullJson)
       putString("id", link.id)
       putString("sourceDocId", link.sourceDocId)
       putInt("sourcePageIndex", link.sourcePageIndex)
       putDouble("sourceX", link.sourcePdfPoint.x.toDouble())
       putDouble("sourceY", link.sourcePdfPoint.y.toDouble())
       putString("targetCardId", link.targetCardId)
+      putDouble("cardAnchorX", link.cardAnchorX.toDouble())
+      putDouble("cardAnchorY", link.cardAnchorY.toDouble())
       putString("color", hexColor)
       putDouble("strokeWidth", link.strokeWidth.toDouble())
       putString("style", link.style)

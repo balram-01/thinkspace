@@ -1103,11 +1103,13 @@ export const ThinkspaceView = React.forwardRef(function ThinkspaceViewComponent(
       ctx.stroke();
     });
 
-    // Tether Cords
+    // Tether Cords - disabled on card selection to prevent unwanted string lines
     inkLinks.forEach((link) => {
       const card = excerpts.find((e) => e.id === link.sourceExcerptId);
       if (!card) return;
-      const isHeld = draggingCardId === card.id || selectedCardId === card.id;
+      // Do not draw tether cord when card is selected to keep the workspace clean
+      if (selectedCardId === card.id && !draggingCardId) return;
+      const isHeld = draggingCardId === card.id;
       const cardPos = worldToCanvasScreen(card.x, card.y, canvasTopY);
       const startX = Math.max(
         10,
