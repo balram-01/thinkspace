@@ -15,6 +15,11 @@ Pod::Spec.new do |s|
 
   s.source_files = "ios/**/*.{h,m,mm,swift,cpp}"
   s.private_header_files = "ios/**/*.h"
+  s.swift_version = "5.0"
+  s.frameworks = "UIKit", "PDFKit", "PencilKit", "Vision", "CoreGraphics"
+  s.pod_target_xcconfig = {
+    "DEFINES_MODULE" => "YES"
+  }
 
   install_modules_dependencies(s)
 end
