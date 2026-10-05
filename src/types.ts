@@ -173,66 +173,69 @@ export interface PenState {
 }
 
 export const DEFAULT_PEN_FAVORITES: string[] = [
-  '#E87A90',
-  '#F6AD55',
-  '#76E4F7',
-  '#4A7BB0',
-  '#10B981',
-  '#94A3B8',
-  '#EF4444',
-  '#FACC15',
-  '#0D9488',
-  '#2563EB',
-  '#22C55E',
-  '#6B7280',
-  '#A855F7',
-  '#991B1B',
-  '#EC4899',
-  '#93C5FD',
-  '#14B8A6',
+  // Row 1
+  '#EF4444', // Red
+  '#FFFF00', // Yellow
+  '#22C55E', // Green
+  '#00F0FF', // Cyan
+  '#3B82F6', // Blue
+  '#A855F7', // Purple
+  // Row 2
+  '#F87171', // Salmon / Light Red
+  '#FFF59D', // Pale Yellow
+  '#86EFAC', // Mint / Light Green
+  '#A5F3FC', // Pale Cyan
+  '#93C5FD', // Soft Blue
+  '#D8B4FE', // Lavender / Light Purple
+  // Row 3
+  '#991B1B', // Dark Red
+  '#CA8A04', // Gold / Ochre
+  '#15803D', // Forest Green
+  '#0F766E', // Teal
+  '#1E3A8A', // Deep Navy
 ];
 
 export const EXPANDED_PEN_PALETTE: string[] = [
   // Row 1
-  '#E87A90',
-  '#F6AD55',
-  '#76E4F7',
-  '#4A7BB0',
-  '#334155',
-  '#94A3B8',
-  '#A855F7',
-  '#EC4899',
+  '#EF4444', // Red
+  '#F97316', // Orange
+  '#FFFF00', // Yellow
+  '#22C55E', // Green
+  '#00F0FF', // Cyan
+  '#3B82F6', // Blue
+  '#A855F7', // Purple
+  '#EC4899', // Magenta
   // Row 2
-  '#EF4444',
-  '#F97316',
-  '#FACC15',
-  '#2563EB',
-  '#22C55E',
-  '#93C5FD',
-  '#D946EF',
-  '#F472B6',
+  '#F87171', // Light Coral
+  '#FDBA74', // Peach
+  '#FFF59D', // Pale Yellow
+  '#86EFAC', // Mint
+  '#A5F3FC', // Pale Cyan
+  '#93C5FD', // Soft Blue
+  '#D8B4FE', // Lavender
+  '#F472B6', // Pink
   // Row 3
-  '#991B1B',
-  '#B45309',
-  '#CA8A04',
-  '#15803D',
-  '#0D9488',
-  '#1D4ED8',
-  '#6D28D9',
-  '#86198F',
+  '#991B1B', // Dark Red
+  '#9A3412', // Brown
+  '#CA8A04', // Ochre / Gold
+  '#15803D', // Forest Green
+  '#0F766E', // Teal
+  '#1E3A8A', // Deep Navy
+  '#581C87', // Deep Purple
+  '#831843', // Plum / Dark Magenta
   // Row 4
-  '#FFFFFF',
-  '#E2E8F0',
-  '#CBD5E1',
-  '#94A3B8',
-  '#64748B',
-  '#475569',
-  '#000000',
-  '#E5E7EB',
+  '#FFFFFF', // White
+  '#E2E8F0', // Light Silver
+  '#CBD5E1', // Silver
+  '#94A3B8', // Medium Gray
+  '#64748B', // Slate Gray
+  '#334155', // Dark Charcoal
+  '#000000', // Black
+  '#FFFFFF_DIVIDER', // White with horizontal divider
 ];
 
 export const PEN_THICKNESS_PRESETS: number[] = [
-  1.5, 2.5, 3.5, 5.0, 7.0, 9.5, 12.0,
+  2.5, 4.5, 7.0, 10.5, 14.5, 20.0,
 ];
 
 export type InkLinkEndpointType = 'pdf' | 'card' | 'note' | 'notebookPage';

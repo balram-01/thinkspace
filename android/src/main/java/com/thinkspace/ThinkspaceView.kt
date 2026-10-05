@@ -2885,7 +2885,7 @@ class ThinkspaceView : View {
                     style = Paint.Style.STROKE
                     strokeCap = Paint.Cap.ROUND
                     strokeJoin = Paint.Join.ROUND
-                    strokeWidth = if (isHl) 18f else penThickness
+                    strokeWidth = if (isHl) max(penThickness, 12f) else penThickness
                     if (isHl) alpha = 115
                   }
                   canvas.drawPath(activeDocPath, activePaint)
@@ -3984,7 +3984,7 @@ class ThinkspaceView : View {
       val isHighlighter = activeTool == "highlighter"
       val curPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = if (isHighlighter) selectedColor else penColor
-        strokeWidth = if (isHighlighter) 20f else penThickness
+        strokeWidth = if (isHighlighter) max(penThickness, 12f) else penThickness
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
@@ -7304,7 +7304,7 @@ class ThinkspaceView : View {
             val py = ((sy - pl.boundsOnScreen.top) / pl.boundsOnScreen.height()) * activeDocStrokePageH
             val pressure = event.pressure.takeIf { it > 0f } ?: 1.0f
 
-            if (activeTool == "pen" && penDrawingMode == "straight") {
+            if ((activeTool == "pen" || activeTool == "highlighter") && penDrawingMode == "straight") {
               val startPt = activeDocPoints.first()
               activeDocPoints.clear()
               activeDocPoints.add(startPt)
@@ -7327,7 +7327,7 @@ class ThinkspaceView : View {
           val (wx, wy) = canvasScreenToWorld(sx, sy, canvasTopY)
           val pressure = event.pressure.takeIf { it > 0f } ?: 1.0f
 
-          if (activeTool == "pen" && penDrawingMode == "straight") {
+          if ((activeTool == "pen" || activeTool == "highlighter") && penDrawingMode == "straight") {
             val startPt = activePoints.first()
             activePoints.clear()
             activePoints.add(startPt)
@@ -7746,13 +7746,13 @@ class ThinkspaceView : View {
         // Finalize Document Inking Stroke
         if (isDrawingOnDoc && activeDocPoints.isNotEmpty() && activeDocStrokePageIndex >= 0) {
           val isHl = activeTool == "highlighter"
-          val isStraight = activeTool == "pen" && penDrawingMode == "straight"
+          val isStraight = (activeTool == "pen" || activeTool == "highlighter") && penDrawingMode == "straight"
           val newPageStroke = PdfPageStroke(
             id = "doc-stroke-${System.currentTimeMillis()}",
             pageIndex = activeDocStrokePageIndex,
             points = activeDocPoints.toList(),
             color = if (isHl) selectedColor else penColor,
-            strokeWidth = if (isHl) 18f else penThickness,
+            strokeWidth = if (isHl) max(penThickness, 12f) else penThickness,
             isHighlighter = isHl,
             isStraight = isStraight
           )
@@ -7777,12 +7777,12 @@ class ThinkspaceView : View {
         // Finalize Canvas Inking Stroke
         if (activePoints.isNotEmpty()) {
           val isHl = activeTool == "highlighter"
-          val isStraight = activeTool == "pen" && penDrawingMode == "straight"
+          val isStraight = (activeTool == "pen" || activeTool == "highlighter") && penDrawingMode == "straight"
           val newStroke = NativeStroke(
             id = "stroke-${System.currentTimeMillis()}",
             points = activePoints.toList(),
             color = if (isHl) selectedColor else penColor,
-            strokeWidth = if (isHl) 20f else penThickness,
+            strokeWidth = if (isHl) max(penThickness, 12f) else penThickness,
             isHighlighter = isHl,
             isStraight = isStraight
           )

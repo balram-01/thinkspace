@@ -153,6 +153,18 @@ export default function App() {
     }
   }, [tool, penMode, penColor, penThickness]);
 
+  const handleHighlighterPress = useCallback(() => {
+    if (tool !== 'highlighter') {
+      setTool('highlighter');
+      setIsPenSettingsOpen(true);
+      thinkspaceRef.current?.setPenMode(penMode);
+      thinkspaceRef.current?.setPenColor(penColor);
+      thinkspaceRef.current?.setPenThickness(penThickness);
+    } else {
+      setIsPenSettingsOpen((prev) => !prev);
+    }
+  }, [tool, penMode, penColor, penThickness]);
+
   const handleSelectPenDrawingMode = useCallback((mode: PenDrawingMode) => {
     setPenMode(mode);
     thinkspaceRef.current?.setPenMode(mode);
@@ -606,14 +618,21 @@ export default function App() {
                 activeOpacity={0.7}
                 onPress={handlePenPress}
               >
-                <Text
+                <View
                   style={[
-                    styles.toolIcon,
-                    tool === 'pen' && styles.toolIconActive,
+                    styles.toolIconBadge,
+                    tool === 'pen' && styles.toolIconBadgeActive,
                   ]}
                 >
-                  ✏️
-                </Text>
+                  <Text
+                    style={[
+                      styles.toolIcon,
+                      tool === 'pen' && styles.toolIconActive,
+                    ]}
+                  >
+                    ✏️
+                  </Text>
+                </View>
                 <Text
                   style={[
                     styles.toolLabel,
@@ -639,19 +658,23 @@ export default function App() {
                   tool === 'highlighter' && styles.toolItemActive,
                 ]}
                 activeOpacity={0.7}
-                onPress={() => {
-                  setTool('highlighter');
-                  setIsPenSettingsOpen(false);
-                }}
+                onPress={handleHighlighterPress}
               >
-                <Text
+                <View
                   style={[
-                    styles.toolIcon,
-                    tool === 'highlighter' && styles.toolIconActive,
+                    styles.toolIconBadge,
+                    tool === 'highlighter' && styles.toolIconBadgeActive,
                   ]}
                 >
-                  🖍️
-                </Text>
+                  <Text
+                    style={[
+                      styles.toolIcon,
+                      tool === 'highlighter' && styles.toolIconActive,
+                    ]}
+                  >
+                    🖍️
+                  </Text>
+                </View>
                 <Text
                   style={[
                     styles.toolLabel,
@@ -660,6 +683,14 @@ export default function App() {
                 >
                   Highlighter
                 </Text>
+                {tool === 'highlighter' && (
+                  <View
+                    style={[
+                      styles.penColorIndicator,
+                      { backgroundColor: penColor },
+                    ]}
+                  />
+                )}
               </TouchableOpacity>
 
               {/* [Eraser] */}
@@ -953,6 +984,28 @@ export default function App() {
             </Text>
           </TouchableOpacity>
         </View>
+
+        {/* Floating Active Tool Indicator matching Screenshot 1 */}
+        {activeNav === 'drawing' && (
+          <View style={styles.bottomPillRow}>
+            <View style={styles.floatingActiveToolPill}>
+              <Text style={styles.floatingActiveToolIcon}>
+                {tool === 'highlighter' ? '🖍️' : tool === 'pen' ? '✏️' : '↖'}
+              </Text>
+              <Text style={styles.floatingActiveToolLabel}>
+                {tool === 'highlighter'
+                  ? 'Highlighter'
+                  : tool === 'pen'
+                    ? 'Pen'
+                    : tool === 'eraser'
+                      ? 'Eraser'
+                      : tool === 'lasso'
+                        ? 'Lasso'
+                        : 'Text Select'}
+              </Text>
+            </View>
+          </View>
+        )}
       </Animated.View>
 
       {/* ── Documents Switcher & Manager Modal ─────────────────────────────── */}
@@ -1459,6 +1512,44 @@ const styles = StyleSheet.create({
   toolLabelActive: {
     color: '#00ADB5',
     fontWeight: '700',
+  },
+  toolIconBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  toolIconBadgeActive: {
+    backgroundColor: '#6B7FA3',
+  },
+  toolIconBadgeTextActive: {
+    color: '#FFFFFF',
+  },
+  bottomPillRow: {
+    paddingHorizontal: 16,
+    paddingTop: 4,
+    paddingBottom: 6,
+    backgroundColor: '#080E1A',
+    flexDirection: 'row',
+  },
+  floatingActiveToolPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#6B7FA3',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  floatingActiveToolIcon: {
+    fontSize: 12,
+  },
+  floatingActiveToolLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
   penColorIndicator: {
     width: 14,

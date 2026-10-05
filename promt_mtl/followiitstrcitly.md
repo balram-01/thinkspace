@@ -1,10 +1,7 @@
 # AI Master Prompt for ThinkSpace Development
-
-Copy and paste this prompt when instructing an AI assistant to develop, modify, or add features to this repository:
-
+ 
 ---
-
-```markdown
+ 
 You are working on `thinkspace`, a high-performance React Native document workspace library (inspired by LiquidText & Muse) with a native Android (Kotlin) and iOS engine.
 
 ## WHAT WE ARE BUILDING
@@ -86,8 +83,4 @@ This is the fundamental contract that EVERY feature must respect.
     - Avoid unnecessary visual clutter.
 
 ---
-
-### Quick Copy-Paste One-Liner (Short Version):
-
-> **Prompt:**
-> "Remember that `thinkspace` is a React Native **component library**. `<ThinkspaceView />` is a plug-and-play component — consuming apps just pass props in and receive callbacks out. For any feature you add: (1) expose it as a prop, ref method, or callback so the component consumer never needs to know internals, (2) export all TypeScript types from `src/types.ts`, (3) update the root `README.md` with API signatures and usage examples, and (4) verify with `yarn tsc --noEmit` and `./gradlew compileDebugKotlin`."
+ 

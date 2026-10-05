@@ -142,7 +142,7 @@ Your React Native App
 
 ---
 
-## All Props
+## All Props              
 
 ### Document Props
 

@@ -30,7 +30,6 @@ export interface PenSettingsPanelProps {
 
 export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
   visible,
-  onClose,
   drawingMode,
   onSelectDrawingMode,
   selectedColor,
@@ -88,7 +87,7 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
   const handleRestoreDefaults = () => {
     setFavorites(DEFAULT_PEN_FAVORITES);
     onChangeFavorites?.(DEFAULT_PEN_FAVORITES);
-    onSelectColor(DEFAULT_PEN_FAVORITES[7] || '#FACC15');
+    onSelectColor(DEFAULT_PEN_FAVORITES[16] || '#1E3A8A');
     setDragCandidateColor(null);
   };
 
@@ -102,6 +101,9 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
     outputRange: [0, 1],
   });
 
+  // Calibrated bar widths for the 6 thickness bars
+  const visualBarWidths = [2.5, 4.5, 7.0, 10.0, 13.5, 17.5];
+
   return (
     <>
       <Animated.View
@@ -113,9 +115,10 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
           },
         ]}
       >
-        {/* ── 1. Drawing Style Selector & Close button ──────── */}
+        {/* ── 1. Drawing Style Selector (Straight | Freehand) ──────── */}
         <View style={styles.topHeaderRow}>
           <View style={styles.styleSelectorRow}>
+            {/* Straight Option */}
             <TouchableOpacity
               style={[
                 styles.styleOptionBtn,
@@ -125,15 +128,9 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
               onPress={() => onSelectDrawingMode('straight')}
             >
               <View style={styles.straightIcon}>
-                <View
-                  style={[styles.iconDot, { backgroundColor: selectedColor }]}
-                />
-                <View
-                  style={[styles.iconLine, { backgroundColor: selectedColor }]}
-                />
-                <View
-                  style={[styles.iconDot, { backgroundColor: selectedColor }]}
-                />
+                <View style={styles.iconDot} />
+                <View style={styles.iconLine} />
+                <View style={styles.iconDot} />
               </View>
               <Text
                 style={[
@@ -145,6 +142,7 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
               </Text>
             </TouchableOpacity>
 
+            {/* Freehand Option */}
             <TouchableOpacity
               style={[
                 styles.styleOptionBtn,
@@ -154,12 +152,9 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
               onPress={() => onSelectDrawingMode('freehand')}
             >
               <View style={styles.freehandIcon}>
-                <View
-                  style={[styles.iconDot, { backgroundColor: selectedColor }]}
-                />
-                <View
-                  style={[styles.iconCurve, { borderColor: selectedColor }]}
-                />
+                <View style={styles.iconDot} />
+                <View style={styles.iconCurve} />
+                <View style={styles.iconDot} />
               </View>
               <Text
                 style={[
@@ -171,18 +166,9 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
               </Text>
             </TouchableOpacity>
           </View>
-
-          <TouchableOpacity
-            style={styles.closePanelBtn}
-            activeOpacity={0.7}
-            onPress={onClose}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Text style={styles.closePanelText}>✕</Text>
-          </TouchableOpacity>
         </View>
 
-        {/* ── 2. Favorite Colors Grid (3 rows x 6 columns) ──────────────── */}
+        {/* ── 2. Favorite Colors Grid (3 rows x 6 columns = 18 slots) ── */}
         <View style={styles.favoritesGrid}>
           {favorites.slice(0, 17).map((color, index) => {
             const isSelected =
@@ -198,13 +184,17 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
                 onPress={() => handleSelectFavorite(color, index)}
               >
                 <View
-                  style={[styles.colorCircle, { backgroundColor: color }]}
+                  style={[
+                    styles.colorCircle,
+                    isSelected && styles.colorCircleInnerSelected,
+                    { backgroundColor: color },
+                  ]}
                 />
               </TouchableOpacity>
             );
           })}
 
-          {/* Slot 18: Multicolor Rainbow Circle to open expanded palette */}
+          {/* Slot 18: Multicolor Rainbow Swatch opens expanded palette */}
           <TouchableOpacity
             style={styles.colorCircleWrapper}
             activeOpacity={0.8}
@@ -215,16 +205,16 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
               <View style={[styles.rainbowQuarter, styles.rq2]} />
               <View style={[styles.rainbowQuarter, styles.rq3]} />
               <View style={[styles.rainbowQuarter, styles.rq4]} />
+              <View style={styles.rainbowCenterGlow} />
             </View>
           </TouchableOpacity>
         </View>
 
-        {/* ── 3. Stroke Thickness Presets (7 vertical samples) ─────────── */}
+        {/* ── 3. Stroke Thickness Presets (6 vertical bars) ─────────── */}
         <View style={styles.thicknessRow}>
           {PEN_THICKNESS_PRESETS.map((preset, index) => {
-            const isSelected = Math.abs(selectedThickness - preset) < 0.3;
-            // Visual height is 34px, width corresponds to preset width
-            const barW = Math.max(1.5, Math.min(preset * 0.9, 10));
+            const isSelected = Math.abs(selectedThickness - preset) < 0.6;
+            const barW = visualBarWidths[index] ?? preset;
             return (
               <TouchableOpacity
                 key={`thickness-${index}-${preset}`}
@@ -250,7 +240,7 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
         </View>
       </Animated.View>
 
-      {/* ── 4. Expanded Color Palette Modal matching LiquidText Screenshot ── */}
+      {/* ── 4. Expanded Color Palette Modal matching Screenshot 2 ── */}
       <Modal
         visible={isPaletteOpen}
         transparent
@@ -267,7 +257,7 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
             activeOpacity={1}
             onPress={(e) => e.stopPropagation()}
           >
-            {/* Header */}
+            {/* Header with Title, Subtitle, and ✕ Close Button */}
             <View style={styles.paletteHeader}>
               <View style={styles.paletteTitleContainer}>
                 <Text style={styles.paletteTitle}>Tap color</Text>
@@ -279,6 +269,7 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
                 style={styles.paletteCloseBtn}
                 onPress={() => setIsPaletteOpen(false)}
                 activeOpacity={0.7}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
               >
                 <Text style={styles.paletteCloseText}>✕</Text>
               </TouchableOpacity>
@@ -287,8 +278,10 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
             {/* 32-Color Grid (4 rows x 8 columns) */}
             <View style={styles.paletteGrid}>
               {EXPANDED_PEN_PALETTE.map((color, idx) => {
+                const isDivider = color === '#FFFFFF_DIVIDER';
+                const actualColor = isDivider ? '#FFFFFF' : color;
                 const isSelected =
-                  selectedColor.toLowerCase() === color.toLowerCase();
+                  selectedColor.toLowerCase() === actualColor.toLowerCase();
                 return (
                   <TouchableOpacity
                     key={`palette-${idx}-${color}`}
@@ -297,16 +290,18 @@ export const PenSettingsPanel: React.FC<PenSettingsPanelProps> = ({
                       isSelected && styles.paletteSwatchSelected,
                     ]}
                     activeOpacity={0.8}
-                    onPress={() => handleSelectPaletteColor(color)}
+                    onPress={() => handleSelectPaletteColor(actualColor)}
                   >
                     <View
                       style={[
                         styles.paletteSwatch,
-                        { backgroundColor: color },
-                        color.toLowerCase() === '#ffffff' &&
+                        { backgroundColor: actualColor },
+                        actualColor.toLowerCase() === '#ffffff' &&
                           styles.whiteSwatchBorder,
                       ]}
-                    />
+                    >
+                      {isDivider && <View style={styles.dividerLine} />}
+                    </View>
                   </TouchableOpacity>
                 );
               })}
@@ -335,8 +330,8 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     paddingTop: 14,
     paddingBottom: 16,
-    paddingHorizontal: 18,
-    width: 320,
+    paddingHorizontal: 16,
+    width: 326,
     alignSelf: 'center',
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 6 },
@@ -350,69 +345,61 @@ const styles = StyleSheet.create({
   topHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
+    justifyContent: 'center',
+    marginBottom: 14,
   },
   styleSelectorRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
-    flex: 1,
-  },
-  closePanelBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 6,
-  },
-  closePanelText: {
-    fontSize: 13,
-    color: '#64748B',
-    fontWeight: '700',
+    gap: 10,
   },
   styleOptionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
     borderWidth: 1.5,
     borderColor: 'transparent',
-    backgroundColor: '#F8FAFC',
+    backgroundColor: 'transparent',
   },
   styleOptionBtnActive: {
-    borderColor: '#FACC15',
-    backgroundColor: '#FEFCE8',
+    borderColor: '#374151',
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 2,
   },
   styleOptionText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#475569',
+    fontSize: 13.5,
+    fontWeight: '500',
+    color: '#64748B',
   },
   styleOptionTextActive: {
     color: '#1E293B',
     fontWeight: '700',
   },
   straightIcon: {
-    width: 24,
+    width: 22,
     height: 14,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   iconDot: {
-    width: 5,
-    height: 5,
-    borderRadius: 2.5,
+    width: 4.5,
+    height: 4.5,
+    borderRadius: 2.25,
+    backgroundColor: '#5C7CFA',
   },
   iconLine: {
     flex: 1,
-    height: 2,
+    height: 1.8,
+    backgroundColor: '#5C7CFA',
     marginHorizontal: 1,
   },
   freehandIcon: {
@@ -420,14 +407,15 @@ const styles = StyleSheet.create({
     height: 14,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
   },
   iconCurve: {
-    width: 14,
+    flex: 1,
     height: 8,
-    borderBottomWidth: 2,
+    borderBottomWidth: 1.8,
+    borderColor: '#5C7CFA',
     borderRadius: 4,
-    marginLeft: 2,
+    marginHorizontal: 1,
   },
   favoritesGrid: {
     flexDirection: 'row',
@@ -438,16 +426,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
   },
   colorCircleWrapper: {
-    width: 40,
-    height: 40,
+    width: 38,
+    height: 38,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 20,
+    borderRadius: 19,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    backgroundColor: 'transparent',
   },
   colorCircleSelected: {
-    borderWidth: 2.5,
-    borderColor: '#64748B',
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    borderColor: '#374151',
+    backgroundColor: '#FFFFFF',
   },
   colorCircle: {
     width: 28,
@@ -455,23 +445,39 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.12,
+    shadowOpacity: 0.18,
     shadowRadius: 3,
     elevation: 3,
+  },
+  colorCircleInnerSelected: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
   },
   rainbowCircle: {
     overflow: 'hidden',
     flexDirection: 'row',
     flexWrap: 'wrap',
+    position: 'relative',
   },
   rainbowQuarter: {
     width: 14,
     height: 14,
   },
-  rq1: { backgroundColor: '#EC4899' },
-  rq2: { backgroundColor: '#3B82F6' },
-  rq3: { backgroundColor: '#10B981' },
-  rq4: { backgroundColor: '#F59E0B' },
+  rq1: { backgroundColor: '#EF4444' }, // Red top-left
+  rq2: { backgroundColor: '#3B82F6' }, // Blue top-right
+  rq3: { backgroundColor: '#22C55E' }, // Green bottom-left
+  rq4: { backgroundColor: '#EC4899' }, // Magenta bottom-right
+  rainbowCenterGlow: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    right: 4,
+    bottom: 4,
+    borderRadius: 10,
+    backgroundColor: '#00F0FF',
+    opacity: 0.45,
+  },
   thicknessRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -484,76 +490,79 @@ const styles = StyleSheet.create({
     height: 44,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 8,
+    borderRadius: 6,
     borderWidth: 1.5,
     borderColor: 'transparent',
   },
   thicknessBtnSelected: {
-    borderColor: '#94A3B8',
-    backgroundColor: '#F8FAFC',
+    borderColor: '#374151',
+    backgroundColor: 'rgba(0, 0, 0, 0.02)',
   },
   thicknessBar: {
     height: 30,
-    borderRadius: 4,
+    borderRadius: 2,
   },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
   },
   paletteCard: {
-    width: 330,
-    backgroundColor: '#1E293B',
-    borderRadius: 20,
-    padding: 20,
+    width: 334,
+    backgroundColor: 'rgba(142, 158, 175, 0.96)',
+    borderRadius: 18,
+    paddingTop: 16,
+    paddingBottom: 16,
+    paddingHorizontal: 16,
     shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.45,
-    shadowRadius: 24,
-    elevation: 24,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.35,
+    shadowRadius: 20,
+    elevation: 20,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: 'rgba(255, 255, 255, 0.25)',
   },
   paletteHeader: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     marginBottom: 16,
+    position: 'relative',
   },
   paletteTitleContainer: {
-    flex: 1,
     alignItems: 'center',
   },
   paletteTitle: {
     fontSize: 15,
     fontWeight: '700',
-    color: '#F8FAFC',
+    color: '#FFFFFF',
+    letterSpacing: 0.2,
   },
   paletteSubtitle: {
-    fontSize: 12,
+    fontSize: 12.5,
     fontWeight: '500',
-    color: '#94A3B8',
+    color: '#F1F5F9',
     marginTop: 2,
   },
   paletteCloseBtn: {
-    padding: 4,
     position: 'absolute',
     right: 0,
-    top: 0,
+    top: -2,
+    padding: 4,
   },
   paletteCloseText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#94A3B8',
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#000000',
   },
   paletteGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
-    rowGap: 12,
-    marginBottom: 18,
+    rowGap: 10,
+    marginBottom: 16,
   },
   paletteSwatchWrapper: {
     width: 32,
@@ -564,24 +573,36 @@ const styles = StyleSheet.create({
   },
   paletteSwatchSelected: {
     borderWidth: 2,
-    borderColor: '#38BDF8',
+    borderColor: '#FFFFFF',
   },
   paletteSwatch: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 25,
+    height: 25,
+    borderRadius: 12.5,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 2.5,
+    elevation: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   whiteSwatchBorder: {
     borderWidth: 1,
     borderColor: '#CBD5E1',
   },
+  dividerLine: {
+    width: '100%',
+    height: 1.5,
+    backgroundColor: '#475569',
+  },
   restoreBtn: {
     alignItems: 'center',
-    paddingVertical: 6,
+    paddingVertical: 4,
   },
   restoreBtnText: {
-    fontSize: 14,
+    fontSize: 13.5,
     fontWeight: '600',
-    color: '#38BDF8',
+    color: '#00F0FF',
   },
 });
