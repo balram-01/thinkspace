@@ -4477,8 +4477,8 @@ class ThinkspaceView : View {
         val cardTargetSy = canvasTopY + targetWy * scaleFactor + panY
 
         // 3. Render PDF Source Soft Highlight Pill & Solid Connecting Pen Line
-        val linkLineColor = Color.parseColor("#10B981") // Vibrant emerald green matching penenginev.png
-        val sWidth = (3.5f * density).coerceAtLeast(3f)
+        val linkLineColor = link.color
+        val sWidth = (link.strokeWidth * density).coerceAtLeast(3f * density)
 
         if (isSourceVisible) {
           // Draw PDF source soft highlight pill over the text in PDF
@@ -4493,7 +4493,7 @@ class ThinkspaceView : View {
               val hlBottom = pl.boundsOnScreen.top + (link.sourcePdfRect.bottom / pSize.height) * pl.boundsOnScreen.height()
 
               val pdfHlPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#38BDF8") // Sky blue highlight matching penenginev.png panel 6
+                color = linkLineColor
                 alpha = 115
                 style = Paint.Style.FILL
               }
@@ -4524,22 +4524,25 @@ class ThinkspaceView : View {
         }
         canvas.drawCircle(cardTargetSx, cardTargetSy + 1.5f * density, badgeRadius, shadowPaint)
 
-        // Vibrant solid green circular badge background (matching penenginev.png)
+        // Circular badge background matching the link's customized color
         val badgeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#10B981")
+          color = linkLineColor
           style = Paint.Style.FILL
         }
         canvas.drawCircle(cardTargetSx, cardTargetSy, badgeRadius, badgeBgPaint)
 
-        // Crisp border ring
+        // Dynamic luminance-based contrast for border and V shape
+        val lum = (0.299 * Color.red(linkLineColor) + 0.587 * Color.green(linkLineColor) + 0.114 * Color.blue(linkLineColor)) / 255.0
+        val isLight = lum > 0.55
+
         val badgeBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#047857")
+          color = if (isLight) Color.argb(120, 0, 0, 0) else Color.WHITE
           strokeWidth = 1.6f * density
           style = Paint.Style.STROKE
         }
         canvas.drawCircle(cardTargetSx, cardTargetSy, badgeRadius, badgeBorderPaint)
 
-        // Distinct, bold capital "V" inside the circular badge (matching penenginev.png)
+        // Distinct, bold capital "V" inside the circular badge
         val vSpan = badgeRadius * 0.58f
         val vPath = Path().apply {
           moveTo(cardTargetSx - vSpan * 0.72f, cardTargetSy - vSpan * 0.65f)
@@ -4548,7 +4551,7 @@ class ThinkspaceView : View {
         }
 
         val vPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#0F172A") // Deep black/slate for maximum punchy contrast
+          color = if (isLight) Color.parseColor("#0F172A") else Color.WHITE
           strokeWidth = vStrokeW
           style = Paint.Style.STROKE
           strokeCap = Paint.Cap.ROUND
@@ -4632,10 +4635,10 @@ class ThinkspaceView : View {
         inkLinkTargetCardId = hoverCard?.id
 
 
-        val liveColor = Color.parseColor("#10B981")
+        val liveColor = penColor
         val livePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
           color = liveColor
-          strokeWidth = (3.5f * density).coerceAtLeast(3f)
+          strokeWidth = (penThickness * density).coerceAtLeast(3.2f * density)
           style = Paint.Style.STROKE
           strokeCap = Paint.Cap.ROUND
           strokeJoin = Paint.Join.ROUND
@@ -4672,8 +4675,11 @@ class ThinkspaceView : View {
           }
           canvas.drawCircle(anchorSx, anchorSy, previewRadius, previewBg)
 
+          val liveLum = (0.299 * Color.red(liveColor) + 0.587 * Color.green(liveColor) + 0.114 * Color.blue(liveColor)) / 255.0
+          val isLiveLight = liveLum > 0.55
+
           val previewBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#047857")
+            color = if (isLiveLight) Color.argb(120, 0, 0, 0) else Color.WHITE
             strokeWidth = 1.6f * density
             style = Paint.Style.STROKE
           }
@@ -4686,7 +4692,7 @@ class ThinkspaceView : View {
             lineTo(anchorSx + pvSpan * 0.72f, anchorSy - pvSpan * 0.65f)
           }
           val pvPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0F172A")
+            color = if (isLiveLight) Color.parseColor("#0F172A") else Color.WHITE
             strokeWidth = (2.8f * density).coerceAtLeast(3.2f)
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
@@ -4696,7 +4702,7 @@ class ThinkspaceView : View {
         } else {
           // Dynamic live connection line toward finger
           canvas.drawLine(startSx, startSy, curSx, curSy, livePaint)
-          canvas.drawCircle(curSx, curSy, (3.5f * density) / 2f, dotPaint)
+          canvas.drawCircle(curSx, curSy, (penThickness * density).coerceAtLeast(3.2f * density) / 2f, dotPaint)
         }
       }
 
@@ -7698,8 +7704,8 @@ class ThinkspaceView : View {
               sourcePdfRect = inkLinkSourcePdfRect,
               sourcePdfPoint = inkLinkSourcePdfPoint,
               targetCardId = targetCard.id,
-              color = Color.parseColor("#10B981"),
-              strokeWidth = penThickness.coerceAtLeast(3.5f),
+              color = penColor,
+              strokeWidth = penThickness.coerceAtLeast(3.2f),
               style = "straight",
               createdAt = System.currentTimeMillis(),
               targetCardPoint = NativePoint(cardPointX, cardPointY),
@@ -10069,10 +10075,10 @@ class ThinkspaceView : View {
         } else null
 
         val color = try {
-          val colStr = obj.optString("color", "#10B981")
-          Color.parseColor(colStr)
+          val colStr = obj.optString("color", "")
+          if (colStr.isNotEmpty()) Color.parseColor(colStr) else penColor
         } catch (_: Exception) {
-          Color.parseColor("#10B981")
+          penColor
         }
 
         val strokeW = obj.optDouble("strokeWidth", obj.optDouble("thickness", 3.5)).toFloat()
