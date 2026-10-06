@@ -8,6 +8,9 @@
 
 #import "RCTFabricComponentsPlugins.h"
 
+#import <PDFKit/PDFKit.h>
+#import <PencilKit/PencilKit.h>
+
 #if __has_include(<Thinkspace/Thinkspace-Swift.h>)
 #import <Thinkspace/Thinkspace-Swift.h>
 #elif __has_include("Thinkspace-Swift.h")
@@ -146,11 +149,11 @@ using namespace facebook::react;
     if (_eventEmitter) {
         std::static_pointer_cast<const ThinkspaceViewEventEmitter>(_eventEmitter)
             ->onExcerptMoveEnd({
-                .id = [id UTF8String],
+                .id = [id UTF8String] ?: "",
                 .x = static_cast<Float>(x),
                 .y = static_cast<Float>(y),
-                .clusterId = clusterId ? std::make_optional([clusterId UTF8String]) : std::nullopt,
-                .stackCount = std::make_optional(static_cast<Float>(stackCount))
+                .clusterId = clusterId ? [clusterId UTF8String] : "",
+                .stackCount = static_cast<Float>(stackCount)
             });
     }
 }
@@ -228,15 +231,15 @@ using namespace facebook::react;
     if (_eventEmitter) {
         std::static_pointer_cast<const ThinkspaceViewEventEmitter>(_eventEmitter)
             ->onExtractExcerpt({
-                .text = [text UTF8String],
+                .text = [text UTF8String] ?: "",
                 .pageNumber = static_cast<Float>(pageNumber),
-                .color = [color UTF8String],
+                .color = [color UTF8String] ?: "",
                 .isTable = static_cast<bool>(isTable),
                 .isImage = static_cast<bool>(isImage),
-                .imageUrl = imageUrl ? std::make_optional([imageUrl UTF8String]) : std::nullopt,
-                .id = id ? std::make_optional([id UTF8String]) : std::nullopt,
-                .x = std::make_optional(static_cast<Float>(x)),
-                .y = std::make_optional(static_cast<Float>(y))
+                .imageUrl = imageUrl ? [imageUrl UTF8String] : "",
+                .id = id ? [id UTF8String] : "",
+                .x = static_cast<Float>(x),
+                .y = static_cast<Float>(y)
             });
     }
 }

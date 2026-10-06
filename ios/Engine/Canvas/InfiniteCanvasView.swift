@@ -6,13 +6,14 @@ import CoreGraphics
     func canvasDidTransform(panX: CGFloat, panY: CGFloat, scale: CGFloat)
     func canvasExcerptDidMove(card: ExcerptModel)
     func canvasExcerptDidTap(card: ExcerptModel)
+    func canvasInkLinkDidTap(link: InkLink)
 }
 
 /**
  * High-performance 2D infinite workspace canvas with focal zoom, pan momentum, grid backgrounds,
  * card stacking, and GPU-accelerated InkLink tethers.
  */
-@objc public class InfiniteCanvasView: UIView, ExcerptCardViewDelegate {
+@objc public class InfiniteCanvasView: UIView, ExcerptCardViewDelegate, InkLinkRendererDelegate {
 
     @objc public let camera = CameraTransform()
     @objc public weak var delegate: InfiniteCanvasViewDelegate?
@@ -51,6 +52,7 @@ import CoreGraphics
         inkLinkOverlay.frame = bounds
         inkLinkOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         inkLinkOverlay.camera = camera
+        inkLinkOverlay.delegate = self
         addSubview(inkLinkOverlay)
 
         // 2-Finger Pan & Pinch for canvas navigation (1-finger moves cards/draws)
@@ -154,6 +156,7 @@ import CoreGraphics
             } else {
                 let cardView = ExcerptCardView(model: model)
                 cardView.delegate = self
+                cardView.camera = camera
                 cardViewMap[model.id] = cardView
                 contentLayer.addSubview(cardView)
             }
@@ -167,6 +170,7 @@ import CoreGraphics
     @objc public func addCard(_ card: ExcerptModel) {
         let cardView = ExcerptCardView(model: card)
         cardView.delegate = self
+        cardView.camera = camera
         cardViewMap[card.id] = cardView
         contentLayer.addSubview(cardView)
         inkLinkOverlay.cardViews = cardViewMap
@@ -239,5 +243,9 @@ import CoreGraphics
             inkLinkOverlay.cardViews = cardViewMap
             inkLinkOverlay.setNeedsDisplay()
         }
+    }
+
+    public func inkLinkDidTap(link: InkLink) {
+        delegate?.canvasInkLinkDidTap(link: link)
     }
 }

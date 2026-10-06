@@ -302,6 +302,9 @@ import PDFKit
         inkLinks.append(newLink)
         infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
         ThinkspaceBridgeEmitter.shared.sendInkLinkCreate(newLink)
+
+        // Record Undo action
+        undoRedoManager.recordAction(.addCard(excerpt))
     }
 
     public func pdfEnginePageDidChange(pageNumber: Int, totalPages: Int) {
@@ -321,9 +324,22 @@ import PDFKit
         ThinkspaceBridgeEmitter.shared.sendExcerptPress(id: card.id)
     }
 
+    public func canvasInkLinkDidTap(link: InkLink) {
+        // Smoothly scroll PDF engine to target document and page
+        if let docId = link.targetDocumentId as String?, !docId.isEmpty, docId != activeDocumentId {
+            updateActiveDocumentId(docId)
+        }
+        if link.targetPageNumber > 0 {
+            pdfEngine.scrollToPage(link.targetPageNumber)
+        }
+        impactFeedback.prepare()
+        impactFeedback.impactOccurred()
+    }
+
     // ── ApplePencilEngineDelegate ──────────────────────────────────────────────
     public func pencilEngineDidAddStroke(stroke: InkStroke) {
         strokes.append(stroke)
+        undoRedoManager.recordAction(.addStroke(stroke))
         ThinkspaceBridgeEmitter.shared.sendAddStroke(stroke)
     }
 
@@ -336,7 +352,78 @@ import PDFKit
         ThinkspaceBridgeEmitter.shared.sendUndoStateChange(canUndo: canUndo, canRedo: canRedo)
     }
 
-    public func applyAction(_ action: Any, isUndo: Bool) {}
+    public func applyAction(_ action: Any, isUndo: Bool) {
+        guard let wsAction = action as? WorkspaceAction else { return }
+        switch wsAction {
+        case .addCard(let card):
+            if isUndo {
+                cards.removeAll { $0.id == card.id }
+                inkLinks.removeAll { $0.sourceExcerptId == card.id }
+                infiniteCanvas.syncCards(cards)
+                infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+                ThinkspaceBridgeEmitter.shared.sendCardDelete(id: card.id)
+            } else {
+                cards.append(card)
+                infiniteCanvas.addCard(card)
+                ThinkspaceBridgeEmitter.shared.sendExtractExcerpt(card: card)
+            }
+        case .removeCard(let card):
+            if isUndo {
+                cards.append(card)
+                infiniteCanvas.addCard(card)
+                ThinkspaceBridgeEmitter.shared.sendExtractExcerpt(card: card)
+            } else {
+                cards.removeAll { $0.id == card.id }
+                inkLinks.removeAll { $0.sourceExcerptId == card.id }
+                infiniteCanvas.syncCards(cards)
+                infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+                ThinkspaceBridgeEmitter.shared.sendCardDelete(id: card.id)
+            }
+        case .moveCard(let id, let oldX, let oldY, let newX, let newY):
+            if let card = cards.first(where: { $0.id == id }) {
+                card.x = isUndo ? oldX : newX
+                card.y = isUndo ? oldY : newY
+                infiniteCanvas.syncCards(cards)
+                ThinkspaceBridgeEmitter.shared.sendExcerptMoveEnd(card: card)
+            }
+        case .addStroke(let stroke):
+            if isUndo {
+                strokes.removeAll { $0.id == stroke.id }
+                ThinkspaceBridgeEmitter.shared.sendEraseStroke(id: stroke.id)
+            } else {
+                strokes.append(stroke)
+                ThinkspaceBridgeEmitter.shared.sendAddStroke(stroke)
+            }
+        case .removeStroke(let stroke):
+            if isUndo {
+                strokes.append(stroke)
+                ThinkspaceBridgeEmitter.shared.sendAddStroke(stroke)
+            } else {
+                strokes.removeAll { $0.id == stroke.id }
+                ThinkspaceBridgeEmitter.shared.sendEraseStroke(id: stroke.id)
+            }
+        case .addInkLink(let link):
+            if isUndo {
+                inkLinks.removeAll { $0.id == link.id }
+                infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+                ThinkspaceBridgeEmitter.shared.sendInkLinkDelete(id: link.id)
+            } else {
+                inkLinks.append(link)
+                infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+                ThinkspaceBridgeEmitter.shared.sendInkLinkCreate(link)
+            }
+        case .removeInkLink(let link):
+            if isUndo {
+                inkLinks.append(link)
+                infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+                ThinkspaceBridgeEmitter.shared.sendInkLinkCreate(link)
+            } else {
+                inkLinks.removeAll { $0.id == link.id }
+                infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+                ThinkspaceBridgeEmitter.shared.sendInkLinkDelete(id: link.id)
+            }
+        }
+    }
 
     // ── ThinkspaceCommandHandler Implementation ────────────────────────────────
     public func handleOpenSearch() {}

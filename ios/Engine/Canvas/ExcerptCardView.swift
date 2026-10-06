@@ -129,7 +129,8 @@ import UIKit
         )
     }
 
-    // ── Touch & Gesture Handling ───────────────────────────────────────────────
+    public weak var camera: CameraTransform?
+
     @objc private func handleTap() {
         delegate?.excerptCardDidTap(card: model)
     }
@@ -146,16 +147,28 @@ import UIKit
             superview.bringSubviewToFront(self)
         case .changed:
             let translation = gesture.translation(in: superview)
-            center = CGPoint(x: center.x + translation.x, y: center.y + translation.y)
+            let scale = camera?.scale ?? 1.0
+            let worldDx = translation.x / scale
+            let worldDy = translation.y / scale
+            model.x += worldDx
+            model.y += worldDy
+
+            if let cam = camera {
+                let screenOrigin = cam.worldToScreen(CGPoint(x: model.x, y: model.y))
+                frame.origin = screenOrigin
+            } else {
+                frame.origin = CGPoint(x: frame.origin.x + translation.x, y: frame.origin.y + translation.y)
+            }
+
             gesture.setTranslation(.zero, in: superview)
-            model.x = frame.origin.x
-            model.y = frame.origin.y
             delegate?.excerptCardDidMove(card: model, worldX: model.x, worldY: model.y)
         case .ended, .cancelled:
             isElevated = false
             elevateCard(false)
-            model.x = frame.origin.x
-            model.y = frame.origin.y
+            if let cam = camera {
+                let screenOrigin = cam.worldToScreen(CGPoint(x: model.x, y: model.y))
+                frame.origin = screenOrigin
+            }
             delegate?.excerptCardMoveDidEnd(card: model)
         default:
             break

@@ -23,13 +23,58 @@ import CoreGraphics
     @objc public override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
-        isUserInteractionEnabled = false // Let touches pass through to cards/canvas
+        isUserInteractionEnabled = true
+        setupGesture()
     }
 
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         backgroundColor = .clear
-        isUserInteractionEnabled = false
+        isUserInteractionEnabled = true
+        setupGesture()
+    }
+
+    private func setupGesture() {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        addGestureRecognizer(tap)
+    }
+
+    public override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        return findLink(at: point) != nil
+    }
+
+    @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+        let location = gesture.location(in: self)
+        if let link = findLink(at: location) {
+            delegate?.inkLinkDidTap(link: link)
+        }
+    }
+
+    public func findLink(at point: CGPoint) -> InkLink? {
+        guard let camera = camera else { return nil }
+
+        for link in inkLinks {
+            guard let cardView = cardViews[link.sourceExcerptId] else { continue }
+            let cardWorldOrigin = CGPoint(x: cardView.model.x, y: cardView.model.y)
+            let cardScreenOrigin = camera.worldToScreen(cardWorldOrigin)
+            let cardScreenRect = CGRect(
+                x: cardScreenOrigin.x,
+                y: cardScreenOrigin.y,
+                width: cardView.bounds.width * camera.scale,
+                height: cardView.bounds.height * camera.scale
+            )
+
+            let endPoint = CGPoint(x: cardScreenRect.minX + 12, y: cardScreenRect.minY + 20)
+            let startPoint = CGPoint(x: max(-40, cardScreenRect.minX - 120), y: endPoint.y - 10)
+            let tetherPath = BezierCalculus.calculateTetherCurve(start: startPoint, end: endPoint)
+
+            // Hit test near path or pins (15pt tolerance)
+            let strokedPath = tetherPath.cgPath.copy(strokingWithWidth: 30.0, lineCap: .round, lineJoin: .round, miterLimit: 1.0)
+            if strokedPath.contains(point) {
+                return link
+            }
+        }
+        return nil
     }
 
     public override func draw(_ rect: CGRect) {
