@@ -10,7 +10,7 @@ You are working on `thinkspace`, a high-performance React Native document worksp
 
 ```tsx
 import { ThinkspaceView } from 'thinkspace';
-
+exmaple - 
 <ThinkspaceView
   style={{ flex: 1 }}
   document={{ id: 'doc-1', title: 'Paper', uri: 'file:///paper.pdf', pageCount: 10 }}
@@ -83,4 +83,48 @@ This is the fundamental contract that EVERY feature must respect.
     - Avoid unnecessary visual clutter.
 
 ---
- 
+ ### 5. ALWAYS MAINTAIN `brain.md` CONTEXT
+
+`brain.md` is the persistent engineering context for this project.
+
+Before starting any task:
+- Read `brain.md` first.
+- Use its existing context to understand the architecture, implemented features, important files, decisions, known issues, and current state.
+- DO NOT unnecessarily rescan the entire codebase when the required context is already documented in `brain.md`.
+
+After completing ANY meaningful feature, architecture change, bug fix, or important decision:
+- UPDATE `brain.md` with the new context.
+- Keep the information concise and practical.
+- Record only information that will help future development.
+- Update existing entries instead of creating duplicate/outdated information.
+
+`brain.md` should contain:
+- Current architecture
+- Important modules/files and their responsibilities
+- Implemented features
+- Native Android/iOS implementations
+- KMP/shared responsibilities
+- React Native bridge/API surface
+- Important coordinate/gesture/rendering systems
+- Current known issues/bottlenecks
+- Important technical decisions and WHY they were made
+- Feature-specific implementation context
+- Current TODOs / next steps
+- Any important constraints or rules discovered during development
+
+IMPORTANT:
+`brain.md` is a CONTEXT MEMORY, NOT a full code dump.
+
+Never paste large source files into `brain.md`.
+Never document every minor code change.
+Document the architecture and decisions that future tasks need to know.
+
+When implementing a new feature:
+1. Read `brain.md`.
+2. Identify the relevant existing context.
+3. Inspect only the necessary source files.
+4. Implement the feature.
+5. Update `brain.md` with the final implementation context.
+6. Update `README.md` with the public React Native API/documentation.
+
+This keeps future development fast and prevents repeatedly searching the entire repository.

@@ -8,6 +8,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.*
 import android.os.Handler
 import android.os.Looper
@@ -833,6 +834,11 @@ class ThinkspaceView : View {
   private var isCursorBlinkVisible = true
   private var lastCursorBlinkTime = 0L
 
+  // Animated toolbar appearance / dismissal state (Apple spring)
+  private var cardActionBarAnimProgress = 0f
+  private var lastActionBarAnimTime = 0L
+  private var lastSelectedCardForAnim: NativeCard? = null
+
   // Action Bar rects (Screen space)
   private val cardActionBarRect = RectF()
   private val btnCardCommentRect = RectF()
@@ -846,7 +852,7 @@ class ThinkspaceView : View {
 
   // Typography Bar rects (Screen space)
   private val typographyBarRect = RectF()
-  private val btnTypoUndoRect = RectF()
+  private val btnTypoBackRect = RectF()
   private val btnTypoStyleRect = RectF()
   private val btnTypoBoldRect = RectF()
   private val btnTypoItalicRect = RectF()
@@ -4568,36 +4574,55 @@ class ThinkspaceView : View {
       // -------------------------------------------------------------------------
       val selCard = if (selectedCardId != null && !isLiftingExcerpt) cards.find { it.id == selectedCardId } else null
       if (selCard != null) {
-        val isEditing = editingCardId != null
-        if (isEditing) {
-          // When actively editing a card: show single docked toolbar above keyboard!
-          if (isTypographyBarVisible) {
-            drawTypographyBar(canvas, selCard, viewW, viewH)
-            if (isStyleSheetOpen) {
-              drawStyleSheetPopover(canvas, selCard, viewW, viewH)
-            }
-            if (isTypoTextColorPaletteOpen) {
-              drawTypoTextColorPalette(canvas, selCard)
-            }
-          } else {
-            drawCardActionBar(canvas, selCard, viewW, viewH, canvasTopY)
+        lastSelectedCardForAnim = selCard
+      }
+
+      val targetAnim = if (selCard != null) 1f else 0f
+      if (cardActionBarAnimProgress != targetAnim) {
+        val now = android.os.SystemClock.uptimeMillis()
+        val dt = if (lastActionBarAnimTime == 0L) 0.016f else ((now - lastActionBarAnimTime) / 1000f).coerceIn(0.001f, 0.05f)
+        lastActionBarAnimTime = now
+        val animSpeed = 14f // snappy Apple spring
+        cardActionBarAnimProgress = if (targetAnim > cardActionBarAnimProgress) {
+          (cardActionBarAnimProgress + animSpeed * dt).coerceAtMost(1f)
+        } else {
+          (cardActionBarAnimProgress - animSpeed * dt).coerceAtLeast(0f)
+        }
+        postInvalidateOnAnimation()
+      } else {
+        lastActionBarAnimTime = android.os.SystemClock.uptimeMillis()
+      }
+
+      val activeCardToDraw = selCard ?: (if (cardActionBarAnimProgress > 0.01f) lastSelectedCardForAnim else null)
+      if (activeCardToDraw != null && cardActionBarAnimProgress > 0.01f) {
+        canvas.save()
+        val animScale = 0.92f + 0.08f * cardActionBarAnimProgress
+        val animTransY = (1f - cardActionBarAnimProgress) * 8f * density
+        val currentCenter = if (isTypographyBarVisible && !typographyBarRect.isEmpty) {
+          Pair(typographyBarRect.centerX(), typographyBarRect.centerY())
+        } else if (!cardActionBarRect.isEmpty) {
+          Pair(cardActionBarRect.centerX(), cardActionBarRect.centerY())
+        } else {
+          Pair(viewW / 2f, viewH / 2f)
+        }
+        canvas.translate(0f, animTransY)
+        canvas.scale(animScale, animScale, currentCenter.first, currentCenter.second)
+
+        if (isTypographyBarVisible) {
+          drawTypographyBar(canvas, activeCardToDraw, viewW, viewH, canvasTopY)
+          if (isStyleSheetOpen) {
+            drawStyleSheetPopover(canvas, activeCardToDraw, viewW, viewH)
+          }
+          if (isTypoTextColorPaletteOpen) {
+            drawTypoTextColorPalette(canvas, activeCardToDraw)
           }
         } else {
-          // Non-edit mode: card selected on canvas
-          drawCardActionBar(canvas, selCard, viewW, viewH, canvasTopY)
-          if (isTypographyBarVisible) {
-            drawTypographyBar(canvas, selCard, viewW, viewH)
-            if (isStyleSheetOpen) {
-              drawStyleSheetPopover(canvas, selCard, viewW, viewH)
-            }
-            if (isTypoTextColorPaletteOpen) {
-              drawTypoTextColorPalette(canvas, selCard)
-            }
-          }
+          drawCardActionBar(canvas, activeCardToDraw, viewW, viewH, canvasTopY)
         }
         if (isCardColorPaletteOpen) {
-          drawCardColorPalette(canvas, selCard)
+          drawCardColorPalette(canvas, activeCardToDraw)
         }
+        canvas.restore()
       }
 
       // Draw bottom floating toast matching video
@@ -4607,472 +4632,641 @@ class ThinkspaceView : View {
       }
     }
 
+  // ── Vector Icon Drawing Helpers for Apple Selection Toolbar ────────────────
+  private fun drawCommentIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
+    val r = size * 0.46f
+    val rect = RectF(cx - r, cy - r * 0.8f, cx + r, cy + r * 0.65f)
+    val corner = 4.5f * density
+    val path = Path().apply {
+      addRoundRect(rect, corner, corner, Path.Direction.CW)
+      moveTo(cx - r * 0.4f, cy + r * 0.65f)
+      lineTo(cx - r * 0.75f, cy + r * 1.15f)
+      lineTo(cx - r * 0.1f, cy + r * 0.65f)
+      close()
+    }
+    val fillPaint = Paint(paint).apply { style = Paint.Style.FILL; color = Color.WHITE }
+    canvas.drawPath(path, fillPaint)
+  }
+
+  private fun drawEditIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
+    val s = size * 0.44f
+    val path = Path().apply {
+      moveTo(cx + s * 0.65f, cy - s * 0.85f)
+      lineTo(cx + s * 0.88f, cy - s * 0.62f)
+      lineTo(cx - s * 0.35f, cy + s * 0.62f)
+      lineTo(cx - s * 0.88f, cy + s * 0.88f)
+      lineTo(cx - s * 0.62f, cy + s * 0.35f)
+      close()
+    }
+    val fillPaint = Paint(paint).apply { style = Paint.Style.FILL; color = Color.WHITE }
+    canvas.drawPath(path, fillPaint)
+  }
+
+  private fun drawCopyIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint, bgCol: Int) {
+    val s = size * 0.42f
+    val corner = 2.5f * density
+    val strokeP = Paint(paint).apply {
+      style = Paint.Style.STROKE
+      strokeWidth = 1.8f * density
+      color = Color.WHITE
+    }
+    // Back doc
+    canvas.drawRoundRect(RectF(cx - s * 0.35f, cy - s * 0.85f, cx + s * 0.85f, cy + s * 0.35f), corner, corner, strokeP)
+    // Front doc background erase
+    val eraseP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgCol; style = Paint.Style.FILL }
+    val frontRect = RectF(cx - s * 0.85f, cy - s * 0.35f, cx + s * 0.35f, cy + s * 0.85f)
+    canvas.drawRoundRect(frontRect, corner, corner, eraseP)
+    // Front doc stroke
+    canvas.drawRoundRect(frontRect, corner, corner, strokeP)
+  }
+
+  private fun drawDeleteIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
+    val s = size * 0.44f
+    val strokeP = Paint(paint).apply {
+      style = Paint.Style.STROKE
+      strokeWidth = 1.8f * density
+      strokeCap = Paint.Cap.ROUND
+      color = Color.parseColor("#FF6B6B")
+    }
+    // Lid
+    canvas.drawLine(cx - s * 0.85f, cy - s * 0.5f, cx + s * 0.85f, cy - s * 0.5f, strokeP)
+    // Handle
+    canvas.drawRoundRect(RectF(cx - s * 0.35f, cy - s * 0.85f, cx + s * 0.35f, cy - s * 0.5f), 1.8f * density, 1.8f * density, strokeP)
+    // Can body
+    val body = Path().apply {
+      moveTo(cx - s * 0.65f, cy - s * 0.5f)
+      lineTo(cx - s * 0.5f, cy + s * 0.85f)
+      lineTo(cx + s * 0.5f, cy + s * 0.85f)
+      lineTo(cx + s * 0.65f, cy - s * 0.5f)
+    }
+    canvas.drawPath(body, strokeP)
+    // Vertical slats
+    canvas.drawLine(cx - s * 0.22f, cy - s * 0.2f, cx - s * 0.18f, cy + s * 0.6f, strokeP)
+    canvas.drawLine(cx + s * 0.22f, cy - s * 0.2f, cx + s * 0.18f, cy + s * 0.6f, strokeP)
+  }
+
+  private fun drawTagsIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
+    val s = size * 0.44f
+    val strokeP = Paint(paint).apply {
+      style = Paint.Style.STROKE
+      strokeWidth = 1.8f * density
+      strokeCap = Paint.Cap.ROUND
+      strokeJoin = Paint.Join.ROUND
+      color = Color.WHITE
+    }
+    val tagPath = Path().apply {
+      moveTo(cx - s * 0.85f, cy)
+      lineTo(cx - s * 0.22f, cy - s * 0.68f)
+      lineTo(cx + s * 0.8f, cy + s * 0.32f)
+      lineTo(cx + s * 0.18f, cy + s * 1.0f)
+      close()
+    }
+    canvas.drawPath(tagPath, strokeP)
+    // Eyelet hole
+    val fillP = Paint(paint).apply { style = Paint.Style.FILL; color = Color.WHITE }
+    canvas.drawCircle(cx - s * 0.38f, cy, 1.8f * density, fillP)
+  }
+
+  private fun drawBackMenuIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
+    val fillPaint = Paint(paint).apply {
+      style = Paint.Style.FILL
+      color = Color.WHITE
+    }
+    val w = size
+    val h = size * 0.85f
+    val path = Path().apply {
+      // Arrowhead tip pointing left
+      moveTo(cx - 0.48f * w, cy)
+      // Top barb
+      lineTo(cx - 0.08f * w, cy - 0.49f * h)
+      // Top notch at junction with arrow body
+      lineTo(cx - 0.08f * w, cy - 0.23f * h)
+      // Upper curve arching smoothly right and downwards
+      cubicTo(
+        cx + 0.20f * w, cy - 0.23f * h,
+        cx + 0.48f * w, cy - 0.05f * h,
+        cx + 0.48f * w, cy + 0.26f * h
+      )
+      // Rounded bottom tail tip
+      cubicTo(
+        cx + 0.48f * w, cy + 0.40f * h,
+        cx + 0.45f * w, cy + 0.49f * h,
+        cx + 0.42f * w, cy + 0.49f * h
+      )
+      // Inner curve returning back towards arrowhead junction
+      cubicTo(
+        cx + 0.40f * w, cy + 0.28f * h,
+        cx + 0.20f * w, cy + 0.19f * h,
+        cx - 0.08f * w, cy + 0.19f * h
+      )
+      // Bottom barb
+      lineTo(cx - 0.08f * w, cy + 0.49f * h)
+      close()
+    }
+    canvas.drawPath(path, fillPaint)
+  }
+
   private fun drawCardActionBar(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float, canvasTopY: Float) {
     val isDocked = isKeyboardActive()
     val kbH = getKeyboardHeight()
     val isEditing = editingCardId != null
 
-    val abW = min(viewW - 16f * density, 390f * density)
-    val abH = 48f * density
-    val typoH = 46f * density
-    val spacingBetweenBars = 8f * density
-    val totalStackH = if (isTypographyBarVisible) abH + typoH + spacingBetweenBars else abH
+    // Safe view bounds ensuring toolbar is never clipped by edges, split line, or bottom navigation
+    val safeTop = canvasTopY + 12f * density
+    val safeBottom = viewH - 72f * density
+    val safeLeft = 12f * density
+    val safeRight = viewW - 12f * density
 
-    val abLeft = (viewW - abW) / 2f
+    // Height 58dp for generous, comfortable touch targets and easily readable labels
+    val abH = 58f * density
+    val maxAvailableW = safeRight - safeLeft
+    val isTablet = viewW >= 600f * density
+    val abW = if (isTablet) min(maxAvailableW, 460f * density) else min(maxAvailableW, 400f * density)
+
+    val (scLeft, scTop) = canvasWorldToScreen(card.x, card.y, canvasTopY)
+    val (scRight, scBottom) = canvasWorldToScreen(card.x + card.width, card.y + card.getHeight(), canvasTopY)
+    val cardCenterX = (scLeft + scRight) / 2f
+
+    // Horizontally centered on card, clamped to screen margins
+    val abLeft = (cardCenterX - abW / 2f).coerceIn(safeLeft, safeRight - abW)
+
+    // Intelligently position above or below card, or dock near workspace top if card fills viewport
     val abTop = if (isDocked) {
-      viewH - kbH - abH - 8f * density
+      (viewH - kbH - abH - 10f * density).coerceIn(safeTop, safeBottom - abH)
     } else {
-      val (scLeft, scTop) = canvasWorldToScreen(card.x, card.y, canvasTopY)
-      val (scRight, scBottom) = canvasWorldToScreen(card.x + card.width, card.y + card.getHeight(), canvasTopY)
-      val spaceAbove = scTop - (canvasTopY + 8f * density)
-      if (spaceAbove >= totalStackH + 12f * density) {
-        scTop - totalStackH - 12f * density
-      } else {
-        (scBottom + 12f * density).coerceAtMost(viewH - totalStackH - 48f * density)
+      val margin = 12f * density
+      val spaceAbove = scTop - safeTop
+      val spaceBelow = safeBottom - scBottom
+
+      when {
+        spaceAbove >= abH + margin -> scTop - abH - margin
+        spaceBelow >= abH + margin -> scBottom + margin
+        else -> {
+          if (scTop - safeTop >= 20f * density) {
+            (scTop - abH - 6f * density).coerceIn(safeTop, safeBottom - abH)
+          } else {
+            safeTop + 8f * density
+          }
+        }
       }
-    }
+    }.coerceIn(safeTop, safeBottom - abH)
+
     cardActionBarRect.set(abLeft, abTop, abLeft + abW, abTop + abH)
+    val cornerRadius = abH / 2f
 
-    // Elevation Drop Shadow
-    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#4D000000")
-      style = Paint.Style.FILL
-    }
-    canvas.drawRoundRect(
-      RectF(abLeft, abTop + 3f * density, abLeft + abW, abTop + abH + 3f * density),
-      24f * density, 24f * density, shadowPaint
-    )
+    // Theme detection: Dark Slate Glass vs Frosted Light Slate
+    val isNightMode = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+    val barBgColor = if (isNightMode) Color.parseColor("#1E2534") else Color.parseColor("#5A6B82")
+    val barBorderColor = if (isNightMode) Color.parseColor("#475569") else Color.parseColor("#72849B")
 
+    // Ambient Apple Drop Shadow (Dual layer)
+    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    shadowPaint.color = Color.argb(45, 0, 0, 0)
+    canvas.drawRoundRect(RectF(abLeft, abTop + 4f * density, abLeft + abW, abTop + abH + 4f * density), cornerRadius, cornerRadius, shadowPaint)
+    shadowPaint.color = Color.argb(35, 0, 0, 0)
+    canvas.drawRoundRect(RectF(abLeft, abTop + 1f * density, abLeft + abW, abTop + abH + 1f * density), cornerRadius, cornerRadius, shadowPaint)
+
+    // Capsule Background & Border
     val abBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#0F172A") // Deep Slate-900
+      color = barBgColor
       style = Paint.Style.FILL
     }
     val abBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#334155") // Slate-700 outline
-      strokeWidth = 1.2f * density
+      color = barBorderColor
+      strokeWidth = 1.3f * density
       style = Paint.Style.STROKE
     }
-    canvas.drawRoundRect(cardActionBarRect, 24f * density, 24f * density, abBgPaint)
-    canvas.drawRoundRect(cardActionBarRect, 24f * density, 24f * density, abBorderPaint)
+    canvas.drawRoundRect(cardActionBarRect, cornerRadius, cornerRadius, abBgPaint)
+    canvas.drawRoundRect(cardActionBarRect, cornerRadius, cornerRadius, abBorderPaint)
 
     val labelPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#F8FAFC")
-      textSize = 13.5f * density
+      color = Color.WHITE
+      textSize = 12.5f * density
       isFakeBoldText = true
+      textAlign = Paint.Align.CENTER
     }
 
     val deleteLabelPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#FCA5A5")
-      textSize = 13.5f * density
+      color = Color.parseColor("#FF6B6B")
+      textSize = 12.5f * density
       isFakeBoldText = true
+      textAlign = Paint.Align.CENTER
     }
 
-    val buttonBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#1E293B")
-      style = Paint.Style.FILL
+    val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
     }
-    val buttonStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#334155")
-      strokeWidth = 1f * density
-      style = Paint.Style.STROKE
+    val deleteIconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#FF6B6B")
     }
 
     val innerLeft = abLeft + 8f * density
     val innerRight = abLeft + abW - 8f * density
     val innerW = innerRight - innerLeft
 
-    val btnH = abH - 12f * density
-    val btnTop = abTop + 6f * density
-    val btnBottom = btnTop + btnH
+    val wColor = 34f * density
+    val wDiv = 8f * density
+    val wTypo = 40f * density
+
+    val iconCenterY = abTop + 20f * density
+    val iconSize = 20f * density
+    val labelBaselineY = abTop + 47.5f * density
+
     var curX = innerLeft
 
     if (isEditing) {
-      // LiquidText Edit Mode Bar (Matching Screenshot 2): Comment, Copy, Delete, Tags, Color, TT
-      val wComment = 66f * density
-      val wCopy = 50f * density
-      val wDelete = 58f * density
-      val wTags = 50f * density
-      val wColor = 34f * density
-      val wDiv = 6f * density
-      val wTypo = 48f * density
-      val fixedTotal = wComment + wCopy + wDelete + wTags + wColor + wDiv + wTypo
-      val gap = ((innerW - fixedTotal) / 6f).coerceAtLeast(3f * density)
+      // Edit Mode: Comment, Copy, Delete, Tags, Color, Tt
+      val remainingW = innerW - wColor - wDiv - wTypo
+      val btnW = remainingW / 4f
 
       // 1. Comment
-      btnCardCommentRect.set(curX, btnTop, curX + wComment, btnBottom)
-      canvas.drawRoundRect(btnCardCommentRect, 10f * density, 10f * density, buttonBgPaint)
-      canvas.drawRoundRect(btnCardCommentRect, 10f * density, 10f * density, buttonStrokePaint)
-      canvas.drawText("Comment", btnCardCommentRect.centerX() - labelPaint.measureText("Comment") / 2f, btnCardCommentRect.centerY() + 5f * density, labelPaint)
-      curX += wComment + gap
+      btnCardCommentRect.set(curX, abTop, curX + btnW, abTop + abH)
+      drawCommentIcon(canvas, btnCardCommentRect.centerX(), iconCenterY, iconSize, iconPaint)
+      canvas.drawText("Comment", btnCardCommentRect.centerX(), labelBaselineY, labelPaint)
+      curX += btnW
 
       // 2. Copy
-      btnCardCopyRect.set(curX, btnTop, curX + wCopy, btnBottom)
-      canvas.drawRoundRect(btnCardCopyRect, 10f * density, 10f * density, buttonBgPaint)
-      canvas.drawRoundRect(btnCardCopyRect, 10f * density, 10f * density, buttonStrokePaint)
-      canvas.drawText("Copy", btnCardCopyRect.centerX() - labelPaint.measureText("Copy") / 2f, btnCardCopyRect.centerY() + 5f * density, labelPaint)
-      curX += wCopy + gap
+      btnCardCopyRect.set(curX, abTop, curX + btnW, abTop + abH)
+      drawCopyIcon(canvas, btnCardCopyRect.centerX(), iconCenterY, iconSize, iconPaint, barBgColor)
+      canvas.drawText("Copy", btnCardCopyRect.centerX(), labelBaselineY, labelPaint)
+      curX += btnW
 
       // 3. Delete
-      btnCardDeleteRect.set(curX, btnTop, curX + wDelete, btnBottom)
-      val deleteBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#3F1418")
-        style = Paint.Style.FILL
-      }
-      val deleteBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#7F1D1D")
-        strokeWidth = 1f * density
-        style = Paint.Style.STROKE
-      }
-      canvas.drawRoundRect(btnCardDeleteRect, 10f * density, 10f * density, deleteBgPaint)
-      canvas.drawRoundRect(btnCardDeleteRect, 10f * density, 10f * density, deleteBorderPaint)
-      canvas.drawText("Delete", btnCardDeleteRect.centerX() - deleteLabelPaint.measureText("Delete") / 2f, btnCardDeleteRect.centerY() + 5f * density, deleteLabelPaint)
-      curX += wDelete + gap
+      btnCardDeleteRect.set(curX, abTop, curX + btnW, abTop + abH)
+      drawDeleteIcon(canvas, btnCardDeleteRect.centerX(), iconCenterY, iconSize, deleteIconPaint)
+      canvas.drawText("Delete", btnCardDeleteRect.centerX(), labelBaselineY, deleteLabelPaint)
+      curX += btnW
 
       // 4. Tags
-      btnCardTagsRect.set(curX, btnTop, curX + wTags, btnBottom)
-      canvas.drawRoundRect(btnCardTagsRect, 10f * density, 10f * density, buttonBgPaint)
-      canvas.drawRoundRect(btnCardTagsRect, 10f * density, 10f * density, buttonStrokePaint)
-      canvas.drawText("Tags", btnCardTagsRect.centerX() - labelPaint.measureText("Tags") / 2f, btnCardTagsRect.centerY() + 5f * density, labelPaint)
-      curX += wTags + gap
+      btnCardTagsRect.set(curX, abTop, curX + btnW, abTop + abH)
+      drawTagsIcon(canvas, btnCardTagsRect.centerX(), iconCenterY, iconSize, iconPaint)
+      canvas.drawText("Tags", btnCardTagsRect.centerX(), labelBaselineY, labelPaint)
+      curX += btnW
 
-      // 5. Color Wheel / Swatch
-      btnCardColorWheelRect.set(curX, btnTop, curX + wColor, btnBottom)
-      val cwCenter = btnCardColorWheelRect.centerX()
-      val cwY = btnCardColorWheelRect.centerY()
-      val cwRad = 12f * density
-      val cwPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = card.color; style = Paint.Style.FILL }
-      canvas.drawCircle(cwCenter, cwY, cwRad, cwPaint)
-      val cwRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        strokeWidth = 2f * density
-        style = Paint.Style.STROKE
-      }
-      canvas.drawCircle(cwCenter, cwY, cwRad, cwRing)
-      curX += wColor + gap
+      // 5. Color Swatch
+      btnCardColorWheelRect.set(curX, abTop, curX + wColor, abTop + abH)
+      drawRainbowSwatch(canvas, btnCardColorWheelRect, card.color)
+      curX += wColor
 
-      // 6. Divider |
+      // 6. Hairline Divider |
       val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#475569")
+        color = barBorderColor
         strokeWidth = 1.2f * density
       }
-      val divX = curX + 2f * density
-      canvas.drawLine(divX, abTop + 10f * density, divX, abTop + abH - 10f * density, divPaint)
-      curX += wDiv + gap
+      val divX = curX + wDiv / 2f
+      canvas.drawLine(divX, abTop + 14f * density, divX, abTop + abH - 14f * density, divPaint)
+      curX += wDiv
 
-      // 7. Typography Button [TT]
-      btnCardTypographyRect.set(curX, btnTop, innerRight, btnBottom)
-      canvas.drawRoundRect(btnCardTypographyRect, 10f * density, 10f * density, buttonBgPaint)
-      canvas.drawRoundRect(btnCardTypographyRect, 10f * density, 10f * density, buttonStrokePaint)
-      val typoTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = 14f * density
-        isFakeBoldText = true
-      }
-      canvas.drawText("TT", btnCardTypographyRect.centerX() - typoTextPaint.measureText("TT") / 2f, btnCardTypographyRect.centerY() + 5f * density, typoTextPaint)
+      // 7. Typography Button [Tt]
+      btnCardTypographyRect.set(curX, abTop, innerRight, abTop + abH)
+      drawTypographyGlyph(canvas, btnCardTypographyRect, density, isTypographyBarVisible)
 
       btnCardEditRect.setEmpty()
     } else {
-      // Normal Non-Edit Card Selection Bar: Comment, Edit, Copy, Delete, Tags, Color, TT
-      val wComment = 64f * density
-      val wEdit = 46f * density
-      val wCopy = 46f * density
-      val wDelete = 52f * density
-      val wTags = 44f * density
-      val wColor = 30f * density
-      val wDiv = 6f * density
-      val wTypo = 44f * density
-      val fixedTotal = wComment + wEdit + wCopy + wDelete + wTags + wColor + wDiv + wTypo
-      val gap = ((innerW - fixedTotal) / 7f).coerceAtLeast(2f * density)
+      // Normal Card Selection Bar: Comment, Edit, Copy, Delete, Tags, Color, Tt
+      val remainingW = innerW - wColor - wDiv - wTypo
+      val btnW = remainingW / 5f
 
       // 1. Comment
-      btnCardCommentRect.set(curX, btnTop, curX + wComment, btnBottom)
-      canvas.drawRoundRect(btnCardCommentRect, 10f * density, 10f * density, buttonBgPaint)
-      canvas.drawRoundRect(btnCardCommentRect, 10f * density, 10f * density, buttonStrokePaint)
-      canvas.drawText("Comment", btnCardCommentRect.centerX() - labelPaint.measureText("Comment") / 2f, btnCardCommentRect.centerY() + 5f * density, labelPaint)
-      curX += wComment + gap
+      btnCardCommentRect.set(curX, abTop, curX + btnW, abTop + abH)
+      drawCommentIcon(canvas, btnCardCommentRect.centerX(), iconCenterY, iconSize, iconPaint)
+      canvas.drawText("Comment", btnCardCommentRect.centerX(), labelBaselineY, labelPaint)
+      curX += btnW
 
       // 2. Edit
-      btnCardEditRect.set(curX, btnTop, curX + wEdit, btnBottom)
-      canvas.drawRoundRect(btnCardEditRect, 10f * density, 10f * density, buttonBgPaint)
-      canvas.drawRoundRect(btnCardEditRect, 10f * density, 10f * density, buttonStrokePaint)
-      canvas.drawText("Edit", btnCardEditRect.centerX() - labelPaint.measureText("Edit") / 2f, btnCardEditRect.centerY() + 5f * density, labelPaint)
-      curX += wEdit + gap
+      btnCardEditRect.set(curX, abTop, curX + btnW, abTop + abH)
+      drawEditIcon(canvas, btnCardEditRect.centerX(), iconCenterY, iconSize, iconPaint)
+      canvas.drawText("Edit", btnCardEditRect.centerX(), labelBaselineY, labelPaint)
+      curX += btnW
 
       // 3. Copy
-      btnCardCopyRect.set(curX, btnTop, curX + wCopy, btnBottom)
-      canvas.drawRoundRect(btnCardCopyRect, 10f * density, 10f * density, buttonBgPaint)
-      canvas.drawRoundRect(btnCardCopyRect, 10f * density, 10f * density, buttonStrokePaint)
-      canvas.drawText("Copy", btnCardCopyRect.centerX() - labelPaint.measureText("Copy") / 2f, btnCardCopyRect.centerY() + 5f * density, labelPaint)
-      curX += wCopy + gap
+      btnCardCopyRect.set(curX, abTop, curX + btnW, abTop + abH)
+      drawCopyIcon(canvas, btnCardCopyRect.centerX(), iconCenterY, iconSize, iconPaint, barBgColor)
+      canvas.drawText("Copy", btnCardCopyRect.centerX(), labelBaselineY, labelPaint)
+      curX += btnW
 
       // 4. Delete
-      btnCardDeleteRect.set(curX, btnTop, curX + wDelete, btnBottom)
-      val deleteBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#3F1418")
-        style = Paint.Style.FILL
-      }
-      val deleteBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#7F1D1D")
-        strokeWidth = 1f * density
-        style = Paint.Style.STROKE
-      }
-      canvas.drawRoundRect(btnCardDeleteRect, 10f * density, 10f * density, deleteBgPaint)
-      canvas.drawRoundRect(btnCardDeleteRect, 10f * density, 10f * density, deleteBorderPaint)
-      canvas.drawText("Delete", btnCardDeleteRect.centerX() - deleteLabelPaint.measureText("Delete") / 2f, btnCardDeleteRect.centerY() + 5f * density, deleteLabelPaint)
-      curX += wDelete + gap
+      btnCardDeleteRect.set(curX, abTop, curX + btnW, abTop + abH)
+      drawDeleteIcon(canvas, btnCardDeleteRect.centerX(), iconCenterY, iconSize, deleteIconPaint)
+      canvas.drawText("Delete", btnCardDeleteRect.centerX(), labelBaselineY, deleteLabelPaint)
+      curX += btnW
 
       // 5. Tags
-      btnCardTagsRect.set(curX, btnTop, curX + wTags, btnBottom)
-      canvas.drawRoundRect(btnCardTagsRect, 10f * density, 10f * density, buttonBgPaint)
-      canvas.drawRoundRect(btnCardTagsRect, 10f * density, 10f * density, buttonStrokePaint)
-      canvas.drawText("Tags", btnCardTagsRect.centerX() - labelPaint.measureText("Tags") / 2f, btnCardTagsRect.centerY() + 5f * density, labelPaint)
-      curX += wTags + gap
+      btnCardTagsRect.set(curX, abTop, curX + btnW, abTop + abH)
+      drawTagsIcon(canvas, btnCardTagsRect.centerX(), iconCenterY, iconSize, iconPaint)
+      canvas.drawText("Tags", btnCardTagsRect.centerX(), labelBaselineY, labelPaint)
+      curX += btnW
 
-      // 6. Color Wheel / Swatch
-      btnCardColorWheelRect.set(curX, btnTop, curX + wColor, btnBottom)
-      val cwCenter = btnCardColorWheelRect.centerX()
-      val cwY = btnCardColorWheelRect.centerY()
-      val cwRad = 12f * density
-      val cwPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = card.color; style = Paint.Style.FILL }
-      canvas.drawCircle(cwCenter, cwY, cwRad, cwPaint)
-      val cwRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        strokeWidth = 2f * density
-        style = Paint.Style.STROKE
-      }
-      canvas.drawCircle(cwCenter, cwY, cwRad, cwRing)
-      curX += wColor + gap
+      // 6. Color Swatch
+      btnCardColorWheelRect.set(curX, abTop, curX + wColor, abTop + abH)
+      drawRainbowSwatch(canvas, btnCardColorWheelRect, card.color)
+      curX += wColor
 
-      // 7. Divider |
+      // 7. Hairline Divider |
       val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#475569")
+        color = barBorderColor
         strokeWidth = 1.2f * density
       }
-      val divX = curX + 2f * density
-      canvas.drawLine(divX, abTop + 10f * density, divX, abTop + abH - 10f * density, divPaint)
-      curX += wDiv + gap
+      val divX = curX + wDiv / 2f
+      canvas.drawLine(divX, abTop + 14f * density, divX, abTop + abH - 14f * density, divPaint)
+      curX += wDiv
 
-      // 8. Typography Button [TT]
-      btnCardTypographyRect.set(curX, btnTop, innerRight, btnBottom)
-      if (isTypographyBarVisible) {
-        val typoBtnBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#2563EB"); style = Paint.Style.FILL }
-        canvas.drawRoundRect(btnCardTypographyRect, 10f * density, 10f * density, typoBtnBg)
-      } else {
-        canvas.drawRoundRect(btnCardTypographyRect, 10f * density, 10f * density, buttonBgPaint)
-        canvas.drawRoundRect(btnCardTypographyRect, 10f * density, 10f * density, buttonStrokePaint)
-      }
-      val typoTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = 14f * density
-        isFakeBoldText = true
-      }
-      canvas.drawText("TT", btnCardTypographyRect.centerX() - typoTextPaint.measureText("TT") / 2f, btnCardTypographyRect.centerY() + 5f * density, typoTextPaint)
+      // 8. Typography Button [Tt]
+      btnCardTypographyRect.set(curX, abTop, innerRight, abTop + abH)
+      drawTypographyGlyph(canvas, btnCardTypographyRect, density, isTypographyBarVisible)
     }
   }
 
-  private fun drawTypographyBar(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float) {
+  private fun drawRainbowSwatch(canvas: Canvas, rect: RectF, cardColor: Int) {
+    val cwCenter = rect.centerX()
+    val cwY = rect.centerY()
+    val cwRad = 13.5f * density
+
+    val rainbowShader = android.graphics.SweepGradient(
+      cwCenter, cwY,
+      intArrayOf(
+        Color.parseColor("#EF4444"),
+        Color.parseColor("#F59E0B"),
+        Color.parseColor("#10B981"),
+        Color.parseColor("#3B82F6"),
+        Color.parseColor("#8B5CF6"),
+        Color.parseColor("#EC4899"),
+        Color.parseColor("#EF4444")
+      ),
+      null
+    )
+    val rainbowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      shader = rainbowShader
+      style = Paint.Style.FILL
+    }
+    canvas.drawCircle(cwCenter, cwY, cwRad, rainbowPaint)
+
+    val cwRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.parseColor("#A0FFFFFF")
+      strokeWidth = 1.4f * density
+      style = Paint.Style.STROKE
+    }
+    canvas.drawCircle(cwCenter, cwY, cwRad, cwRing)
+
+    val innerDot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = cardColor
+      style = Paint.Style.FILL
+    }
+    canvas.drawCircle(cwCenter, cwY, 4.2f * density, innerDot)
+  }
+
+  private fun drawTypographyGlyph(canvas: Canvas, rect: RectF, density: Float, isActive: Boolean) {
+    if (isActive) {
+      val activePill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#2563EB")
+        style = Paint.Style.FILL
+      }
+      canvas.drawRoundRect(
+        RectF(rect.centerX() - 17f * density, rect.centerY() - 17f * density, rect.centerX() + 17f * density, rect.centerY() + 17f * density),
+        9f * density, 9f * density, activePill
+      )
+    }
+
+    val tBigPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      textSize = 18f * density
+      typeface = Typeface.create("serif", Typeface.BOLD)
+    }
+    val tSmallPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      textSize = 13f * density
+      typeface = Typeface.create("serif", Typeface.BOLD)
+    }
+
+    val wBigT = tBigPaint.measureText("T")
+    val wSmallT = tSmallPaint.measureText("T")
+    val totalW = wBigT + wSmallT + 1.2f * density
+    val startX = rect.centerX() - totalW / 2f
+
+    val fmBig = tBigPaint.fontMetrics
+    val bigY = rect.centerY() - (fmBig.ascent + fmBig.descent) / 2f
+    val fmSmall = tSmallPaint.fontMetrics
+    val smallY = rect.centerY() - (fmSmall.ascent + fmSmall.descent) / 2f + 2.8f * density
+
+    canvas.drawText("T", startX, bigY, tBigPaint)
+    canvas.drawText("T", startX + wBigT + 1.2f * density, smallY, tSmallPaint)
+  }
+
+  private fun drawTypographyBar(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float, canvasTopY: Float) {
     val isDocked = isKeyboardActive()
     val kbH = getKeyboardHeight()
 
-    val typoW = min(viewW - 16f * density, 400f * density)
-    val typoH = 46f * density
-    val typoLeft = (viewW - typoW) / 2f
+    val safeTop = canvasTopY + 12f * density
+    val safeBottom = viewH - 72f * density
+    val safeLeft = 12f * density
+    val safeRight = viewW - 12f * density
+
+    val typoH = 58f * density
+    val maxAvailableW = safeRight - safeLeft
+    val isTablet = viewW >= 600f * density
+    val typoW = if (isTablet) min(maxAvailableW, 460f * density) else min(maxAvailableW, 400f * density)
+
+    val (scLeft, scTop) = canvasWorldToScreen(card.x, card.y, canvasTopY)
+    val (scRight, scBottom) = canvasWorldToScreen(card.x + card.width, card.y + card.getHeight(), canvasTopY)
+    val cardCenterX = (scLeft + scRight) / 2f
+
+    val typoLeft = (cardCenterX - typoW / 2f).coerceIn(safeLeft, safeRight - typoW)
     val typoTop = if (isDocked) {
-      viewH - kbH - typoH - 8f * density
+      (viewH - kbH - typoH - 10f * density).coerceIn(safeTop, safeBottom - typoH)
     } else {
-      cardActionBarRect.bottom + 8f * density
-    }
+      val margin = 12f * density
+      val spaceAbove = scTop - safeTop
+      val spaceBelow = safeBottom - scBottom
+
+      when {
+        spaceAbove >= typoH + margin -> scTop - typoH - margin
+        spaceBelow >= typoH + margin -> scBottom + margin
+        else -> {
+          if (scTop - safeTop >= 20f * density) {
+            (scTop - typoH - 6f * density).coerceIn(safeTop, safeBottom - typoH)
+          } else {
+            safeTop + 8f * density
+          }
+        }
+      }
+    }.coerceIn(safeTop, safeBottom - typoH)
+
     typographyBarRect.set(typoLeft, typoTop, typoLeft + typoW, typoTop + typoH)
+    val cornerRadius = typoH / 2f
 
-    // Elevation Shadow
-    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#4D000000")
-      style = Paint.Style.FILL
-    }
-    canvas.drawRoundRect(
-      RectF(typoLeft, typoTop + 3f * density, typoLeft + typoW, typoTop + typoH + 3f * density),
-      23f * density, 23f * density, shadowPaint
-    )
+    val isNightMode = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+    val barBgColor = if (isNightMode) Color.parseColor("#1E2534") else Color.parseColor("#5A6B82")
+    val barBorderColor = if (isNightMode) Color.parseColor("#475569") else Color.parseColor("#72849B")
 
+    // Ambient Apple Drop Shadow (Dual layer)
+    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    shadowPaint.color = Color.argb(45, 0, 0, 0)
+    canvas.drawRoundRect(RectF(typoLeft, typoTop + 4f * density, typoLeft + typoW, typoTop + typoH + 4f * density), cornerRadius, cornerRadius, shadowPaint)
+    shadowPaint.color = Color.argb(35, 0, 0, 0)
+    canvas.drawRoundRect(RectF(typoLeft, typoTop + 1f * density, typoLeft + typoW, typoTop + typoH + 1f * density), cornerRadius, cornerRadius, shadowPaint)
+
+    // Capsule Background & Border
     val barBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#0F172A") // Deep Slate-900
+      color = barBgColor
       style = Paint.Style.FILL
     }
     val barBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#334155")
-      strokeWidth = 1.2f * density
+      color = barBorderColor
+      strokeWidth = 1.3f * density
       style = Paint.Style.STROKE
     }
-    canvas.drawRoundRect(typographyBarRect, 23f * density, 23f * density, barBg)
-    canvas.drawRoundRect(typographyBarRect, 23f * density, 23f * density, barBorder)
+    canvas.drawRoundRect(typographyBarRect, cornerRadius, cornerRadius, barBg)
+    canvas.drawRoundRect(typographyBarRect, cornerRadius, cornerRadius, barBorder)
 
     val itemPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#F8FAFC")
-      textSize = 14f * density
+      color = Color.WHITE
+      textSize = 15f * density
       isFakeBoldText = true
+      typeface = Typeface.create("sans-serif", Typeface.NORMAL)
     }
     val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#334155")
+      color = barBorderColor
       strokeWidth = 1.2f * density
     }
-    val activeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    val activePillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
       color = Color.parseColor("#2563EB")
       style = Paint.Style.FILL
     }
-    val itemBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#1E293B")
-      style = Paint.Style.FILL
-    }
-    val itemStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#334155")
-      strokeWidth = 1f * density
-      style = Paint.Style.STROKE
-    }
 
-    val innerLeft = typoLeft + 8f * density
-    val innerRight = typoLeft + typoW - 8f * density
-    val btnH = typoH - 12f * density
-    val btnTop = typoTop + 6f * density
-    val btnBottom = btnTop + btnH
+    val innerLeft = typoLeft + 10f * density
+    val innerRight = typoLeft + typoW - 10f * density
+    val btnTop = typoTop
+    val btnBottom = typoTop + typoH
 
-    val wUndo = 34f * density
-    val wStyle = 72f * density
-    val wBold = 28f * density
-    val wItalic = 28f * density
-    val wUnderline = 28f * density
-    val wStrike = 28f * density
-    val wSize = 34f * density
-    val wColor = 32f * density
+    val wUndo = 38f * density
+    val wDiv1 = 6f * density
+    val wStyle = 62f * density
+    val wDiv2 = 6f * density
+    val wBold = 34f * density
+    val wItalic = 34f * density
+    val wUnderline = 34f * density
+    val wStrike = 34f * density
+    val wDiv3 = 6f * density
+    val wSize = 32f * density
+    val wColor = 34f * density
     val wMore = 34f * density
-    val fixedTotal = wUndo + wStyle + wBold + wItalic + wUnderline + wStrike + wSize + wColor + wMore + 18f * density
-    val gap = ((innerRight - innerLeft - fixedTotal) / 8f).coerceAtLeast(2f * density)
+    val fixedTotal = wUndo + wDiv1 + wStyle + wDiv2 + wBold + wItalic + wUnderline + wStrike + wDiv3 + wSize + wColor + wMore
+    val gap = ((innerRight - innerLeft - fixedTotal) / 11f).coerceAtLeast(1.5f * density)
 
+    val fm = itemPaint.fontMetrics
+    val centerY = typographyBarRect.centerY() - (fm.ascent + fm.descent) / 2f
     var curX = innerLeft
 
-    // 1. Undo
-    btnTypoUndoRect.set(curX, btnTop, curX + wUndo, btnBottom)
-    canvas.drawRoundRect(btnTypoUndoRect, 8f * density, 8f * density, itemBg)
-    canvas.drawRoundRect(btnTypoUndoRect, 8f * density, 8f * density, itemStroke)
-    val undoPaint = TextPaint(itemPaint).apply { textSize = 16f * density }
-    canvas.drawText("↩", btnTypoUndoRect.centerX() - undoPaint.measureText("↩") / 2f, btnTypoUndoRect.centerY() + 5.5f * density, undoPaint)
+    // 1. Back to main card selection menu [ ↩ ]
+    btnTypoBackRect.set(curX, btnTop, curX + wUndo, btnBottom)
+    drawBackMenuIcon(canvas, btnTypoBackRect.centerX(), typographyBarRect.centerY(), 22f * density, itemPaint)
     curX += wUndo + gap
 
-    // Divider
-    val div1X = curX + 2f * density
-    canvas.drawLine(div1X, typoTop + 10f * density, div1X, typoTop + typoH - 10f * density, divPaint)
-    curX += 5f * density + gap
+    // Divider 1
+    val d1X = curX + wDiv1 / 2f
+    canvas.drawLine(d1X, typoTop + 14f * density, d1X, typoTop + typoH - 14f * density, divPaint)
+    curX += wDiv1 + gap
 
     // 2. Style
     btnTypoStyleRect.set(curX, btnTop, curX + wStyle, btnBottom)
     if (isStyleSheetOpen) {
-      canvas.drawRoundRect(btnTypoStyleRect, 8f * density, 8f * density, activeBg)
-    } else {
-      canvas.drawRoundRect(btnTypoStyleRect, 8f * density, 8f * density, itemBg)
-      canvas.drawRoundRect(btnTypoStyleRect, 8f * density, 8f * density, itemStroke)
+      val stylePill = RectF(btnTypoStyleRect.centerX() - 29f * density, btnTypoStyleRect.centerY() - 16f * density, btnTypoStyleRect.centerX() + 29f * density, btnTypoStyleRect.centerY() + 16f * density)
+      canvas.drawRoundRect(stylePill, 8f * density, 8f * density, activePillPaint)
     }
     val styleLabel = if (card.textStyleName != "Default") card.textStyleName else "Style"
-    val styleText = "$styleLabel ▾"
-    val stylePaint = TextPaint(itemPaint).apply { textSize = 12.5f * density }
-    canvas.drawText(styleText, btnTypoStyleRect.centerX() - stylePaint.measureText(styleText) / 2f, btnTypoStyleRect.centerY() + 4.5f * density, stylePaint)
+    val stylePaint = TextPaint(itemPaint).apply { textSize = 15f * density }
+    canvas.drawText(styleLabel, btnTypoStyleRect.centerX() - stylePaint.measureText(styleLabel) / 2f, centerY, stylePaint)
     curX += wStyle + gap
 
-    // Divider
-    val div2X = curX + 2f * density
-    canvas.drawLine(div2X, typoTop + 10f * density, div2X, typoTop + typoH - 10f * density, divPaint)
-    curX += 5f * density + gap
+    // Divider 2
+    val d2X = curX + wDiv2 / 2f
+    canvas.drawLine(d2X, typoTop + 14f * density, d2X, typoTop + typoH - 14f * density, divPaint)
+    curX += wDiv2 + gap
 
-    // 3. Bold 'B'
+    // 3. Bold [ B ]
     btnTypoBoldRect.set(curX, btnTop, curX + wBold, btnBottom)
     if (card.isBold) {
-      canvas.drawRoundRect(btnTypoBoldRect, 8f * density, 8f * density, activeBg)
-    } else {
-      canvas.drawRoundRect(btnTypoBoldRect, 8f * density, 8f * density, itemBg)
-      canvas.drawRoundRect(btnTypoBoldRect, 8f * density, 8f * density, itemStroke)
+      val bPill = RectF(btnTypoBoldRect.centerX() - 15f * density, btnTypoBoldRect.centerY() - 15f * density, btnTypoBoldRect.centerX() + 15f * density, btnTypoBoldRect.centerY() + 15f * density)
+      canvas.drawRoundRect(bPill, 8f * density, 8f * density, activePillPaint)
     }
-    val boldPaint = TextPaint(itemPaint).apply { isFakeBoldText = true }
-    canvas.drawText("B", btnTypoBoldRect.centerX() - boldPaint.measureText("B") / 2f, btnTypoBoldRect.centerY() + 5f * density, boldPaint)
+    val boldPaint = TextPaint(itemPaint).apply { isFakeBoldText = true; textSize = 18f * density }
+    canvas.drawText("B", btnTypoBoldRect.centerX() - boldPaint.measureText("B") / 2f, centerY, boldPaint)
     curX += wBold + gap
 
-    // 4. Italic 'I'
+    // 4. Italic [ I ]
     btnTypoItalicRect.set(curX, btnTop, curX + wItalic, btnBottom)
     if (card.isItalic) {
-      canvas.drawRoundRect(btnTypoItalicRect, 8f * density, 8f * density, activeBg)
-    } else {
-      canvas.drawRoundRect(btnTypoItalicRect, 8f * density, 8f * density, itemBg)
-      canvas.drawRoundRect(btnTypoItalicRect, 8f * density, 8f * density, itemStroke)
+      val iPill = RectF(btnTypoItalicRect.centerX() - 15f * density, btnTypoItalicRect.centerY() - 15f * density, btnTypoItalicRect.centerX() + 15f * density, btnTypoItalicRect.centerY() + 15f * density)
+      canvas.drawRoundRect(iPill, 8f * density, 8f * density, activePillPaint)
     }
-    val italicPaint = TextPaint(itemPaint).apply { textSkewX = -0.25f }
-    canvas.drawText("I", btnTypoItalicRect.centerX() - italicPaint.measureText("I") / 2f, btnTypoItalicRect.centerY() + 5f * density, italicPaint)
+    val italicPaint = TextPaint(itemPaint).apply { textSkewX = -0.22f; textSize = 18f * density }
+    canvas.drawText("I", btnTypoItalicRect.centerX() - italicPaint.measureText("I") / 2f, centerY, italicPaint)
     curX += wItalic + gap
 
-    // 5. Underline 'U'
+    // 5. Underline [ U ]
     btnTypoUnderlineRect.set(curX, btnTop, curX + wUnderline, btnBottom)
     if (card.isUnderline) {
-      canvas.drawRoundRect(btnTypoUnderlineRect, 8f * density, 8f * density, activeBg)
-    } else {
-      canvas.drawRoundRect(btnTypoUnderlineRect, 8f * density, 8f * density, itemBg)
-      canvas.drawRoundRect(btnTypoUnderlineRect, 8f * density, 8f * density, itemStroke)
+      val uPill = RectF(btnTypoUnderlineRect.centerX() - 15f * density, btnTypoUnderlineRect.centerY() - 15f * density, btnTypoUnderlineRect.centerX() + 15f * density, btnTypoUnderlineRect.centerY() + 15f * density)
+      canvas.drawRoundRect(uPill, 8f * density, 8f * density, activePillPaint)
     }
-    val ulPaint = TextPaint(itemPaint).apply { isUnderlineText = true }
-    canvas.drawText("U", btnTypoUnderlineRect.centerX() - ulPaint.measureText("U") / 2f, btnTypoUnderlineRect.centerY() + 5f * density, ulPaint)
+    val ulPaint = TextPaint(itemPaint).apply { isUnderlineText = true; textSize = 18f * density }
+    canvas.drawText("U", btnTypoUnderlineRect.centerX() - ulPaint.measureText("U") / 2f, centerY, ulPaint)
     curX += wUnderline + gap
 
-    // 6. Strikethrough 'S'
+    // 6. Strikethrough [ S ]
     btnTypoStrikeRect.set(curX, btnTop, curX + wStrike, btnBottom)
     if (card.isStrikethrough) {
-      canvas.drawRoundRect(btnTypoStrikeRect, 8f * density, 8f * density, activeBg)
-    } else {
-      canvas.drawRoundRect(btnTypoStrikeRect, 8f * density, 8f * density, itemBg)
-      canvas.drawRoundRect(btnTypoStrikeRect, 8f * density, 8f * density, itemStroke)
+      val sPill = RectF(btnTypoStrikeRect.centerX() - 15f * density, btnTypoStrikeRect.centerY() - 15f * density, btnTypoStrikeRect.centerX() + 15f * density, btnTypoStrikeRect.centerY() + 15f * density)
+      canvas.drawRoundRect(sPill, 8f * density, 8f * density, activePillPaint)
     }
-    val strikePaint = TextPaint(itemPaint).apply { isStrikeThruText = true }
-    canvas.drawText("S", btnTypoStrikeRect.centerX() - strikePaint.measureText("S") / 2f, btnTypoStrikeRect.centerY() + 5f * density, strikePaint)
+    val strikePaint = TextPaint(itemPaint).apply { isStrikeThruText = true; textSize = 18f * density }
+    canvas.drawText("S", btnTypoStrikeRect.centerX() - strikePaint.measureText("S") / 2f, centerY, strikePaint)
     curX += wStrike + gap
 
-    // Divider
-    val div3X = curX + 2f * density
-    canvas.drawLine(div3X, typoTop + 10f * density, div3X, typoTop + typoH - 10f * density, divPaint)
-    curX += 5f * density + gap
+    // Divider 3
+    val d3X = curX + wDiv3 / 2f
+    canvas.drawLine(d3X, typoTop + 14f * density, d3X, typoTop + typoH - 14f * density, divPaint)
+    curX += wDiv3 + gap
 
-    // 7. Font size indicator
+    // 7. Size indicator '0'
     btnTypoFontSizeRect.set(curX, btnTop, curX + wSize, btnBottom)
-    canvas.drawRoundRect(btnTypoFontSizeRect, 8f * density, 8f * density, itemBg)
-    canvas.drawRoundRect(btnTypoFontSizeRect, 8f * density, 8f * density, itemStroke)
-    val sizeText = "${card.fontSize.toInt()}"
-    canvas.drawText(sizeText, btnTypoFontSizeRect.centerX() - itemPaint.measureText(sizeText) / 2f, btnTypoFontSizeRect.centerY() + 5f * density, itemPaint)
+    val sizeText = "0"
+    val sizePaint = TextPaint(itemPaint).apply { textSize = 16f * density }
+    canvas.drawText(sizeText, btnTypoFontSizeRect.centerX() - sizePaint.measureText(sizeText) / 2f, centerY, sizePaint)
     curX += wSize + gap
 
-    // 8. Text Color A_ (dash a)
+    // 8. Text Color [ A_ ]
     btnTypoTextColorRect.set(curX, btnTop, curX + wColor, btnBottom)
     if (isTypoTextColorPaletteOpen) {
-      canvas.drawRoundRect(btnTypoTextColorRect, 8f * density, 8f * density, activeBg)
-    } else {
-      canvas.drawRoundRect(btnTypoTextColorRect, 8f * density, 8f * density, itemBg)
-      canvas.drawRoundRect(btnTypoTextColorRect, 8f * density, 8f * density, itemStroke)
+      val aPill = RectF(btnTypoTextColorRect.centerX() - 15f * density, btnTypoTextColorRect.centerY() - 15f * density, btnTypoTextColorRect.centerX() + 15f * density, btnTypoTextColorRect.centerY() + 15f * density)
+      canvas.drawRoundRect(aPill, 8f * density, 8f * density, activePillPaint)
     }
-    canvas.drawText("A", btnTypoTextColorRect.centerX() - itemPaint.measureText("A") / 2f, btnTypoTextColorRect.centerY() + 3.5f * density, itemPaint)
+    val aPaint = TextPaint(itemPaint).apply { textSize = 17.5f * density; isFakeBoldText = true }
+    val fmA = aPaint.fontMetrics
+    val aY = typographyBarRect.centerY() - (fmA.ascent + fmA.descent) / 2f - 2f * density
+    canvas.drawText("A", btnTypoTextColorRect.centerX() - aPaint.measureText("A") / 2f, aY, aPaint)
     val colorBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
       color = card.textColor
-      strokeWidth = 3f * density
+      strokeWidth = 3.5f * density
       strokeCap = Paint.Cap.ROUND
     }
-    val barY = btnTypoTextColorRect.bottom - 5f * density
-    canvas.drawLine(btnTypoTextColorRect.left + 7f * density, barY, btnTypoTextColorRect.right - 7f * density, barY, colorBarPaint)
+    val aBarY = typographyBarRect.centerY() + 9f * density
+    canvas.drawLine(btnTypoTextColorRect.centerX() - 8f * density, aBarY, btnTypoTextColorRect.centerX() + 8f * density, aBarY, colorBarPaint)
     curX += wColor + gap
 
-    // 9. TT Toggle / Back Button
+    // 9. More Options ···
     btnTypoMoreRect.set(curX, btnTop, innerRight, btnBottom)
-    if (editingCardId != null) {
-      val ttActiveBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#2563EB"); style = Paint.Style.FILL }
-      canvas.drawRoundRect(btnTypoMoreRect, 8f * density, 8f * density, ttActiveBg)
-      val ttPaint = TextPaint(itemPaint).apply { textSize = 13.5f * density }
-      canvas.drawText("TT", btnTypoMoreRect.centerX() - ttPaint.measureText("TT") / 2f, btnTypoMoreRect.centerY() + 4.5f * density, ttPaint)
-    } else {
-      canvas.drawRoundRect(btnTypoMoreRect, 8f * density, 8f * density, itemBg)
-      canvas.drawRoundRect(btnTypoMoreRect, 8f * density, 8f * density, itemStroke)
-      val morePaint = TextPaint(itemPaint).apply { textSize = 15f * density }
-      canvas.drawText("···", btnTypoMoreRect.centerX() - morePaint.measureText("···") / 2f, btnTypoMoreRect.centerY() + 4f * density, morePaint)
+    val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      style = Paint.Style.FILL
     }
+    val dotR = 2.8f * density
+    val dotSpacing = 6.5f * density
+    val moreCx = btnTypoMoreRect.centerX()
+    val moreCy = typographyBarRect.centerY()
+    canvas.drawCircle(moreCx - dotSpacing, moreCy, dotR, dotPaint)
+    canvas.drawCircle(moreCx, moreCy, dotR, dotPaint)
+    canvas.drawCircle(moreCx + dotSpacing, moreCy, dotR, dotPaint)
   }
 
   private fun drawStyleSheetPopover(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float) {
@@ -5107,11 +5301,11 @@ class ThinkspaceView : View {
     )
 
     val cardBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
+      color = Color.parseColor("#1C2331")
       style = Paint.Style.FILL
     }
     val cardBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#E2E8F0")
+      color = Color.parseColor("#384457")
       strokeWidth = 1.2f * density
       style = Paint.Style.STROKE
     }
@@ -5120,11 +5314,11 @@ class ThinkspaceView : View {
 
     styleOptionRects.clear()
     val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#F1F5F9")
+      color = Color.parseColor("#2D3748")
       strokeWidth = 1f * density
     }
     val dotsPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#94A3B8")
+      color = Color.parseColor("#64748B")
       textSize = 14f * density
       isFakeBoldText = true
     }
@@ -5139,14 +5333,15 @@ class ThinkspaceView : View {
       val isSelected = card.textStyleName == name || (name == "Default Style for New Excerpts" && card.textStyleName == "Default")
       if (isSelected) {
         val selRowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#EFF6FF")
+          color = Color.parseColor("#2563EB")
+          alpha = 75
           style = Paint.Style.FILL
         }
         canvas.drawRoundRect(rowRect, 8f * density, 8f * density, selRowPaint)
       }
 
       val rowTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = if (isSelected) Color.parseColor("#2563EB") else Color.parseColor("#0F172A")
+        color = if (isSelected) Color.parseColor("#60A5FA") else Color.parseColor("#F1F5F9")
         textSize = when (name) {
           "Title" -> 18f * density
           "Subtitle" -> 14.5f * density
@@ -5198,13 +5393,13 @@ class ThinkspaceView : View {
     }
     canvas.drawRoundRect(
       RectF(pLeft, pTop + 3f * density, pLeft + pW, pTop + pH + 3f * density),
-      12f * density, 12f * density, shadowPaint
+      14f * density, 14f * density, shadowPaint
     )
 
-    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0F172A"); style = Paint.Style.FILL }
-    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#334155"); strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
-    canvas.drawRoundRect(pRect, 12f * density, 12f * density, bg)
-    canvas.drawRoundRect(pRect, 12f * density, 12f * density, border)
+    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#1C2331"); style = Paint.Style.FILL }
+    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#384457"); strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
+    canvas.drawRoundRect(pRect, 14f * density, 14f * density, bg)
+    canvas.drawRoundRect(pRect, 14f * density, 14f * density, border)
 
     cardColorPaletteRects.clear()
     for (i in paletteColors.indices) {
@@ -5252,13 +5447,13 @@ class ThinkspaceView : View {
     }
     canvas.drawRoundRect(
       RectF(pLeft, pTop + 3f * density, pLeft + pW, pTop + pH + 3f * density),
-      12f * density, 12f * density, shadowPaint
+      14f * density, 14f * density, shadowPaint
     )
 
-    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0F172A"); style = Paint.Style.FILL }
-    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#334155"); strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
-    canvas.drawRoundRect(pRect, 12f * density, 12f * density, bg)
-    canvas.drawRoundRect(pRect, 12f * density, 12f * density, border)
+    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#1C2331"); style = Paint.Style.FILL }
+    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#384457"); strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
+    canvas.drawRoundRect(pRect, 14f * density, 14f * density, bg)
+    canvas.drawRoundRect(pRect, 14f * density, 14f * density, border)
 
     typoTextColorPaletteRects.clear()
     for (i in textColors.indices) {
@@ -5507,21 +5702,17 @@ class ThinkspaceView : View {
         }
 
         // 0C. Check Typography Bar Clicks (Screenshots 2 & 3)
-        if (isTypographyBarVisible && selectedCardId != null && typographyBarRect.contains(sx, sy)) {
+        if (cardActionBarAnimProgress > 0.4f && isTypographyBarVisible && selectedCardId != null && typographyBarRect.contains(sx, sy)) {
           val selCard = cards.find { it.id == selectedCardId }
           if (selCard != null) {
-            if (btnTypoUndoRect.contains(sx, sy)) {
-              if (selCard.undoTextStack.isNotEmpty()) {
-                selCard.text = selCard.undoTextStack.removeLast()
-                cursorPosition = selCard.text.length
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                hudToast.show("↩ Undone")
-                invalidate()
-                return true
-              } else {
-                undo()
-                return true
-              }
+            if (btnTypoBackRect.contains(sx, sy)) {
+              // Return back to primary selection action bar (Comment, Edit, Copy, Delete, Tags, Color, Tt)
+              isTypographyBarVisible = false
+              isStyleSheetOpen = false
+              isTypoTextColorPaletteOpen = false
+              performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+              invalidate()
+              return true
             }
             if (btnTypoStyleRect.contains(sx, sy)) {
               isStyleSheetOpen = !isStyleSheetOpen
@@ -5570,13 +5761,9 @@ class ThinkspaceView : View {
               return true
             }
             if (btnTypoMoreRect.contains(sx, sy)) {
-              if (editingCardId != null) {
-                isTypographyBarVisible = false
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                invalidate()
-                return true
-              }
-              hudToast.show("Typography: ${selCard.textStyleName} (${selCard.fontSize.toInt()}pt)")
+              isTypographyBarVisible = false
+              isStyleSheetOpen = false
+              isTypoTextColorPaletteOpen = false
               performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
               invalidate()
               return true
@@ -5586,7 +5773,7 @@ class ThinkspaceView : View {
         }
 
         // 0D. Check Primary Excerpt Action Bar Clicks (Screenshot 1)
-        if (selectedCardId != null && cardActionBarRect.contains(sx, sy)) {
+        if (cardActionBarAnimProgress > 0.4f && !isTypographyBarVisible && selectedCardId != null && cardActionBarRect.contains(sx, sy)) {
           val selCard = cards.find { it.id == selectedCardId }
           if (selCard != null) {
             if (btnCardCommentRect.contains(sx, sy)) {

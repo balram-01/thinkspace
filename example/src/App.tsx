@@ -51,19 +51,7 @@ const DOC_COLORS = [
   '#3B82F6',
 ];
 
-const INITIAL_WORKSPACE_DOCS: WorkspaceDocumentEntry[] = [
-  {
-    id: 'doc-discovery-of-india',
-    title: 'The-Discovery-Of-India-Jawaharlal-Nehru',
-    pageCount: 384,
-    uri:
-      Platform.OS === 'android'
-        ? 'file:///android_asset/sample.pdf'
-        : 'sample.pdf',
-    colorAccent: '#3B82F6',
-    addedAt: new Date().toISOString(),
-  },
-];
+const INITIAL_WORKSPACE_DOCS: WorkspaceDocumentEntry[] = [];
 
 export default function App() {
   const [appScreen, setAppScreen] = useState<'workspace' | 'pdftest'>(
@@ -136,9 +124,7 @@ export default function App() {
   );
 
   /** ID of the document currently shown in the PDF viewport */
-  const [activeDocId, setActiveDocId] = useState<string | null>(
-    'doc-discovery-of-india'
-  );
+  const [activeDocId, setActiveDocId] = useState<string | null>(null);
 
   // Legacy single-doc state kept for internal tracking
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentInfo | null>(null);
