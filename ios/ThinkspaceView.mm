@@ -88,6 +88,10 @@ using namespace facebook::react;
         [_containerView updateInkLinksJson:[NSString stringWithUTF8String:newViewProps.inkLinksJson.c_str()]];
     }
 
+    if (newViewProps.documentJson != oldViewProps.documentJson) {
+        [_containerView updateDocumentJson:[NSString stringWithUTF8String:newViewProps.documentJson.c_str()]];
+    }
+
     if (newViewProps.notebookPagesJson != oldViewProps.notebookPagesJson) {
         [_containerView updateNotebookPagesJson:[NSString stringWithUTF8String:newViewProps.notebookPagesJson.c_str()]];
     }
@@ -310,6 +314,28 @@ using namespace facebook::react;
                 .color = [color UTF8String],
                 .thickness = static_cast<Float>(thickness),
                 .favoritesJson = [favoritesJson UTF8String]
+            });
+    }
+}
+
+- (void)emitNotebookPageAddedWithId:(NSString *)id
+                                  x:(CGFloat)x
+                                  y:(CGFloat)y
+                              width:(CGFloat)width
+                             height:(CGFloat)height
+                          pageStyle:(NSString *)pageStyle
+                              title:(NSString *)title
+{
+    if (_eventEmitter) {
+        std::static_pointer_cast<const ThinkspaceViewEventEmitter>(_eventEmitter)
+            ->onNotebookPageAdded({
+                .id = [id UTF8String] ?: "",
+                .x = static_cast<Float>(x),
+                .y = static_cast<Float>(y),
+                .width = static_cast<Float>(width),
+                .height = static_cast<Float>(height),
+                .pageStyle = [pageStyle UTF8String] ?: "",
+                .title = [title UTF8String] ?: ""
             });
     }
 }

@@ -32,22 +32,24 @@ import type {
 
 const LINKING_ERROR =
   `The native module 'PdfEngineModule' is not available. ` +
-  `Make sure your Android project includes ':pdf-engine' and that ` +
-  `you are running on a real device or emulator (not web/iOS).`;
+  `Make sure your project is linked properly and that ` +
+  `you are running on a real device or simulator.`;
 
 function getNativeModule() {
   const mod = NativeModules.PdfEngineModule;
   if (!mod) {
-    if (Platform.OS === 'android') {
+    if (Platform.OS === 'android' || Platform.OS === 'ios') {
       throw new Error(LINKING_ERROR);
     }
-    // On iOS / web we return a no-op stub that always rejects
+    // On web we return a no-op stub that always rejects
     const stub = new Proxy(
       {},
       {
         get: (_t, name) => () =>
           Promise.reject(
-            new Error(`PdfEngine.${String(name)} is only available on Android.`)
+            new Error(
+              `PdfEngine.${String(name)} is only available on native platforms.`
+            )
           ),
       }
     );

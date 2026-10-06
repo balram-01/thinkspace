@@ -258,20 +258,32 @@ import PDFKit
     }
 
     @objc public func updateWorkspaceDocumentsJson(_ json: String) {
-        guard let data = json.data(using: .utf8),
-              let list = try? JSONDecoder().decode([WorkspaceDocumentEntry].self, from: data) else { return }
+        guard !json.isEmpty,
+              let data = json.data(using: .utf8),
+              let list = try? JSONDecoder().decode([WorkspaceDocumentEntry].self, from: data),
+              !list.isEmpty else { return }
         self.workspaceDocuments = list
-        if activeDocumentId == nil, let first = list.first {
+        if let activeId = activeDocumentId, let current = list.first(where: { $0.id == activeId }) {
+            loadActiveDocument(current)
+        } else if let first = list.first {
             loadActiveDocument(first)
         }
     }
 
     @objc public func updateActiveDocumentId(_ docId: String?) {
-        guard let docId = docId, docId != activeDocumentId else { return }
+        guard let docId = docId, !docId.isEmpty else { return }
         self.activeDocumentId = docId
         if let targetDoc = workspaceDocuments.first(where: { $0.id == docId }) {
             loadActiveDocument(targetDoc)
         }
+    }
+
+    @objc public func updateDocumentJson(_ json: String) {
+        guard !json.isEmpty,
+              let data = json.data(using: .utf8),
+              let doc = try? JSONDecoder().decode(WorkspaceDocumentEntry.self, from: data) else { return }
+        self.workspaceDocuments = [doc]
+        loadActiveDocument(doc)
     }
 
     private func loadActiveDocument(_ doc: WorkspaceDocumentEntry) {
@@ -496,6 +508,7 @@ import PDFKit
             title: title
         )
         notebookPages.append(newPage)
+        ThinkspaceBridgeEmitter.shared.sendNotebookPageAdded(page: newPage)
     }
 
     public func handleToggleImmersiveMode() {

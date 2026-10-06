@@ -30,6 +30,7 @@ import CoreGraphics
     func emitInkLinkCreate(linkJson: String)
     func emitInkLinkDelete(id: String)
     func emitPenStateChange(mode: String, color: String, thickness: CGFloat, favoritesJson: String)
+    func emitNotebookPageAdded(id: String, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, pageStyle: String, title: String)
 }
 
 @objc public class ThinkspaceBridgeEmitter: NSObject {
@@ -134,5 +135,17 @@ import CoreGraphics
     @objc public func sendPenStateChange(mode: String, color: String, thickness: CGFloat, favorites: [String]) {
         let favJson = (try? JSONSerialization.data(withJSONObject: favorites)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         delegate?.emitPenStateChange(mode: mode, color: color, thickness: thickness, favoritesJson: favJson)
+    }
+
+    @objc public func sendNotebookPageAdded(page: NotebookPageModel) {
+        delegate?.emitNotebookPageAdded(
+            id: page.id,
+            x: page.x,
+            y: page.y,
+            width: page.width,
+            height: page.height,
+            pageStyle: page.pageStyle,
+            title: page.title
+        )
     }
 }

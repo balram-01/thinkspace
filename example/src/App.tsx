@@ -9,6 +9,7 @@ import {
   Modal,
   Animated,
   Easing,
+  Platform,
 } from 'react-native';
 import {
   ThinkspaceView,
@@ -55,7 +56,10 @@ const INITIAL_WORKSPACE_DOCS: WorkspaceDocumentEntry[] = [
     id: 'doc-discovery-of-india',
     title: 'The-Discovery-Of-India-Jawaharlal-Nehru',
     pageCount: 384,
-    uri: 'file:///android_asset/sample.pdf',
+    uri:
+      Platform.OS === 'android'
+        ? 'file:///android_asset/sample.pdf'
+        : 'sample.pdf',
     colorAccent: '#3B82F6',
     addedAt: new Date().toISOString(),
   },
