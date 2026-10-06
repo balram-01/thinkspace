@@ -103,6 +103,11 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
     view?.setWorkspaceDocumentsFromJson(value)
   }
 
+  @ReactProp(name = "workspaceFoldersJson")
+  override fun setWorkspaceFoldersJson(view: ThinkspaceView?, value: String?) {
+    view?.setWorkspaceFoldersFromJson(value)
+  }
+
   /**
    * Multi-document: which document should be shown in the PDF viewport.
    */
@@ -200,7 +205,11 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       // LiquidText Pen & Ink-Links system
       "topInkLinkCreate" to "onInkLinkCreate",
       "topInkLinkDelete" to "onInkLinkDelete",
-      "topPenStateChange" to "onPenStateChange"
+      "topPenStateChange" to "onPenStateChange",
+      // Native Documents & Folders Management System
+      "topDocumentChange" to "onDocumentChange",
+      "topDocumentsUpdated" to "onDocumentsUpdated",
+      "topRequestAddDocument" to "onRequestAddDocument"
     )
     for ((top, on) in events) {
       map[top] = mapOf("registrationName" to on)
@@ -238,7 +247,9 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
       "setViewport" to 24,
       "setSplitRatio" to 25,
       "toggleSqueezeMode" to 26,
-      "setActiveTool" to 27
+      "setActiveTool" to 27,
+      "openDocumentsSheet" to 28,
+      "closeDocumentsSheet" to 29
     )
   }
 
@@ -307,6 +318,8 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
         root.activeTool = tool
         root.invalidate()
       }
+      "openDocumentsSheet", "28" -> root.openDocumentsSheet()
+      "closeDocumentsSheet", "29" -> root.closeDocumentsSheet()
     }
   }
 
@@ -375,6 +388,8 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
         root.activeTool = tool
         root.invalidate()
       }
+      28 -> root.openDocumentsSheet()
+      29 -> root.closeDocumentsSheet()
     }
   }
 

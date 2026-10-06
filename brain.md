@@ -60,4 +60,20 @@
   - In `ThinkspaceView.kt`: Header title prioritizes `activeDocument.title` over PDF metadata, and sanitizes any raw `document%` or `content:` identifiers.
   - In `App.tsx`: Added `cleanDocumentTitle` which prioritizes `file.name` from the picker over raw URIs, strips `.pdf`, decodes URI components, and falls back cleanly.
 
+## Native Kotlin Document Drawer & Folder Management (Self-Contained Engine)
+- **Component-First Encapsulation**: `ThinkspaceView` is a single plug-and-play component. Consuming apps do not need to wire or import external React Native modals (`DocumentsSheet`, `DocumentViewer`).
+- **Trigger**: Tapping the document header pill `[Title (Pages) ▾]` (`headerDocPillRect`) in `ThinkspaceView.kt` or calling `ref.current.openDocumentsSheet()` launches the native `Dialog` directly in Kotlin on Android.
+- **Native UI Architecture**:
+  - Fullscreen translucent scrim (`#B3050C16`) with frosted dark slate card container (`#141D2B`, 18dp rounded corners, 28dp elevation).
+  - Top header with Title (`📄 Documents`), `+ Doc` button (dispatches `onRequestAddDocument`), `📁+ Folder` button (launches native folder creation dialog), and `✕` close button.
+  - Live search input (`EditText`) with real-time filtering across document titles and folder names.
+  - Native `ScrollView` containing recursive accordion tree layout with depth indentation (`depth * 18dp`).
+  - Folders: dynamic toggle icons (`▾ 📂` expanded vs `▸ 📁` collapsed), item count badges `(N)`, and `⋮` actions (Rename Folder, Delete Folder with nested item fallback to parent/root).
+  - Documents: accent color indicator bar, `📄` icon, title, page count badge, active indicator with teal border & checkmark `✓`. Tapping instantly calls `switchToDocument(doc.id)` and dispatches `onDocumentChange`.
+  - Document `⋮` actions: Rename Document, Add to New Folder, Move to Folder… (with root option), Delete Document.
+- **Bi-directional Bridge Events & Props**:
+  - Props: `documents?: WorkspaceDocumentEntry[]`, `folders?: WorkspaceFolder[]`, `activeDocumentId?: string`.
+  - Callbacks: `onDocumentChange({ documentId, title, uri, pageCount })`, `onDocumentsUpdated(documents, folders)`, `onRequestAddDocument()`.
+  - Ref Methods: `openDocumentsSheet()`, `closeDocumentsSheet()`.
+
 

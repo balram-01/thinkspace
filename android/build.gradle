@@ -36,7 +36,7 @@ if (project.extensions.findByName("kotlin") == null) {
 apply plugin: "com.facebook.react"
 
 android {
-  namespace "com.thinkspace"
+  namespace "com.thinkspace.library"
 
   compileSdkVersion getExtOrDefault("compileSdkVersion")
 

@@ -49,6 +49,8 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     style,
     document,
     workspaceDocuments,
+    documents,
+    folders,
     activeDocumentId,
     annotations = [],
     isSqueezed = false,
@@ -91,6 +93,9 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
     onPenStateChange,
     onInkLinkCreate,
     onInkLinkDelete,
+    onDocumentChange,
+    onDocumentsUpdated,
+    onRequestAddDocument,
   } = props;
 
   const nativeRef = useRef<any>(null);
@@ -243,6 +248,24 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         (UIManager as any).dispatchViewManagerCommand(handle, cmd, [pageNum]);
       }
     },
+    openDocumentsSheet: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.openDocumentsSheet ?? 28;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, []);
+      }
+    },
+    closeDocumentsSheet: () => {
+      const handle = findNodeHandle(nativeRef.current);
+      if (handle) {
+        const cmd =
+          (UIManager as any).getViewManagerConfig?.('ThinkspaceView')?.Commands
+            ?.closeDocumentsSheet ?? 29;
+        (UIManager as any).dispatchViewManagerCommand(handle, cmd, []);
+      }
+    },
     search: (query: string) => {
       const handle = findNodeHandle(nativeRef.current);
       if (handle) {
@@ -346,9 +369,10 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
   );
 
   // Multi-document: serialize the full workspace doc list
+  const activeDocs = documents ?? workspaceDocuments;
   const workspaceDocumentsJson = useMemo(() => {
-    if (workspaceDocuments && workspaceDocuments.length > 0) {
-      return JSON.stringify(workspaceDocuments);
+    if (activeDocs && activeDocs.length > 0) {
+      return JSON.stringify(activeDocs);
     }
     // Backward compat: if legacy single `document` prop is used, wrap it
     if (document) {
@@ -362,7 +386,11 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
       return JSON.stringify([entry]);
     }
     return '';
-  }, [workspaceDocuments, document]);
+  }, [activeDocs, document]);
+
+  const workspaceFoldersJson = useMemo(() => {
+    return folders && folders.length > 0 ? JSON.stringify(folders) : undefined;
+  }, [folders]);
 
   const annotationsJson = useMemo(
     () => JSON.stringify(annotations),
@@ -390,8 +418,9 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
       style={style}
       documentJson={documentJson}
       workspaceDocumentsJson={workspaceDocumentsJson}
+      workspaceFoldersJson={workspaceFoldersJson}
       activeDocumentId={
-        activeDocumentId ?? workspaceDocuments?.[0]?.id ?? document?.id ?? ''
+        activeDocumentId ?? activeDocs?.[0]?.id ?? document?.id ?? ''
       }
       annotationsJson={annotationsJson}
       isSqueezed={isSqueezed}
@@ -651,6 +680,37 @@ export const ThinkspaceView = forwardRef(function ThinkspaceViewComponent(
         onInkLinkDelete
           ? (e: any) => {
               onInkLinkDelete(e.nativeEvent?.id);
+            }
+          : undefined
+      }
+      onDocumentChange={
+        onDocumentChange
+          ? (e: any) => {
+              const { documentId, title, uri, pageCount } = e.nativeEvent || {};
+              onDocumentChange({ documentId, title, uri, pageCount });
+            }
+          : undefined
+      }
+      onDocumentsUpdated={
+        onDocumentsUpdated
+          ? (e: any) => {
+              try {
+                const docs = JSON.parse(e.nativeEvent?.documentsJson || '[]');
+                const flds = JSON.parse(e.nativeEvent?.foldersJson || '[]');
+                onDocumentsUpdated(docs, flds);
+              } catch (err) {
+                console.error(
+                  '[ThinkspaceView] Failed to parse onDocumentsUpdated',
+                  err
+                );
+              }
+            }
+          : undefined
+      }
+      onRequestAddDocument={
+        onRequestAddDocument
+          ? () => {
+              onRequestAddDocument();
             }
           : undefined
       }

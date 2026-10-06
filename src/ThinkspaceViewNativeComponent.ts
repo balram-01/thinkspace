@@ -122,11 +122,27 @@ export type PenStateChangeEvent = Readonly<{
   favoritesJson: string;
 }>;
 
+export type DocumentChangeEvent = Readonly<{
+  documentId: string;
+  title: string;
+  uri: string;
+  pageCount: Float;
+}>;
+
+export type DocumentsUpdatedEvent = Readonly<{
+  documentsJson: string;
+  foldersJson: string;
+}>;
+
+export type RequestAddDocumentEvent = Readonly<{}>;
+
 export interface NativeProps extends ViewProps {
   documentJson?: string;
   annotationsJson?: string;
   /** Full list of workspace documents as JSON — multi-document mode. */
   workspaceDocumentsJson?: string;
+  /** Full list of workspace folders as JSON. */
+  workspaceFoldersJson?: string;
   /** The document ID currently active in the PDF viewport. */
   activeDocumentId?: string;
   isSqueezed?: boolean;
@@ -173,6 +189,12 @@ export interface NativeProps extends ViewProps {
   onInkLinkCreate?: DirectEventHandler<InkLinkCreateEvent>;
   onInkLinkDelete?: DirectEventHandler<InkLinkDeleteEvent>;
   onPenStateChange?: DirectEventHandler<PenStateChangeEvent>;
+  /** Fired when active document changes in native engine. */
+  onDocumentChange?: DirectEventHandler<DocumentChangeEvent>;
+  /** Fired when documents/folders are updated in native engine. */
+  onDocumentsUpdated?: DirectEventHandler<DocumentsUpdatedEvent>;
+  /** Fired when user requests adding document in native document sheet. */
+  onRequestAddDocument?: DirectEventHandler<RequestAddDocumentEvent>;
 }
 
 export default codegenNativeComponent<NativeProps>('ThinkspaceView');

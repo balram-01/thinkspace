@@ -336,6 +336,13 @@ export interface ThinkspaceViewProps {
    * The active PDF viewport shows the document matching activeDocumentId.
    */
   workspaceDocuments?: WorkspaceDocumentEntry[];
+  /** Alias for workspaceDocuments — plug-and-play documents array. */
+  documents?: WorkspaceDocumentEntry[];
+  /**
+   * Folders for organizing workspace documents hierarchically.
+   * When provided, the native engine renders them as an accordion tree inside the native document sheet.
+   */
+  folders?: WorkspaceFolder[];
   /**
    * ID of the document currently shown in the PDF/document viewport.
    * Must match one of the IDs in workspaceDocuments.
@@ -424,6 +431,20 @@ export interface ThinkspaceViewProps {
   onPenStateChange?: (state: PenState) => void;
   onInkLinkCreate?: (link: SemanticInkLink) => void;
   onInkLinkDelete?: (linkId: string) => void;
+  /** Fired when the active document changes in the native engine. */
+  onDocumentChange?: (doc: {
+    documentId: string;
+    title: string;
+    uri: string;
+    pageCount: number;
+  }) => void;
+  /** Fired when documents or folders are updated (added, renamed, moved, deleted) in native engine. */
+  onDocumentsUpdated?: (
+    documents: WorkspaceDocumentEntry[],
+    folders: WorkspaceFolder[]
+  ) => void;
+  /** Fired when user taps "+ Add Document" in the native document sheet. */
+  onRequestAddDocument?: () => void;
 }
 
 export interface ThinkspaceViewRef {
@@ -457,9 +478,11 @@ export interface ThinkspaceViewRef {
   setPenThickness: (thickness: number) => void;
   setPenFavorites: (favorites: string[]) => void;
   togglePenSettings: () => void;
-  // Document Navigation
+  // Document Navigation & Sheet
   switchToDocument: (documentId: string) => void;
   scrollToPage: (pageNumber: number) => void;
+  openDocumentsSheet: () => void;
+  closeDocumentsSheet: () => void;
   // Workspace Item Operations
   deleteCard: (cardId: string) => void;
   deleteInkLink: (linkId: string) => void;

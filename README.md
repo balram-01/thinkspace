@@ -149,7 +149,9 @@ Your React Native App
 | Prop | Type | Default | Description |
 |---|---|---|---|
 | `document` | `WorkspaceDocument` | `undefined` | Single document to open. Use for single-doc workspaces. |
-| `workspaceDocuments` | `WorkspaceDocumentEntry[]` | `[]` | Array of documents for multi-doc workspaces with tab switching. |
+| `workspaceDocuments` | `WorkspaceDocumentEntry[]` | `[]` | Array of documents for multi-doc workspaces. |
+| `documents` | `WorkspaceDocumentEntry[]` | `[]` | Alias for `workspaceDocuments`. |
+| `folders` | `WorkspaceFolder[]` | `[]` | Folders for organizing workspace documents in native accordion tree. |
 | `activeDocumentId` | `string` | `""` | ID of the currently visible document. |
 
 ### Layout Props
@@ -223,7 +225,9 @@ ref.current?.zoomToFit();
 | `nextMatch` | `() => void` | Jump to next search result. |
 | `prevMatch` | `() => void` | Jump to previous search result. |
 | `scrollToPage` | `(pageNumber: number) => void` | Scroll to a specific page. |
-| `switchToDocument` | `(documentId: string) => void` | Switch the active document tab. |
+| `switchToDocument` | `(documentId: string) => void` | Switch the active document. |
+| `openDocumentsSheet` | `() => void` | Opens the native document drawer / sheet modal. |
+| `closeDocumentsSheet` | `() => void` | Closes the native document drawer / sheet modal. |
 
 ### History
 
@@ -319,6 +323,14 @@ Callbacks let your app **react to things happening inside the workspace**. You d
 | `onToggleSqueeze` | `(isSqueezed: boolean) => void` | Squeeze mode toggled. |
 | `onToggleImmersive` | `(isImmersive: boolean) => void` | Immersive mode toggled. |
 
+### Document & Folder Management
+
+| Callback | Signature | When it fires |
+|---|---|---|
+| `onDocumentChange` | `(doc: { documentId, title, uri, pageCount }) => void` | Active document switched in the native viewport. |
+| `onDocumentsUpdated` | `(documents, folders) => void` | Documents or folders created, renamed, moved, or deleted. |
+| `onRequestAddDocument` | `() => void` | User tapped "+ Doc" in the native document sheet. |
+
 ### History
 
 | Callback | Signature | When it fires |
@@ -360,42 +372,42 @@ export default function ReadingScreen() {
 
 ---
 
-### Recipe 2: Multi-Document Workspace
+### Recipe 2: Multi-Document Workspace & Native Folders
 
-Switch between multiple PDFs with accent colors per document:
+Manage multiple documents organized in folders directly in the self-contained native engine:
 
 ```tsx
 import React, { useState } from 'react';
-import { View, TouchableOpacity, Text } from 'react-native';
 import { ThinkspaceView } from 'thinkspace';
 
-const DOCS = [
-  { id: 'doc-a', title: 'Paper A', uri: 'file:///paper-a.pdf', pageCount: 10, colorAccent: '#6C5CE7' },
-  { id: 'doc-b', title: 'Paper B', uri: 'file:///paper-b.pdf', pageCount: 8,  colorAccent: '#00ADB5' },
+const INITIAL_DOCS = [
+  { id: 'doc-a', title: 'Paper A', uri: 'file:///paper-a.pdf', pageCount: 10, colorAccent: '#6C5CE7', folderId: 'folder-1' },
+  { id: 'doc-b', title: 'Paper B', uri: 'file:///paper-b.pdf', pageCount: 8,  colorAccent: '#00ADB5', folderId: 'folder-1' },
+  { id: 'doc-c', title: 'Notes',   uri: 'file:///notes.pdf',   pageCount: 3,  colorAccent: '#F59E0B' },
+];
+
+const INITIAL_FOLDERS = [
+  { id: 'folder-1', name: 'Research Papers' },
 ];
 
 export default function MultiDocScreen() {
+  const [documents, setDocuments] = useState(INITIAL_DOCS);
+  const [folders, setFolders] = useState(INITIAL_FOLDERS);
   const [activeDocId, setActiveDocId] = useState('doc-a');
 
   return (
-    <View style={{ flex: 1 }}>
-      {/* Your custom tab bar */}
-      <View style={{ flexDirection: 'row' }}>
-        {DOCS.map((doc) => (
-          <TouchableOpacity key={doc.id} onPress={() => setActiveDocId(doc.id)}>
-            <Text>{doc.title}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      {/* Workspace — just pass docs and the active ID */}
-      <ThinkspaceView
-        style={{ flex: 1 }}
-        workspaceDocuments={DOCS}
-        activeDocumentId={activeDocId}
-        onRequestDocumentSwitch={({ documentId }) => setActiveDocId(documentId)}
-      />
-    </View>
+    <ThinkspaceView
+      style={{ flex: 1 }}
+      documents={documents}
+      folders={folders}
+      activeDocumentId={activeDocId}
+      showDocumentHeader={true}
+      onDocumentChange={({ documentId }) => setActiveDocId(documentId)}
+      onDocumentsUpdated={(newDocs, newFolders) => {
+        setDocuments(newDocs);
+        setFolders(newFolders);
+      }}
+    />
   );
 }
 ```
