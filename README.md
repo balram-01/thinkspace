@@ -708,9 +708,12 @@ All types are exported from `thinkspace`:
 
 ```tsx
 import type {
-  // Documents
+  // Documents & Folders
   WorkspaceDocument,
   WorkspaceDocumentEntry,
+  WorkspaceFolder,
+  DocumentsSheet,
+  DocumentsSheetProps,
 
   // Tools & Modes
   WorkspaceTool,       // 'select' | 'pen' | 'highlighter' | 'eraser' | 'lasso'

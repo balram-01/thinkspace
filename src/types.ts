@@ -115,6 +115,20 @@ export interface WorkspaceDocumentEntry {
   addedAt?: string;
   /** Optional author metadata */
   author?: string;
+  /** Optional folder ID if this document is placed inside a folder */
+  folderId?: string | null;
+}
+
+/**
+ * A folder inside the document workspace for organizing documents hierarchically.
+ */
+export interface WorkspaceFolder {
+  id: string;
+  name: string;
+  /** Parent folder ID for nested subfolders (null or undefined for root level) */
+  parentId?: string | null;
+  /** ISO timestamp when the folder was created */
+  createdAt?: string;
 }
 
 export type NotebookPageStyle =

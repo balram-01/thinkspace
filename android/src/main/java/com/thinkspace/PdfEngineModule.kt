@@ -6,6 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.MediaStore
+import android.provider.OpenableColumns
 import com.facebook.react.bridge.*
 import com.facebook.react.module.annotations.ReactModule
 import com.thinkspace.pdfengine.api.*
@@ -60,22 +63,77 @@ class PdfEngineModule(private val reactContext: ReactApplicationContext) :
   // ── File picker promise (single-use) ──────────────────────────────────────
   private var pickPdfPromise: Promise? = null
 
+  private fun resolveDisplayName(context: Context, uri: Uri): String {
+    // 1. Try standard content resolver with OpenableColumns.DISPLAY_NAME
+    runCatching {
+      context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        if (nameIndex != -1 && cursor.moveToFirst()) {
+          val name = cursor.getString(nameIndex)
+          if (!name.isNullOrBlank()) return name
+        }
+      }
+    }
+
+    // 2. If it's a MediaDocumentsProvider uri like document:1000000029
+    runCatching {
+      if (DocumentsContract.isDocumentUri(context, uri)) {
+        val docId = DocumentsContract.getDocumentId(uri)
+        if (docId.startsWith("raw:")) {
+          val rawPath = docId.removePrefix("raw:")
+          val name = rawPath.substringAfterLast('/')
+          if (name.isNotBlank()) return name
+        } else if (docId.contains(':')) {
+          val parts = docId.split(':')
+          if (parts.size == 2 && parts[0].equals("document", ignoreCase = true)) {
+            val mediaId = parts[1]
+            val contentUri = MediaStore.Files.getContentUri("external")
+            context.contentResolver.query(
+              contentUri,
+              arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+              "${MediaStore.MediaColumns._ID} = ?",
+              arrayOf(mediaId),
+              null
+            )?.use { cursor ->
+              if (cursor.moveToFirst()) {
+                val name = cursor.getString(0)
+                if (!name.isNullOrBlank()) return name
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 3. Try Uri path decoding
+    runCatching {
+      val decoded = Uri.decode(uri.toString())
+      val segment = decoded.substringAfterLast('/').substringBefore('?')
+      if (segment.isNotBlank() && !segment.startsWith("document", ignoreCase = true)) {
+        return segment
+      }
+    }
+
+    return "Document"
+  }
+
   private val activityEventListener = object : BaseActivityEventListener() {
     override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
       if (requestCode != PICK_PDF_REQUEST) return
       val p = pickPdfPromise ?: return
       pickPdfPromise = null
       if (resultCode == Activity.RESULT_OK && data?.data != null) {
-        val uri = data.data!!.toString()
+        val pickedUri = data.data!!
+        runCatching {
+          reactContext.contentResolver.takePersistableUriPermission(
+            pickedUri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION
+          )
+        }
+        val uri = pickedUri.toString()
+        val displayName = resolveDisplayName(reactContext, pickedUri)
         val result = Arguments.createMap().apply {
           putString("uri", uri)
-          // Try to get a display name
-          val displayName = runCatching {
-            val cursor = reactContext.contentResolver.query(data.data!!, arrayOf("_display_name"), null, null, null)
-            cursor?.use { c ->
-              if (c.moveToFirst()) c.getString(0) else null
-            }
-          }.getOrNull() ?: uri.substringAfterLast('/')
           putString("name", displayName)
         }
         p.resolve(result)
@@ -155,10 +213,17 @@ class PdfEngineModule(private val reactContext: ReactApplicationContext) :
         val docId = "pdf_doc_${docIdCounter.incrementAndGet()}"
         openDocuments[docId] = document
 
+        val rawTitle = document.metadata.title?.takeIf { it.isNotBlank() }
+        val resolvedTitle = if (rawTitle.isNullOrBlank() || rawTitle.startsWith("document%", ignoreCase = true) || rawTitle.startsWith("content:", ignoreCase = true)) {
+          runCatching { resolveDisplayName(reactContext, Uri.parse(uriOrPath)) }.getOrNull() ?: (rawTitle ?: "")
+        } else {
+          rawTitle
+        }
+
         val result = Arguments.createMap().apply {
           putString("documentId", docId)
           putInt("pageCount", document.pageCount)
-          putString("title", document.metadata.title ?: "")
+          putString("title", resolvedTitle)
           putString("author", document.metadata.author ?: "")
           putString("subject", document.metadata.subject ?: "")
           putBoolean("isEncrypted", document.metadata.isEncrypted)

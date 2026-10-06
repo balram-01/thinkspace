@@ -28,3 +28,36 @@
 - **Platform Implementations**:
   - Android: `ThinkspaceView.kt` (`drawCardActionBar`, `drawTypographyBar`, vector icon helpers)
   - iOS: `CardSelectionToolbarView.swift` & `InfiniteCanvasView.swift`
+
+## LiquidText-Style Hierarchical Document & Folder Management
+- **Architecture**: Unified inline accordion / tree list within `DocumentsSheet.tsx`. No drill-down page transitions or back buttons; documents and folders live in the same scrollable list.
+- **Hierarchical Tree Model**:
+  - `WorkspaceFolder`: `{ id, name, parentId?, createdAt? }` supports arbitrary nested subfolder depth.
+  - `WorkspaceDocumentEntry`: has optional `folderId?` indicating which folder currently houses the document.
+- **Accordion Interaction**:
+  - Tapping a folder toggles inline expand/collapse.
+  - Dynamic folder icons: Closed folder 📁 (tabbed outline) vs Open folder 📂 (open front flap with perspective).
+  - Indentation scales with depth: `paddingLeft = 16 + depth * 22`.
+- **"Add to New Folder" Flow**:
+  - Document `⋮` menu -> "Add to New Folder" -> launches native iOS-style centered alert dialog (`"New Folder"` / `"Enter name for new folder."` with "Okay" & "Cancel").
+  - On submit: creates the folder at the document's current parent depth, moves the document inside it, and keeps outer folders expanded.
+- **Document `⋮` Action Sheet (Streamlined & Focused)**:
+  - Cleaned up to essential actions: `Rename`, `Add to New Folder`, `Move to Folder...`, `Delete`, `Replace Document`, `Tags & Metadata`.
+  - Removed clutter options: `Show`, `Show in Parallel`, `Copy Link`, `OCR Text Detection`, `Page Editor`, `Visibility to Collaborators`, `Add First Tag`.
+- **"Move to Folder" Dialog**:
+  - Tapping `Move to Folder...` opens an Apple-style destination modal showing:
+    - Root Level option (`Root Level (Remove from Folder)`) if document is inside a folder.
+    - Full list of existing folders with hierarchical depth indentation (`depth * 20px`).
+    - Highlights current folder with `✓ Current` badge.
+    - Selecting any folder moves the document, auto-expands the destination folder in the tree view, and persists state via `onMoveDocumentToFolder`.
+- **Native iOS Alert Dialogs**:
+  - Authentic Apple-grade modal (`maxWidth: 290`, `#F2F2F7`, crisp hairline dividers, blue `#007AFF` action buttons, text input with clear `✕` button).
+
+## PDF Display Name Resolution (SAF & Content Resolver)
+- **Problem**: When importing PDFs on Android via Storage Access Framework (`ACTION_GET_CONTENT` / `ACTION_OPEN_DOCUMENT`), content URIs like `content://.../document%3A1000000029` resulted in raw IDs (e.g. `document%3A1000000029`) being used as the title when PDF metadata `/Title` was blank.
+- **Fix**:
+  - In `PdfEngineModule.kt`: Implemented `resolveDisplayName` using `OpenableColumns.DISPLAY_NAME` with cursor column indexing, MediaStore fallback for media documents (`MediaStore.Files.getContentUri("external")`), persistable URI permissions, and URL decoding.
+  - In `ThinkspaceView.kt`: Header title prioritizes `activeDocument.title` over PDF metadata, and sanitizes any raw `document%` or `content:` identifiers.
+  - In `App.tsx`: Added `cleanDocumentTitle` which prioritizes `file.name` from the picker over raw URIs, strips `.pdf`, decodes URI components, and falls back cleanly.
+
+

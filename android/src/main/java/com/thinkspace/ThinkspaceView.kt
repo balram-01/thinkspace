@@ -2654,9 +2654,14 @@ class ThinkspaceView : View {
         headerRect.set(0f, 0f, viewW, subheaderH)
         canvas.drawRect(headerRect, docSubheaderBgPaint)
 
-        val titleStr = activePdfDoc?.metadata?.title?.takeIf { it.isNotEmpty() }
-          ?: activeDocument?.title?.takeIf { it.isNotEmpty() }
+        val titleCandidate = activeDocument?.title?.takeIf { it.isNotEmpty() }
+          ?: activePdfDoc?.metadata?.title?.takeIf { it.isNotEmpty() }
           ?: "PDF Document"
+        val titleStr = if (titleCandidate.startsWith("document%", ignoreCase = true) || titleCandidate.startsWith("content:", ignoreCase = true)) {
+          "Document"
+        } else {
+          titleCandidate
+        }
         val pageTotal = activePdfDoc?.pageCount ?: activeDocument?.pageCount ?: 1
 
         // 1. Document Pill matching Screenshot [Kshitija_Resume (34) ▾]

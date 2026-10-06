@@ -9,7 +9,6 @@ import {
   Modal,
   Animated,
   Easing,
-  Platform,
 } from 'react-native';
 import {
   ThinkspaceView,
@@ -27,6 +26,7 @@ import {
   type PdfDocumentInfo,
   type WorkspaceDocument,
   type WorkspaceDocumentEntry,
+  type WorkspaceFolder,
   type NotebookPageModel,
   type NotebookPageStyle,
   type PenDrawingMode,
@@ -123,6 +123,19 @@ export default function App() {
     INITIAL_WORKSPACE_DOCS
   );
 
+  const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>(
+    []
+  );
+
+  const handleMoveDocumentToFolder = useCallback(
+    (docId: string, folderId: string | null) => {
+      setWorkspaceDocs((prev) =>
+        prev.map((d) => (d.id === docId ? { ...d, folderId } : d))
+      );
+    },
+    []
+  );
+
   /** ID of the document currently shown in the PDF viewport */
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
 
@@ -203,18 +216,58 @@ export default function App() {
     return undefined;
   }, [pdfDoc, pdfUri, workspaceDocs]);
 
+  // ── Document title sanitizer ─────────────────────────────────────────────
+  const cleanDocumentTitle = useCallback(
+    (rawTitle?: string, fileName?: string, uri?: string): string => {
+      const isInvalid = (s?: string) =>
+        !s ||
+        s.trim() === '' ||
+        s.startsWith('content:') ||
+        s.startsWith('file:') ||
+        /^document[%:]/i.test(s) ||
+        /^msf[%:]/i.test(s) ||
+        /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s);
+
+      let candidate = '';
+      if (!isInvalid(fileName)) {
+        candidate = fileName!;
+      } else if (!isInvalid(rawTitle)) {
+        candidate = rawTitle!;
+      } else if (uri) {
+        try {
+          const decoded = decodeURIComponent(uri);
+          const segment = decoded.split('/').pop()?.split('?')[0];
+          if (segment && !isInvalid(segment)) {
+            candidate = segment;
+          }
+        } catch {}
+      }
+
+      try {
+        candidate = decodeURIComponent(candidate);
+      } catch {}
+
+      candidate = candidate.replace(/\.pdf$/i, '').trim();
+
+      if (!candidate || isInvalid(candidate)) {
+        return 'Document';
+      }
+
+      return candidate;
+    },
+    []
+  );
+
   // ── Import PDF via system file picker (multi-document) ────────────────────
   const handleImportPdf = useCallback(async () => {
     try {
       const file = await PdfEngine.pickPdfFile();
       const opened = await PdfEngine.openDocument(file.uri);
       const colorAccent = DOC_COLORS[workspaceDocs.length % DOC_COLORS.length]!;
+      const docTitle = cleanDocumentTitle(opened.title, file.name, file.uri);
       const entry: WorkspaceDocumentEntry = {
         id: opened.documentId,
-        title:
-          opened.title ||
-          file.uri.split('/').pop()?.replace('.pdf', '') ||
-          'Document',
+        title: docTitle,
         pageCount: opened.pageCount,
         uri: file.uri,
         colorAccent,
@@ -232,7 +285,7 @@ export default function App() {
     } catch {
       // User cancelled or error handled
     }
-  }, [workspaceDocs]);
+  }, [workspaceDocs, cleanDocumentTitle]);
 
   const handleDeleteDocument = useCallback(
     (docId: string) => {
@@ -267,15 +320,13 @@ export default function App() {
       try {
         const file = await PdfEngine.pickPdfFile();
         const opened = await PdfEngine.openDocument(file.uri);
+        const docTitle = cleanDocumentTitle(opened.title, file.name, file.uri);
         setWorkspaceDocs((prev) =>
           prev.map((d) =>
             d.id === docId
               ? {
                   ...d,
-                  title:
-                    opened.title ||
-                    file.uri.split('/').pop()?.replace('.pdf', '') ||
-                    d.title,
+                  title: docTitle,
                   pageCount: opened.pageCount,
                   uri: file.uri,
                 }
@@ -290,7 +341,7 @@ export default function App() {
         console.warn('Replace document cancelled or failed', e);
       }
     },
-    [activeDocId]
+    [activeDocId, cleanDocumentTitle]
   );
 
   const handleAddTag = useCallback((docId: string, tag: string) => {
@@ -1096,6 +1147,9 @@ export default function App() {
         onReplaceDocument={handleReplaceDocument}
         onOpenPageEditor={() => setIsPageEditorOpen(true)}
         onAddTag={handleAddTag}
+        folders={workspaceFolders}
+        onFoldersChange={setWorkspaceFolders}
+        onMoveDocumentToFolder={handleMoveDocumentToFolder}
       />
 
       {/* ── Workspaces Manager Modal ───────────────────────────────────────── */}
