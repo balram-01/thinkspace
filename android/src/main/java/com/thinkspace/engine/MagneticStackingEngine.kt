@@ -1,7 +1,7 @@
 package com.thinkspace.engine
 
 import android.graphics.RectF
-import com.thinkspace.NativeCard
+import com.thinkspace.engine.models.*
 import kotlin.math.hypot
 
 data class GroupedExcerpt(

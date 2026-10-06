@@ -62,6 +62,7 @@ import com.thinkspace.pdfengine.model.PageSize
 import com.thinkspace.pdfengine.model.TextElement
 import com.thinkspace.pdfengine.model.TextWord
 import com.thinkspace.engine.*
+import com.thinkspace.engine.models.*
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -72,283 +73,7 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 
-class ThinkspaceEvent(
-  surfaceId: Int,
-  viewTag: Int,
-  private val customName: String,
-  private val eventData: WritableMap
-) : Event<ThinkspaceEvent>(surfaceId, viewTag) {
-  override fun getEventName(): String = customName
-  override fun getEventData(): WritableMap = eventData
-}
-
-data class NativePoint(val x: Float, val y: Float, val pressure: Float = 1.0f)
-
-data class PdfPageStroke(
-  val id: String,
-  val pageIndex: Int,
-  val points: List<NativePoint>,
-  val color: Int,
-  val strokeWidth: Float,
-  val isHighlighter: Boolean,
-  val isStraight: Boolean = false
-)
-
-data class ParagraphLayoutInfo(
-  val secId: String,
-  val pIdx: Int,
-  val pageNumber: Int,
-  val text: String,
-  val paperX: Float,
-  val topY: Float,
-  val width: Float,
-  val layout: StaticLayout
-)
-
-data class PdfPageLayout(
-  val pageIndex: Int,
-  val pageNumber: Int,
-  val pageSize: PageSize,
-  val topY: Float,
-  val height: Float,
-  val isFolded: Boolean,
-  val boundsOnScreen: RectF
-)
-
-data class NativeSearchMatch(
-  val pageIndex: Int,
-  val matchedText: String,
-  val rects: List<RectF>,
-  val contextSnippet: String = ""
-)
-
-data class NativeStroke(
-  val id: String,
-  var points: List<NativePoint>,
-  val color: Int,
-  val strokeWidth: Float,
-  val isHighlighter: Boolean,
-  val isStraight: Boolean = false
-)
-
-data class NativeTableRow(val cells: List<String>)
-data class NativeTable(val rows: List<NativeTableRow>)
-
-data class NativeSection(
-  val id: String,
-  val pageNumber: Int,
-  val heading: String,
-  val paragraphs: List<String>,
-  val tables: List<NativeTable>?,
-  val imageUrl: String?
-)
-
-data class NativeDoc(
-  val id: String,
-  val title: String,
-  val pageCount: Int,
-  val sections: List<NativeSection>
-)
-
-data class NativeAnnotation(
-  val id: String,
-  val sectionId: String,
-  val paragraphIndex: Int,
-  val pageNumber: Int,
-  val color: Int,
-  val text: String,
-  val rects: List<RectF> = emptyList()
-)
-
-data class NativeCard(
-  val id: String,
-  var x: Float,
-  var y: Float,
-  var width: Float,
-  var text: String,
-  var color: Int,
-  val pageNumber: Int,
-  var comment: String?,
-  var clusterId: String?,
-  var stackCount: Int,
-  val isImage: Boolean,
-  val imageUrl: String?,
-  val isTable: Boolean,
-  val tableRows: List<NativeTableRow>?,
-  var groupedItems: MutableList<GroupedExcerpt>? = null,
-  // Source location: PDF-page-space rects of original selection (for pulse-highlight on navigation)
-  val sourceRects: List<RectF> = emptyList(),
-  var fontSize: Float = 13f,
-  var isBold: Boolean = false,
-  var isItalic: Boolean = false,
-  var isUnderline: Boolean = false,
-  var isStrikethrough: Boolean = false,
-  var textColor: Int = Color.parseColor("#1E293B"),
-  var textStyleName: String = "Default",
-  val undoTextStack: ArrayDeque<String> = ArrayDeque(),
-  /**
-   * Multi-document: ID of the source document this card was extracted from.
-   * Empty string = legacy card (uses the single active document).
-   * Used for source badge rendering and source-jump navigation.
-   */
-  val documentId: String = ""
-) {
-  fun getHeight(): Float {
-    return when {
-      !groupedItems.isNullOrEmpty() && groupedItems!!.size > 1 -> {
-        val baseH = if (groupedItems!!.any { it.isImage }) 175f else 140f
-        baseH + (groupedItems!!.size - 1) * 8f
-      }
-      isTable -> 170f
-      isImage -> 160f
-      else -> {
-        // Calculate dynamic height based on text layout!
-        val tp = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-          textSize = (fontSize * 1.8f).coerceAtLeast(18f)
-          if (isBold && isItalic) {
-            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD_ITALIC)
-          } else if (isBold) {
-            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
-          } else if (isItalic) {
-            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.ITALIC)
-          } else {
-            typeface = android.graphics.Typeface.DEFAULT
-          }
-        }
-        val textW = Math.max(20f, width - 28f).toInt()
-        val textToMeasure = if (text.isEmpty()) " " else text
-        val layout = android.text.StaticLayout.Builder
-          .obtain(textToMeasure, 0, textToMeasure.length, tp, textW)
-          .setAlignment(android.text.Layout.Alignment.ALIGN_NORMAL)
-          .build()
-        Math.max(105f, layout.height.toFloat() + 56f) // 56f for header/footer padding
-      }
-    }
-  }
-}
-
-data class NativeLink(
-  val id: String,
-  val sourceExcerptId: String,
-  val color: Int
-)
-
-data class NativeInkLink(
-  val id: String,
-  val sourceDocId: String,
-  val sourcePageIndex: Int,
-  val sourcePdfRect: RectF,
-  val sourcePdfPoint: NativePoint,
-  val targetCardId: String,
-  val color: Int,
-  val strokeWidth: Float,
-  val style: String = "straight",
-  val createdAt: Long = System.currentTimeMillis(),
-  val targetCardPoint: NativePoint? = null,
-  val cardAnchorX: Float = 0.5f,
-  val cardAnchorY: Float = 0.5f
-)
-
-data class NativeDocumentSelection(
-  val text: String,
-  val pageNumber: Int,
-  val sectionId: String,
-  val pIdx: Int,
-  val startCharIdx: Int,
-  val endCharIdx: Int,
-  val highlightRects: List<RectF>,
-  val startHandle: RectF,
-  val endHandle: RectF,
-  val calloutRect: RectF,
-  val calloutExcerptBtn: RectF,
-  val calloutCopyBtn: RectF,
-  val calloutHighlightBtn: RectF,
-  val calloutCloseBtn: RectF
-)
-
-data class NativePdfSelection(
-  val pageIndex: Int,
-  val text: String,
-  val highlightRects: List<RectF>,
-  val pdfRects: List<RectF>,
-  val startHandle: RectF,
-  val endHandle: RectF,
-  val calloutRect: RectF,
-  val calloutExcerptBtn: RectF,
-  val calloutCopyBtn: RectF,
-  val calloutHighlightBtn: RectF,
-  val calloutCloseBtn: RectF,
-  val startWordIndex: Int = 0,
-  val endWordIndex: Int = 0,
-  val calloutAddWordLeftBtn: RectF = RectF(),
-  val calloutAddWordRightBtn: RectF = RectF(),
-  val calloutSelectAllBtn: RectF = RectF(),
-  val charCountText: String = "",
-  val calloutColorBtns: List<Pair<RectF, Int>> = emptyList(),
-  val calloutMoreBtn: RectF = RectF(),
-  val calloutTagsBtn: RectF = RectF(),
-  val calloutSubCardRect: RectF = RectF(),
-  val calloutMainCardRect: RectF = RectF(),
-  val calloutRainbowBtn: RectF = RectF(),
-  val calloutCommentBtn: RectF = RectF(),
-  val calloutBookmarkBtn: RectF = RectF(),
-  val calloutClearBtn: RectF = RectF()
-)
-
-data class CalloutLayoutResult(
-  val calloutRect: RectF,
-  val closeBtn: RectF = RectF(),
-  val excerptBtn: RectF,
-  val copyBtn: RectF = RectF(),
-  val highlightBtn: RectF = RectF(),
-  val addWordLeftBtn: RectF = RectF(),
-  val addWordRightBtn: RectF = RectF(),
-  val selectAllBtn: RectF = RectF(),
-  val colorBtns: List<Pair<RectF, Int>>,
-  val moreBtn: RectF = RectF(),
-  val tagsBtn: RectF = RectF(),
-  val subCardRect: RectF = RectF(),
-  val mainCardRect: RectF = RectF(),
-  val rainbowBtn: RectF = RectF(),
-  val commentBtn: RectF = RectF(),
-  val bookmarkBtn: RectF = RectF(),
-  val clearBtn: RectF = RectF()
-)
-
-data class NativeCropSelection(
-  val pageIndex: Int,
-  var pageBounds: BoundingBox,
-  var screenRect: RectF,
-  val calloutRect: RectF = RectF(),
-  val calloutHighlightBtn: RectF = RectF(),
-  val calloutExcerptBtn: RectF = RectF(),
-  val calloutCloseBtn: RectF = RectF(),
-  val calloutCommentBtn: RectF = RectF(),
-  val calloutBookmarkBtn: RectF = RectF(),
-  val calloutTagsBtn: RectF = RectF(),
-  var color: Int = Color.parseColor("#3B82F6"),
-  val dimensionsText: String = "",
-  val holdAndDragRect: RectF = RectF(),
-  val calloutColorBtns: MutableList<Pair<RectF, Int>> = mutableListOf(),
-  val calloutMoreBtn: RectF = RectF(),
-  val calloutRainbowBtn: RectF = RectF(),
-  val calloutClearBtn: RectF = RectF()
-)
-
-/**
- * A Notebook Page — a movable, resizable paper-like object on the infinite canvas workspace.
- * Like a physical sheet placed on the canvas; cards, strokes, and drawings can sit on top of it.
- */
-data class NativeNotebookPage(
-  val id: String,
-  var x: Float,
-  var y: Float,
-  var width: Float,
-  var height: Float,
-  var pageStyle: String = "ruled",       // "blank", "ruled", "grid", "dotted", "sketch"
-  var title: String = "Notebook Page",
-  var backgroundColor: Int = Color.parseColor("#FFFEF0")
-)
+// Data models moved to engine/models/ThinkspaceModels.kt
 
 class ThinkspaceView : View {
   constructor(context: Context?) : super(context)
@@ -399,11 +124,11 @@ class ThinkspaceView : View {
 
   private var imeHeight: Int = 0
 
-  private fun isKeyboardActive(): Boolean {
+  internal fun isKeyboardActive(): Boolean {
     return editingCardId != null || getKeyboardHeight() > 50f * density
   }
 
-  private fun getKeyboardHeight(): Float {
+  internal fun getKeyboardHeight(): Float {
     if (imeHeight > 0) return imeHeight.toFloat()
     val r = Rect()
     getWindowVisibleDisplayFrame(r)
@@ -629,14 +354,14 @@ class ThinkspaceView : View {
     set(value) { camera.scaleFactor = value }
 
   // Real PDF Engine State
-  private var activePdfDoc: PdfDocument? = null
-  private val pageLayouts = mutableListOf<PdfPageLayout>()
+  internal var activePdfDoc: PdfDocument? = null
+  internal val pageLayouts = mutableListOf<PdfPageLayout>()
   // Cache up to 32 rendered pages in memory
-  private val pageBitmaps = LruCache<Int, Bitmap>(32)
+  internal val pageBitmaps = LruCache<Int, Bitmap>(32)
   private val renderingPages = ConcurrentHashMap.newKeySet<Int>()
-  private val pageWordsCache = ConcurrentHashMap<Int, List<TextWord>>()
+  internal val pageWordsCache = ConcurrentHashMap<Int, List<TextWord>>()
   private val extractingWords = ConcurrentHashMap.newKeySet<Int>()
-  private val renderScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+  internal val renderScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
   // ── Multi-document workspace registry ───────────────────────────────────────
   /**
@@ -645,26 +370,26 @@ class ThinkspaceView : View {
    * Values are opened PdfDocument handles (shared with PdfEngineModule).
    * Documents are opened lazily when first needed.
    */
-  private val documentRegistry = ConcurrentHashMap<String, PdfDocument>()
+  internal val documentRegistry = ConcurrentHashMap<String, PdfDocument>()
 
   /**
    * Ordered list of workspace document entries (metadata only).
    * Kept in insertion order. The PDF renderer uses documentRegistry for actual docs.
    */
-  private val workspaceDocumentEntries = mutableListOf<WorkspaceDocumentEntry>()
+  internal val workspaceDocumentEntries = mutableListOf<WorkspaceDocumentEntry>()
 
   /**
    * ID of the document currently visible in the PDF/document viewport.
    * Changing this triggers a viewport switch without touching the workspace canvas.
    */
-  private var activeDocumentId: String = ""
+  internal var activeDocumentId: String = ""
 
   /** Pending page number and source rects to scroll to when switching documents */
-  private var pendingScrollToPage: Int? = null
-  private var pendingPulseRects: List<RectF>? = null
+  internal var pendingScrollToPage: Int? = null
+  internal var pendingPulseRects: List<RectF>? = null
 
   /** Color palette for auto-assigning document accent colors. */
-  private val docColorPalette = listOf(
+  internal val docColorPalette = listOf(
     android.graphics.Color.parseColor("#6C5CE7"),
     android.graphics.Color.parseColor("#00ADB5"),
     android.graphics.Color.parseColor("#F59E0B"),
@@ -683,37 +408,23 @@ class ThinkspaceView : View {
   }
 
   // ── Multi-document & Hierarchical Folder Management ──────────────────────────
-  data class WorkspaceFolder(
-    val id: String,
-    var name: String,
-    var parentId: String? = null,
-    val createdAt: Long = System.currentTimeMillis()
-  )
-
-  data class WorkspaceDocumentEntry(
-    val id: String,
-    var title: String,
-    val pageCount: Int,
-    val uri: String,
-    val colorAccent: String = "#00ADB5",
-    var folderId: String? = null
-  )
+  // WorkspaceFolder and WorkspaceDocumentEntry moved to engine/models/ThinkspaceModels.kt
 
   val workspaceFolders = mutableListOf<WorkspaceFolder>()
-  private val expandedFolderIds = mutableSetOf<String>()
-  private var documentsSheetDialog: Dialog? = null
+  internal val expandedFolderIds = mutableSetOf<String>()
+  internal var documentsSheetDialog: Dialog? = null
 
   // Document & Annotation Models (Fallback/Demo Doc)
-  private var activeDocument: NativeDoc? = null
-  private val annotations = mutableListOf<NativeAnnotation>()
-  private var docScrollY: Float = 0f
-  private var maxDocScrollY: Float = 1000f
-  private var docScrollX: Float = 0f
-  private var maxDocScrollX: Float = 0f
-  private var pdfScaleFactor: Float = 1.0f
+  internal var activeDocument: NativeDoc? = null
+  internal val annotations = mutableListOf<NativeAnnotation>()
+  internal var docScrollY: Float = 0f
+  internal var maxDocScrollY: Float = 1000f
+  internal var docScrollX: Float = 0f
+  internal var maxDocScrollX: Float = 0f
+  internal var pdfScaleFactor: Float = 1.0f
 
   // Document interaction mode: "text" or "crop"
-  private var docMode: String = "text"
+  internal var docMode: String = "text"
 
   // Display density & subheader metrics
   var showDocumentHeader: Boolean = false
@@ -721,8 +432,8 @@ class ThinkspaceView : View {
       field = value
       invalidate()
     }
-  private val density: Float get() = context.resources.displayMetrics.density
-  private val subheaderH: Float get() = if (showDocumentHeader) 48f * density else 0f
+  internal val density: Float get() = context.resources.displayMetrics.density
+  internal val subheaderH: Float get() = if (showDocumentHeader) 48f * density else 0f
 
   // LiquidText Real PDF Document Compression Engine
   val compressionEngine by lazy { DocumentCompressionEngine(density) }
@@ -749,40 +460,40 @@ class ThinkspaceView : View {
   private var editCardInitialStyleName: String = "Default"
 
   // Canvas Collections
-  private val strokes = mutableListOf<NativeStroke>()
-  private val cards = mutableListOf<NativeCard>()
-  private val links = mutableListOf<NativeLink>()
+  internal val strokes = mutableListOf<NativeStroke>()
+  internal val cards = mutableListOf<NativeCard>()
+  internal val links = mutableListOf<NativeLink>()
 
   // ── Notebook Pages ──────────────────────────────────────────────────────────
   /** All notebook page objects currently on the canvas (world-space). */
-  private val notebookPages = mutableListOf<NativeNotebookPage>()
+  internal val notebookPages = mutableListOf<NativeNotebookPage>()
   /** ID of the currently-selected notebook page (null = none selected). */
-  private var selectedNotebookPageId: String? = null
+  internal var selectedNotebookPageId: String? = null
   /** The page currently being dragged (finger down on page body). */
-  private var draggingNotebookPage: NativeNotebookPage? = null
+  internal var draggingNotebookPage: NativeNotebookPage? = null
   private var nbPageDragOffsetWorldX: Float = 0f
   private var nbPageDragOffsetWorldY: Float = 0f
   private var nbPageDragStartX: Float = 0f
   private var nbPageDragStartY: Float = 0f
   /** The page currently being resized (finger on bottom-right handle). */
-  private var resizingNotebookPage: NativeNotebookPage? = null
+  internal var resizingNotebookPage: NativeNotebookPage? = null
   private var nbPageResizeStartWidth: Float = 0f
   private var nbPageResizeStartHeight: Float = 0f
   private var nbPageResizeStartWorldX: Float = 0f
   private var nbPageResizeStartWorldY: Float = 0f
   /** World-space hit rects for per-page controls (keyed by page.id). */
-  private val nbPageDeleteRects = HashMap<String, RectF>()
-  private val nbPageStyleBtnRects = HashMap<String, RectF>()
-  private val nbPageDuplicateRects = HashMap<String, RectF>()
-  private val nbPageResizeRects = HashMap<String, RectF>()
+  internal val nbPageDeleteRects = HashMap<String, RectF>()
+  internal val nbPageStyleBtnRects = HashMap<String, RectF>()
+  internal val nbPageDuplicateRects = HashMap<String, RectF>()
+  internal val nbPageResizeRects = HashMap<String, RectF>()
   private var nbPageAttachedCards: List<NativeCard> = emptyList()
   private var nbPageAttachedStrokes: List<NativeStroke> = emptyList()
   private var nbPageAttachedCardStarts: List<Pair<NativeCard, Pair<Float, Float>>> = emptyList()
   private var nbPageAttachedStrokeStarts: List<Pair<NativeStroke, List<Pair<Float, Float>>>> = emptyList()
   /** Style picker overlay state. */
-  private var isNotebookStylePickerOpen: Boolean = false
-  private var stylePickerForPageId: String? = null
-  private val nbPageStylePickerRect = RectF()
+  internal var isNotebookStylePickerOpen: Boolean = false
+  internal var stylePickerForPageId: String? = null
+  internal val nbPageStylePickerRect = RectF()
   private data class NbStyleOption(val rect: RectF, val style: String, val label: String)
 
   // Document Page Inking Collection (pageIndex -> list of strokes in page-relative coords)
@@ -841,7 +552,7 @@ class ThinkspaceView : View {
   private var canvasPenStartCardId: String? = null
 
   // Active card interaction state
-  private var selectedCardId: String? = null
+  internal var selectedCardId: String? = null
   private var draggingCard: NativeCard? = null
   private var dragOffsetWorldX: Float = 0f
   private var dragOffsetWorldY: Float = 0f
@@ -849,11 +560,11 @@ class ThinkspaceView : View {
   private var heldCardId: String? = null
 
   // LiquidText Excerpt Card Toolbar & Typography state
-  private var isTypographyBarVisible = false
-  private var isStyleSheetOpen = false
-  private var isCardColorPaletteOpen = false
-  private var isTypoTextColorPaletteOpen = false
-  private var editingCardId: String? = null
+  internal var isTypographyBarVisible = false
+  internal var isStyleSheetOpen = false
+  internal var isCardColorPaletteOpen = false
+  internal var isTypoTextColorPaletteOpen = false
+  internal var editingCardId: String? = null
   private var cursorPosition: Int = 0
   private var isCursorBlinkVisible = true
   private var lastCursorBlinkTime = 0L
@@ -864,37 +575,37 @@ class ThinkspaceView : View {
   private var lastSelectedCardForAnim: NativeCard? = null
 
   // Action Bar rects (Screen space)
-  private val cardActionBarRect = RectF()
-  private val btnCardCommentRect = RectF()
-  private val btnCardEditRect = RectF()
-  private val btnCardCopyRect = RectF()
-  private val btnCardDeleteRect = RectF()
-  private val btnCardTagsRect = RectF()
-  private val btnCardColorWheelRect = RectF()
-  private val btnCardTypographyRect = RectF()
-  private val cardColorPaletteRects = mutableListOf<Pair<RectF, Int>>()
+  internal val cardActionBarRect = RectF()
+  internal val btnCardCommentRect = RectF()
+  internal val btnCardEditRect = RectF()
+  internal val btnCardCopyRect = RectF()
+  internal val btnCardDeleteRect = RectF()
+  internal val btnCardTagsRect = RectF()
+  internal val btnCardColorWheelRect = RectF()
+  internal val btnCardTypographyRect = RectF()
+  internal val cardColorPaletteRects = mutableListOf<Pair<RectF, Int>>()
 
   // Typography Bar rects (Screen space)
-  private val typographyBarRect = RectF()
-  private val btnTypoBackRect = RectF()
-  private val btnTypoStyleRect = RectF()
-  private val btnTypoBoldRect = RectF()
-  private val btnTypoItalicRect = RectF()
-  private val btnTypoUnderlineRect = RectF()
-  private val btnTypoStrikeRect = RectF()
-  private val btnTypoFontSizeRect = RectF()
-  private val btnTypoTextColorRect = RectF()
-  private val btnTypoMoreRect = RectF()
-  private val typoTextColorPaletteRects = mutableListOf<Pair<RectF, Int>>()
+  internal val typographyBarRect = RectF()
+  internal val btnTypoBackRect = RectF()
+  internal val btnTypoStyleRect = RectF()
+  internal val btnTypoBoldRect = RectF()
+  internal val btnTypoItalicRect = RectF()
+  internal val btnTypoUnderlineRect = RectF()
+  internal val btnTypoStrikeRect = RectF()
+  internal val btnTypoFontSizeRect = RectF()
+  internal val btnTypoTextColorRect = RectF()
+  internal val btnTypoMoreRect = RectF()
+  internal val typoTextColorPaletteRects = mutableListOf<Pair<RectF, Int>>()
 
   // Style Sheet Popover rects (Screen space)
-  private val styleSheetRect = RectF()
-  private val styleOptionRects = mutableListOf<Triple<RectF, String, RectF>>()
+  internal val styleSheetRect = RectF()
+  internal val styleOptionRects = mutableListOf<Triple<RectF, String, RectF>>()
 
   // Gesture flags
   private var isPanningCanvas = false
   private var isDraggingDivider = false
-  private var isScrollingDoc = false
+  internal var isScrollingDoc = false
   private var lastTouchScreenX = 0f
   private var lastTouchScreenY = 0f
 
@@ -903,45 +614,47 @@ class ThinkspaceView : View {
   private var hadSelectionOrModalBeforeTouch = false
 
   // Real PDF Selection state
-  private var activePdfSelection: NativePdfSelection? = null
-  private var isSelectingPdfText = false
-  private var pdfSelectStartWord: TextWord? = null
-  private var pdfSelectPageIndex = 0
+  internal var activePdfSelection: NativePdfSelection? = null
+  internal var isSelectingPdfText = false
+  internal var pdfSelectStartWord: TextWord? = null
+  internal var pdfSelectPageIndex = 0
 
   // Figure Crop state
-  private var activeCropSelection: NativeCropSelection? = null
-  private var isDraggingCrop = false
-  private var isDraggingCropTopLeftHandle = false
-  private var isDraggingCropBottomRightHandle = false
-  private var isMovingCropSelection = false
-  private var cropDragOffsetDocX = 0f
-  private var cropDragOffsetDocY = 0f
-  private var cropStartX = 0f
-  private var cropStartY = 0f
-  private var cropPageIndex = 0
+  internal var activeCropSelection: NativeCropSelection? = null
+  internal var isDraggingCrop = false
+  internal var isDraggingCropTopLeftHandle = false
+  internal var isDraggingCropTopRightHandle = false
+  internal var isDraggingCropBottomLeftHandle = false
+  internal var isDraggingCropBottomRightHandle = false
+  internal var isMovingCropSelection = false
+  internal var cropDragOffsetDocX = 0f
+  internal var cropDragOffsetDocY = 0f
+  internal var cropStartX = 0f
+  internal var cropStartY = 0f
+  internal var cropPageIndex = 0
 
   // Text Selection Handle & Word Navigation state
-  private val paragraphLayouts = mutableListOf<ParagraphLayoutInfo>()
-  private var activeSelection: NativeDocumentSelection? = null
-  private var activeStructuredPInfo: ParagraphLayoutInfo? = null
-  private var activeStructuredStartOffset = 0
-  private var activeStructuredEndOffset = 0
-  private var isDraggingStartHandle = false
-  private var isDraggingEndHandle = false
+  internal val paragraphLayouts = mutableListOf<ParagraphLayoutInfo>()
+  internal var activeSelection: NativeDocumentSelection? = null
+  internal var activeStructuredPInfo: ParagraphLayoutInfo? = null
+  internal var activeStructuredStartOffset = 0
+  internal var activeStructuredEndOffset = 0
+  internal var isDraggingStartHandle = false
+  internal var isDraggingEndHandle = false
 
   // Cross-Zone Lift-and-Drag state
-  private var isLiftingExcerpt = false
-  private var liftCandidateText: String? = null
-  private var liftCandidatePage: Int = 1
-  private var liftCandidateColor: Int = Color.parseColor("#00ADB5")
-  private var liftCandidateIsImage = false
-  private var liftCandidateImagePath: String? = null
-  private var liftCandidateBitmap: Bitmap? = null
-  private var liftCandidateSourceRects: List<RectF> = emptyList() // PDF-space rects for source pulse
-  private var liftGhostX = 0f
-  private var liftGhostY = 0f
-  private var liftAnchorScreenX = 0f
-  private var liftAnchorScreenY = 0f
+  internal var isLiftingExcerpt = false
+  internal var liftCandidateText: String? = null
+  internal var liftCandidatePage: Int = 1
+  internal var liftCandidateColor: Int = Color.parseColor("#00ADB5")
+  internal var liftCandidateIsImage = false
+  internal var liftCandidateImagePath: String? = null
+  internal var liftCandidateBitmap: Bitmap? = null
+  internal var liftCandidateSourceRects: List<RectF> = emptyList() // PDF-space rects for source pulse
+  internal var liftGhostX = 0f
+  internal var liftGhostY = 0f
+  internal var liftAnchorScreenX = 0f
+  internal var liftAnchorScreenY = 0f
 
   // Physics-based Scroll Inertia (Smooth multi-page glide)
   private val docScroller = OverScroller(context).apply {
@@ -955,13 +668,13 @@ class ThinkspaceView : View {
   private var downDocY = 0f
 
   // Image bitmap cache for cards & instant cropping
-  private val cardBitmapCache = LruCache<String, Bitmap>(32)
+  internal val cardBitmapCache = LruCache<String, Bitmap>(32)
 
   // Bidirectional Navigation Pulse
-  private var pulsePageNumber: Int? = null
-  private var pulseAlpha: Int = 0
+  internal var pulsePageNumber: Int? = null
+  internal var pulseAlpha: Int = 0
   // Exact PDF-page-space rects to highlight during pulse (empty → pulse whole page border)
-  private var pulseSourceRects: List<RectF> = emptyList()
+  internal var pulseSourceRects: List<RectF> = emptyList()
 
   // Jump button hit-rects per card (world-space, populated each draw frame)
   private val cardJumpBtnRects = HashMap<String, RectF>()
@@ -983,8 +696,8 @@ class ThinkspaceView : View {
   private var activeVLinkRipple: VLinkRipple? = null
 
   // Toast feedback & HUD Notification Engine
-  private var copiedToastText: String? = null
-  private val hudToast = HudToastRenderer(density)
+  internal var copiedToastText: String? = null
+  internal val hudToast = HudToastRenderer(density)
   private val inkLinkRenderer by lazy { InkLinkRenderer(density) }
   private var magneticTargetCardId: String? = null
 
@@ -1010,16 +723,16 @@ class ThinkspaceView : View {
   private val headerZoomInRect = RectF()
 
   // Native PDF Engine Text Search State
-  private var isSearchActive = false
-  private var isSearching = false
-  private var currentSearchQuery = ""
-  private val searchMatches = mutableListOf<NativeSearchMatch>()
-  private var currentSearchIndex = 0
+  internal var isSearchActive = false
+  internal var isSearching = false
+  internal var currentSearchQuery = ""
+  internal val searchMatches = mutableListOf<NativeSearchMatch>()
+  internal var currentSearchIndex = 0
   // Cancels the previous incremental search when a new query starts
-  private var searchJob: kotlinx.coroutines.Job? = null
+  internal var searchJob: kotlinx.coroutines.Job? = null
   // Native overlay panel (real Android View, not canvas-drawn)
-  private var searchOverlayView: android.view.ViewGroup? = null
-  private var searchCounterLabel: android.widget.TextView? = null
+  internal var searchOverlayView: android.view.ViewGroup? = null
+  internal var searchCounterLabel: android.widget.TextView? = null
 
   // Native Search HUD UI Hit Rects
   private val searchHudRect = RectF()
@@ -1205,34 +918,34 @@ class ThinkspaceView : View {
     strokeWidth = 3f
   }
   // ── Notebook Page Paints ───────────────────────────────────────────────────
-  private val nbPageShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#40000000"); style = Paint.Style.FILL
   }
-  private val nbPageSelectedBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageSelectedBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#3B82F6"); strokeWidth = 3f; style = Paint.Style.STROKE
   }
-  private val nbPageNormalBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageNormalBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#C8C5A6"); strokeWidth = 1.5f; style = Paint.Style.STROKE
   }
-  private val nbPageRuledLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageRuledLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#A8C4E8"); strokeWidth = 0.9f; style = Paint.Style.STROKE
   }
-  private val nbPageMarginLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageMarginLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#F0A0A0"); strokeWidth = 1.2f; style = Paint.Style.STROKE
   }
-  private val nbPageGridLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageGridLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#C8C8C8"); strokeWidth = 0.7f; style = Paint.Style.STROKE
   }
-  private val nbPageDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#B8B8B8"); style = Paint.Style.FILL
   }
-  private val nbPageToolbarBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageToolbarBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#1E293B"); style = Paint.Style.FILL
   }
-  private val nbPageToolbarBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageToolbarBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#334155"); strokeWidth = 1.2f; style = Paint.Style.STROKE
   }
-  private val nbPageResizeHandlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+  internal val nbPageResizeHandlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = Color.parseColor("#3B82F6"); style = Paint.Style.FILL
   }
   private val selectionFillPaint = Paint().apply {
@@ -1309,26 +1022,60 @@ class ThinkspaceView : View {
     }
 
     override fun onScale(detector: ScaleGestureDetector): Boolean {
-      if (compressionEngine.isManualPinching) {
-        return true
-      }
       val fy = detector.focusY
       val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
       if (fy < splitY) {
-        // Document zone zoom (when not two-finger pinch-compressing)
+        // Document zone multi-touch gestures
         prevCanvasFocusX = Float.NaN
         prevCanvasFocusY = Float.NaN
-        val prevScale = pdfScaleFactor
-        pdfScaleFactor *= detector.scaleFactor
-        pdfScaleFactor = max(1.0f, min(pdfScaleFactor, 5.0f))
-        
-        val scaleChange = pdfScaleFactor / prevScale
-        val focusDocX = detector.focusX + docScrollX
-        val focusDocY = detector.focusY + docScrollY
-        
-        docScrollX = (focusDocX * scaleChange - detector.focusX).coerceAtLeast(0f)
-        docScrollY = (focusDocY * scaleChange - detector.focusY).coerceAtLeast(0f)
-        invalidate()
+
+        val sFactor = detector.scaleFactor
+
+        // 1. Expand squeezed document when spreading fingers apart:
+        if (compressionEngine.isAnyPageCompressed() && sFactor > 1.02f) {
+          compressionEngine.resetAllToNormal(animate = true) { invalidate() }
+          hudToast.show("Document Expanded")
+          return true
+        }
+
+        // 2. Vertical Pinch-to-Compare (Accordion Squeeze):
+        // When at normal 1.0x view (pdfScaleFactor <= 1.05f), pinching fingers inward vertically
+        // collapses non-annotated pages between the fingers so user can compare distant sections!
+        val isVerticalPinch = detector.currentSpanY > 36f * density &&
+          (detector.currentSpanY > detector.currentSpanX * 0.9f || abs(detector.currentSpan - detector.previousSpan) > 3f)
+
+        if (pdfScaleFactor <= 1.05f && sFactor < 0.98f && isVerticalPinch) {
+          if (!compressionEngine.isManualPinching) {
+            val pageBounds = pageLayouts.map { it.boundsOnScreen }
+            val pageIndices = pageLayouts.map { it.pageIndex }
+            val annotatedPages = (annotations.map { it.pageNumber - 1 } + cards.map { it.pageNumber - 1 }).toSet()
+            val y0 = detector.focusY - detector.currentSpanY / 2f
+            val y1 = detector.focusY + detector.currentSpanY / 2f
+            compressionEngine.onManualPinchBegin(y0, y1, pageBounds, pageIndices, annotatedPages)
+          }
+          if (compressionEngine.isManualPinching) {
+            val y0 = detector.focusY - detector.currentSpanY / 2f
+            val y1 = detector.focusY + detector.currentSpanY / 2f
+            compressionEngine.onManualPinchMove(y0, y1)
+            invalidate()
+            return true
+          }
+        }
+
+        // 3. Document Zoom In & Out:
+        if (!compressionEngine.isManualPinching) {
+          val prevScale = pdfScaleFactor
+          pdfScaleFactor = (pdfScaleFactor * sFactor).coerceIn(1.0f, 5.0f)
+          if (pdfScaleFactor != prevScale) {
+            val scaleChange = pdfScaleFactor / prevScale
+            val focusDocX = detector.focusX + docScrollX
+            val focusDocY = detector.focusY + docScrollY
+            docScrollX = (focusDocX * scaleChange - detector.focusX).coerceAtLeast(0f)
+            docScrollY = (focusDocY * scaleChange - detector.focusY).coerceAtLeast(0f)
+            invalidate()
+            return true
+          }
+        }
         return true
       }
 
@@ -1363,6 +1110,15 @@ class ThinkspaceView : View {
       invalidate()
       return true
     }
+
+    override fun onScaleEnd(detector: ScaleGestureDetector) {
+      if (compressionEngine.isManualPinching) {
+        compressionEngine.onManualPinchEnd(
+          onUpdate = { invalidate() },
+          onHaptic = { performHapticFeedback(HapticFeedbackConstants.CONFIRM) }
+        )
+      }
+    }
   }
   private val scaleGestureDetector = ScaleGestureDetector(context ?: throw IllegalStateException("Context required"), scaleGestureListener)
 
@@ -1374,494 +1130,9 @@ class ThinkspaceView : View {
     }
   })
 
-  private fun createCropSelection(
-    pageIndex: Int,
-    sRect: RectF,
-    pageBounds: BoundingBox,
-    color: Int = selectedColor,
-    dimensionsText: String = ""
-  ): NativeCropSelection {
-    val sel = NativeCropSelection(
-      pageIndex = pageIndex,
-      pageBounds = pageBounds,
-      screenRect = sRect,
-      color = color,
-      dimensionsText = dimensionsText
-    )
-    recomputeCropCalloutRects(sel)
-    return sel
-  }
-
-  private fun recomputeCropCalloutRects(sel: NativeCropSelection) {
-    val d = density
-    val maxAvailW = width - 24f * d
-    val cW = min(maxAvailW, 316f * d)
-    val cH = 66f * d
-    val cLeft = (sel.screenRect.centerX() - cW / 2f).coerceIn(12f * d, max(12f * d, width - cW - 12f * d))
-    val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
-    val cTop = if (sel.screenRect.top - cH - 12f * d >= subheaderH) {
-      sel.screenRect.top - cH - 12f * d
-    } else {
-      min(sel.screenRect.bottom + 12f * d, (splitY - cH - 14f * d).coerceAtLeast(subheaderH))
-    }
-    sel.calloutRect.set(cLeft, cTop, cLeft + cW, cTop + cH)
-
-    // Row 1: Comment | AutoExcerpt | Bookmark | •••
-    val r1Top = cTop + 4f * d
-    val r1Bottom = cTop + 32f * d
-    val moreBtnW = 32f * d
-    sel.calloutMoreBtn.set(cLeft + cW - 12f * d - moreBtnW, r1Top, cLeft + cW - 10f * d, r1Bottom)
-
-    val r1Left = cLeft + 12f * d
-    val commentBtnW = 70f * d
-    val excerptBtnW = 92f * d
-    val bookmarkBtnW = 76f * d
-
-    sel.calloutCommentBtn.set(r1Left, r1Top, r1Left + commentBtnW, r1Bottom)
-    sel.calloutExcerptBtn.set(sel.calloutCommentBtn.right + 4f * d, r1Top, sel.calloutCommentBtn.right + 4f * d + excerptBtnW, r1Bottom)
-    sel.calloutBookmarkBtn.set(sel.calloutExcerptBtn.right + 4f * d, r1Top, min(sel.calloutMoreBtn.left - 4f * d, sel.calloutExcerptBtn.right + 4f * d + bookmarkBtnW), r1Bottom)
-
-    // Row 2: Color swatches (5) + Clear swatch + Rainbow swatch + Divider + Tags
-    val r2CenterY = cTop + 48f * d
-    val touchRad = 13f * d
-    val pitch = ((cW - 130f * d) / 7f).coerceIn(21f * d, 25f * d)
-    val swatchStartX = cLeft + 18f * d
-
-    sel.calloutColorBtns.clear()
-    val palette = listOf(
-      Color.parseColor("#EF4444"), // Red
-      Color.parseColor("#22C55E"), // Green
-      Color.parseColor("#3B82F6"), // Blue
-      Color.parseColor("#F59E0B"), // Yellow
-      Color.parseColor("#EC4899")  // Pink
-    )
-    for (i in palette.indices) {
-      val cx = swatchStartX + i * pitch
-      sel.calloutColorBtns.add(Pair(RectF(cx - touchRad, r2CenterY - touchRad, cx + touchRad, r2CenterY + touchRad), palette[i]))
-    }
-    val clearCx = swatchStartX + palette.size * pitch
-    sel.calloutClearBtn.set(clearCx - touchRad, r2CenterY - touchRad, clearCx + touchRad, r2CenterY + touchRad)
-
-    val rainbowCx = clearCx + pitch
-    sel.calloutRainbowBtn.set(rainbowCx - touchRad, r2CenterY - touchRad, rainbowCx + touchRad, r2CenterY + touchRad)
-
-    val tagsLeft = rainbowCx + touchRad + 8f * d
-    sel.calloutTagsBtn.set(tagsLeft, cTop + 34f * d, cLeft + cW - 10f * d, cTop + 62f * d)
-
-    sel.holdAndDragRect.set(sel.screenRect.left, sel.screenRect.top - 24f * d, sel.screenRect.left + 115f * d, sel.screenRect.top - 4f * d)
-  }
-
-  /**
-   * Calculates the exact point on the perimeter/edge of [card] that faces [fromWorldX], [fromWorldY].
-   * Ensures the InkLink line attaches cleanly to the card's exterior edge rather than floating or stopping inside.
-   */
-  private fun getCardEdgeAnchor(card: NativeCard, fromWorldX: Float, fromWorldY: Float): PointF {
-    val left = card.x
-    val top = card.y
-    val right = card.x + card.width
-    val bottom = card.y + card.getHeight()
-    val cx = (left + right) / 2f
-    val cy = (top + bottom) / 2f
-
-    val dx = cx - fromWorldX
-    val dy = cy - fromWorldY
-
-    if (abs(dx) < 0.001f && abs(dy) < 0.001f) {
-      return PointF(cx, top)
-    }
-
-    // Top edge (y = top): ray traveling downwards toward center
-    if (fromWorldY < top && dy > 0f) {
-      val t = (top - fromWorldY) / dy
-      val x = fromWorldX + t * dx
-      if (x in left..right) {
-        return PointF(x.coerceIn(left + 10f, right - 10f), top)
-      }
-    }
-    // Bottom edge (y = bottom): ray traveling upwards toward center
-    if (fromWorldY > bottom && dy < 0f) {
-      val t = (bottom - fromWorldY) / dy
-      val x = fromWorldX + t * dx
-      if (x in left..right) {
-        return PointF(x.coerceIn(left + 10f, right - 10f), bottom)
-      }
-    }
-    // Left edge (x = left): ray traveling rightwards toward center
-    if (fromWorldX < left && dx > 0f) {
-      val t = (left - fromWorldX) / dx
-      val y = fromWorldY + t * dy
-      if (y in top..bottom) {
-        return PointF(left, y.coerceIn(top + 10f, bottom - 10f))
-      }
-    }
-    // Right edge (x = right): ray traveling leftwards toward center
-    if (fromWorldX > right && dx < 0f) {
-      val t = (right - fromWorldX) / dx
-      val y = fromWorldY + t * dy
-      if (y in top..bottom) {
-        return PointF(right, y.coerceIn(top + 10f, bottom - 10f))
-      }
-    }
-
-    // Default fallback to top center
-    return PointF(cx, top)
-  }
-
-  private fun distToSegment(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
-    val dx = bx - ax
-    val dy = by - ay
-    val l2 = dx * dx + dy * dy
-    if (l2 < 0.0001f) return hypot(px - ax, py - ay)
-    val t = (((px - ax) * dx + (py - ay) * dy) / l2).coerceIn(0f, 1f)
-    val projX = ax + t * dx
-    val projY = ay + t * dy
-    return hypot(px - projX, py - projY)
-  }
-
-  private fun triggerLongPressSelect(x: Float, y: Float) {
-    val splitY = if (activePdfDoc != null || activeDocument != null) height.toFloat() * splitRatio else 0f
-    if (y < splitY - 14f && y >= subheaderH) {
-      isScrollingDoc = false
-
-      val sel = activePdfSelection
-      if (sel != null) {
-        if (sel.calloutRect.contains(x, y)) {
-          return // Ignore long presses on the callout menu
-        }
-
-        val inSelection = sel.highlightRects.any { it.contains(x, y) }
-        if (inSelection) {
-          isLiftingExcerpt = true
-          liftCandidateText = sel.text
-          liftCandidatePage = sel.pageIndex + 1
-          liftCandidateColor = android.graphics.Color.parseColor("#3B82F6") // Blue default for text excerpt
-          liftCandidateIsImage = false
-          liftCandidateImagePath = null
-          liftCandidateBitmap = null
-          liftCandidateSourceRects = sel.pdfRects
-          
-          liftAnchorScreenX = x
-          liftAnchorScreenY = y
-          liftGhostX = x
-          liftGhostY = y
-          
-          activePdfSelection = null
-          parent?.requestDisallowInterceptTouchEvent(true)
-          performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-          invalidate()
-          return
-        }
-      }
-
-      val crop = activeCropSelection
-      if (crop != null) {
-        if (crop.calloutRect.contains(x, y)) {
-          return
-        }
-        if (crop.screenRect.contains(x, y)) {
-          // Immediately lift excerpt on long press inside selection!
-          val cropBmp = generateCropBitmap(crop.pageIndex, crop.pageBounds)
-          val p = if (cropBmp != null) saveCropToFile(cropBmp) else null
-          if (cropBmp != null && p != null) {
-            cardBitmapCache.put(p, cropBmp)
-          }
-          isLiftingExcerpt = true
-          liftCandidateText = "[Photo Excerpt]"
-          liftCandidatePage = crop.pageIndex + 1
-          liftCandidateColor = crop.color
-          liftCandidateIsImage = true
-          liftCandidateImagePath = p
-          liftCandidateBitmap = cropBmp
-          liftCandidateSourceRects = listOf(RectF(crop.pageBounds.left, crop.pageBounds.top, crop.pageBounds.right, crop.pageBounds.bottom))
-
-          liftAnchorScreenX = x
-          liftAnchorScreenY = y
-          liftGhostX = x
-          liftGhostY = y
-
-          activeCropSelection = null
-          parent?.requestDisallowInterceptTouchEvent(true)
-          performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-          invalidate()
-          return
-        }
-      }
-
-      // 1. Real PDF document - ONLY select text when activeTool is explicitly "select"
-      if (activePdfDoc != null) {
-        for (pl in pageLayouts) {
-          if (!pl.isFolded && pl.boundsOnScreen.contains(x, y)) {
-            val words = pageWordsCache[pl.pageIndex]
-            if (!words.isNullOrEmpty() && activeTool == "select" && docMode != "crop") {
-              val px = (x - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
-              val py = (y - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
-              val hitWord = words.find { w ->
-                val b = w.bounds
-                px >= b.left - 6f && px <= b.right + 6f && py >= b.top - 8f && py <= b.bottom + 8f
-              } ?: words.minByOrNull { w ->
-                val b = w.bounds
-                val cx = (b.left + b.right) / 2f
-                val cy = (b.top + b.bottom) / 2f
-                (cx - px) * (cx - px) + (cy - py) * (cy - py)
-              }?.takeIf { w ->
-                val b = w.bounds
-                val cx = (b.left + b.right) / 2f
-                val cy = (b.top + b.bottom) / 2f
-                val distSq = (cx - px) * (cx - px) + (cy - py) * (cy - py)
-                distSq < 48f * 48f
-              }
-
-              if (hitWord != null) {
-                isSelectingPdfText = true
-                pdfSelectStartWord = hitWord
-                pdfSelectPageIndex = pl.pageIndex
-                updatePdfSelection(pl, hitWord, hitWord)
-                isScrollingDoc = false
-                parent?.requestDisallowInterceptTouchEvent(true)
-                performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-                invalidate()
-                return
-              }
-            }
-
-            // LiquidText Dynamic Drag-to-Enclose Area Selection:
-            // Pin the anchor point and start real-time elastic box sizing!
-            isDraggingCrop = true
-            cropStartX = x
-            cropStartY = y
-            cropPageIndex = pl.pageIndex
-
-            val initialW = 32f * density
-            val initialH = 24f * density
-            val sRect = RectF(
-              (x - initialW / 2f).coerceIn(pl.boundsOnScreen.left + 4f * density, pl.boundsOnScreen.right - initialW - 4f * density),
-              (y - initialH / 2f).coerceIn(pl.boundsOnScreen.top + 4f * density, pl.boundsOnScreen.bottom - initialH - 4f * density),
-              (x + initialW / 2f).coerceIn(pl.boundsOnScreen.left + initialW + 4f * density, pl.boundsOnScreen.right - 4f * density),
-              (y + initialH / 2f).coerceIn(pl.boundsOnScreen.top + initialH + 4f * density, pl.boundsOnScreen.bottom - 4f * density)
-            )
-            val pW = pl.pageSize.width
-            val pH = pl.pageSize.height
-            val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-            val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
-            val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-            val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
-
-            activeCropSelection = createCropSelection(
-              pageIndex = pl.pageIndex,
-              sRect = sRect,
-              pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
-              color = selectedColor,
-              dimensionsText = "Page ${pl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)"
-            )
-            activePdfSelection = null
-            isScrollingDoc = false
-            parent?.requestDisallowInterceptTouchEvent(true)
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-            invalidate()
-            return
-          }
-        }
-      }
-
-      // 2. Structured Sections Document - ONLY select text when activeTool is explicitly "select"
-      if (activeDocument != null && activeTool == "select") {
-        for (pInfo in paragraphLayouts) {
-          val paraH = pInfo.layout.height.toFloat() + 16f
-          val pRect = RectF(pInfo.paperX, pInfo.topY, pInfo.paperX + pInfo.width + 56f, pInfo.topY + paraH)
-          if (pRect.contains(x, y)) {
-            updateStructuredSelection(pInfo, x, y)
-            isDraggingEndHandle = true
-            isDraggingStartHandle = false
-            isScrollingDoc = false
-            parent?.requestDisallowInterceptTouchEvent(true)
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-            invalidate()
-            return
-          }
-        }
-      }
-    }
-  }
-
-  private fun updateStructuredSelection(pInfo: ParagraphLayoutInfo, touchX: Float, touchY: Float) {
-    val relY = (touchY - pInfo.topY).coerceIn(0f, pInfo.layout.height.toFloat() - 1f)
-    val line = pInfo.layout.getLineForVertical(relY.toInt())
-    val relX = touchX - pInfo.paperX
-    val offset = pInfo.layout.getOffsetForHorizontal(line, relX).coerceIn(0, pInfo.text.length)
-
-    var start = offset
-    var end = offset
-    while (start > 0 && !pInfo.text[start - 1].isWhitespace()) {
-      start--
-    }
-    while (end < pInfo.text.length && !pInfo.text[end].isWhitespace()) {
-      end++
-    }
-    if (start >= end) {
-      start = 0
-      end = min(pInfo.text.length, 20)
-    }
-
-    updateStructuredSelectionByOffsets(pInfo, start, end)
-  }
-
-  private fun computeSelectionCalloutLayout(
-    rects: List<RectF>,
-    customColors: List<Int>? = null
-  ): CalloutLayoutResult {
-    val d = density
-    val colors = customColors ?: listOf(
-      Color.parseColor("#EF4444"), // Red
-      Color.parseColor("#22C55E"), // Green
-      Color.parseColor("#3B82F6"), // Blue
-      Color.parseColor("#F59E0B"), // Yellow
-      Color.parseColor("#EC4899")  // Pink
-    )
-
-    val maxAvailW = width - 24f * d
-    val cW = min(maxAvailW, 316f * d)
-    val cH = 66f * d
-
-    val minX = rects.minOfOrNull { it.left } ?: (width / 2f)
-    val maxX = rects.maxOfOrNull { it.right } ?: (width / 2f)
-    val firstR = rects.firstOrNull() ?: RectF(minX, 100f * d, maxX, 120f * d)
-    val lastR = rects.lastOrNull() ?: firstR
-
-    val idealLeft = (minX + maxX) / 2f - cW / 2f
-    val cLeft = idealLeft.coerceIn(12f * d, max(12f * d, width - cW - 12f * d))
-
-    val gapY = 12f * d
-    val minTop = subheaderH + 6f * d
-    val maxBottom = height * splitRatio - cH - 10f * d
-    val cTop = (if (firstR.top - cH - gapY > subheaderH) firstR.top - cH - gapY else lastR.bottom + gapY).coerceIn(minTop, max(minTop, maxBottom))
-
-    val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
-
-    // Row 1: Comment | AutoExcerpt | Bookmark | •••
-    val r1Top = cTop + 4f * d
-    val r1Bottom = cTop + 32f * d
-    val moreBtnW = 32f * d
-    val moreBtn = RectF(cLeft + cW - 12f * d - moreBtnW, r1Top, cLeft + cW - 10f * d, r1Bottom)
-
-    val r1Left = cLeft + 12f * d
-    val commentBtnW = 70f * d
-    val excerptBtnW = 92f * d
-    val bookmarkBtnW = 76f * d
-
-    val commentBtn = RectF(r1Left, r1Top, r1Left + commentBtnW, r1Bottom)
-    val excerptBtn = RectF(commentBtn.right + 4f * d, r1Top, commentBtn.right + 4f * d + excerptBtnW, r1Bottom)
-    val bookmarkBtn = RectF(excerptBtn.right + 4f * d, r1Top, min(moreBtn.left - 4f * d, excerptBtn.right + 4f * d + bookmarkBtnW), r1Bottom)
-
-    // Row 2: Color swatches (5) + Clear swatch + Rainbow swatch + Divider + Tags
-    val r2CenterY = cTop + 48f * d
-    val touchRad = 13f * d
-    val pitch = ((cW - 130f * d) / 7f).coerceIn(21f * d, 25f * d)
-    val swatchStartX = cLeft + 18f * d
-
-    val colorBtns = mutableListOf<Pair<RectF, Int>>()
-    for (i in colors.indices) {
-      val cx = swatchStartX + i * pitch
-      colorBtns.add(Pair(RectF(cx - touchRad, r2CenterY - touchRad, cx + touchRad, r2CenterY + touchRad), colors[i]))
-    }
-
-    val clearCx = swatchStartX + colors.size * pitch
-    val clearBtn = RectF(clearCx - touchRad, r2CenterY - touchRad, clearCx + touchRad, r2CenterY + touchRad)
-
-    val rainbowCx = clearCx + pitch
-    val rainbowBtn = RectF(rainbowCx - touchRad, r2CenterY - touchRad, rainbowCx + touchRad, r2CenterY + touchRad)
-
-    val tagsLeft = rainbowCx + touchRad + 8f * d
-    val tagsBtn = RectF(tagsLeft, cTop + 34f * d, cLeft + cW - 10f * d, cTop + 62f * d)
-
-    return CalloutLayoutResult(
-      calloutRect = calloutR,
-      closeBtn = RectF(),
-      excerptBtn = excerptBtn,
-      copyBtn = moreBtn,
-      highlightBtn = colorBtns.firstOrNull()?.first ?: RectF(),
-      addWordLeftBtn = RectF(),
-      addWordRightBtn = RectF(),
-      selectAllBtn = RectF(),
-      colorBtns = colorBtns,
-      moreBtn = moreBtn,
-      tagsBtn = tagsBtn,
-      subCardRect = RectF(),
-      mainCardRect = calloutR,
-      rainbowBtn = rainbowBtn,
-      commentBtn = commentBtn,
-      bookmarkBtn = bookmarkBtn,
-      clearBtn = clearBtn
-    )
-  }
-
-  private fun updateStructuredSelectionByOffsets(pInfo: ParagraphLayoutInfo, startOffset: Int, endOffset: Int) {
-    val clampedStart = startOffset.coerceIn(0, pInfo.text.length)
-    val clampedEnd = max(clampedStart + 1, endOffset).coerceIn(clampedStart, pInfo.text.length)
-    val rawText = pInfo.text.substring(clampedStart, clampedEnd)
-    val selText = if (rawText.trim().isNotEmpty()) rawText.trim() else rawText
-
-    val startLine = pInfo.layout.getLineForOffset(clampedStart)
-    val endLine = pInfo.layout.getLineForOffset(clampedEnd)
-
-    val rects = mutableListOf<RectF>()
-    for (l in startLine..endLine) {
-      val lStart = if (l == startLine) clampedStart else pInfo.layout.getLineStart(l)
-      val lEnd = if (l == endLine) clampedEnd else pInfo.layout.getLineEnd(l)
-      if (lStart < lEnd) {
-        val lX1 = pInfo.paperX + pInfo.layout.getPrimaryHorizontal(lStart)
-        val lX2 = pInfo.paperX + pInfo.layout.getPrimaryHorizontal(lEnd)
-        val lTop = pInfo.topY + pInfo.layout.getLineTop(l)
-        val lBottom = pInfo.topY + pInfo.layout.getLineBottom(l)
-        rects.add(RectF(min(lX1, lX2), lTop, max(lX1, lX2), lBottom))
-      }
-    }
-    if (rects.isEmpty()) {
-      val lTop = pInfo.topY + pInfo.layout.getLineTop(startLine)
-      val lBottom = pInfo.topY + pInfo.layout.getLineBottom(startLine)
-      rects.add(RectF(pInfo.paperX, lTop, pInfo.paperX + pInfo.width, lBottom))
-    }
-
-    val firstR = rects.first()
-    val lastR = rects.last()
-    val startHandle = RectF(firstR.left - 14f * density, firstR.bottom - 4f * density, firstR.left + 14f * density, firstR.bottom + 22f * density)
-    val endHandle = RectF(lastR.right - 14f * density, lastR.bottom - 4f * density, lastR.right + 14f * density, lastR.bottom + 22f * density)
-
-    val layout = computeSelectionCalloutLayout(rects)
-
-    activeStructuredPInfo = pInfo
-    activeStructuredStartOffset = clampedStart
-    activeStructuredEndOffset = clampedEnd
-
-    activePdfSelection = NativePdfSelection(
-      pageIndex = pInfo.pageNumber - 1,
-      text = selText,
-      highlightRects = rects,
-      pdfRects = emptyList(),
-      startHandle = startHandle,
-      endHandle = endHandle,
-      calloutRect = layout.calloutRect,
-      calloutExcerptBtn = layout.excerptBtn,
-      calloutCopyBtn = layout.copyBtn,
-      calloutHighlightBtn = layout.highlightBtn,
-      calloutCloseBtn = layout.closeBtn,
-      startWordIndex = 0,
-      endWordIndex = 0,
-      calloutAddWordLeftBtn = layout.addWordLeftBtn,
-      calloutAddWordRightBtn = layout.addWordRightBtn,
-      calloutSelectAllBtn = layout.selectAllBtn,
-      charCountText = "${selText.length} chars",
-      calloutColorBtns = layout.colorBtns,
-      calloutMoreBtn = layout.moreBtn,
-      calloutTagsBtn = layout.tagsBtn,
-      calloutSubCardRect = layout.subCardRect,
-      calloutMainCardRect = layout.mainCardRect,
-      calloutRainbowBtn = layout.rainbowBtn,
-      calloutCommentBtn = layout.commentBtn,
-      calloutBookmarkBtn = layout.bookmarkBtn,
-      calloutClearBtn = layout.clearBtn
-    )
-    invalidate()
-  }
+  // ── Crop Selection & Callout Layout Extracted to ThinkspaceViewSelection.kt ──
+  // ── InkLink Perimeter & Geometry Helpers Extracted to ThinkspaceViewInking.kt ──
+  // ── Long-Press & Structured Selection Extracted to ThinkspaceViewSelection.kt ──
 
   init {
     setWillNotDraw(false)
@@ -1883,143 +1154,7 @@ class ThinkspaceView : View {
     }
   }
 
-  private fun generateCropBitmap(pageIndex: Int, bounds: BoundingBox): Bitmap? {
-    if (activePdfDoc != null) {
-      var pageBmp = pageBitmaps.get(pageIndex)
-      if (pageBmp == null || pageBmp.isRecycled) {
-        val wrapper = activePdfDoc as? com.thinkspace.pdfengine.parser.PdfBoxDocumentWrapper
-        if (wrapper != null && wrapper.file.exists()) {
-          try {
-            val pfd = ParcelFileDescriptor.open(wrapper.file, ParcelFileDescriptor.MODE_READ_ONLY)
-            pfd.use { desc ->
-              val nativeRenderer = android.graphics.pdf.PdfRenderer(desc)
-              val page = nativeRenderer.openPage(pageIndex)
-              val scale = 2.0f
-              val targetW = max(1, (page.width * scale).toInt())
-              val targetH = max(1, (page.height * scale).toInt())
-              val bmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-              bmp.eraseColor(Color.WHITE)
-              page.render(bmp, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-              page.close()
-              nativeRenderer.close()
-              pageBmp = bmp
-              pageBitmaps.put(pageIndex, bmp)
-            }
-          } catch (e: Exception) {
-            e.printStackTrace()
-          }
-        }
-      }
-
-      // Secondary fallback if nativeRenderer failed or wasn't loaded:
-      if (pageBmp == null || pageBmp.isRecycled) {
-        try {
-          val engine = PdfEngineModule.getOrCreateEngine(context)
-          val rendered = kotlinx.coroutines.runBlocking(Dispatchers.IO) {
-            engine.renderPage(activePdfDoc!!, pageIndex, RenderOptions(scale = 2.0f))
-          }
-          pageBmp = rendered.bitmap
-          if (pageBmp != null) {
-            pageBitmaps.put(pageIndex, pageBmp)
-          }
-        } catch (e: Exception) {
-          e.printStackTrace()
-        }
-      }
-
-      if (pageBmp != null && !pageBmp!!.isRecycled) {
-        val bmp = pageBmp!!
-        val pl = pageLayouts.find { it.pageIndex == pageIndex }
-        val pW = pl?.pageSize?.width ?: (bmp.width / 2.0f)
-        val pH = pl?.pageSize?.height ?: (bmp.height / 2.0f)
-
-        val normL = minOf(bounds.left, bounds.right).coerceIn(0f, pW)
-        val normR = maxOf(bounds.left, bounds.right).coerceIn(0f, pW)
-        val normT = minOf(bounds.top, bounds.bottom).coerceIn(0f, pH)
-        val normB = maxOf(bounds.top, bounds.bottom).coerceIn(0f, pH)
-
-        var srcL = ((normL / pW) * bmp.width).toInt().coerceIn(0, bmp.width - 1)
-        var srcT = ((normT / pH) * bmp.height).toInt().coerceIn(0, bmp.height - 1)
-        var srcR = ((normR / pW) * bmp.width).toInt().coerceIn(0, bmp.width)
-        var srcB = ((normB / pH) * bmp.height).toInt().coerceIn(0, bmp.height)
-
-        var w = srcR - srcL
-        var h = srcB - srcT
-
-        if (w < 20) {
-          srcL = maxOf(0, srcL - 40)
-          srcR = minOf(bmp.width, srcL + 120)
-          w = srcR - srcL
-        }
-        if (h < 20) {
-          srcT = maxOf(0, srcT - 40)
-          srcB = minOf(bmp.height, srcT + 120)
-          h = srcB - srcT
-        }
-
-        if (srcL + w > bmp.width) w = bmp.width - srcL
-        if (srcT + h > bmp.height) h = bmp.height - srcT
-
-        if (w > 0 && h > 0) {
-          return try {
-            Bitmap.createBitmap(bmp, srcL, srcT, w, h)
-          } catch (e: Exception) {
-            null
-          }
-        }
-      }
-    }
-
-    if (activeDocument != null) {
-      val cropBmp = Bitmap.createBitmap(400, 260, Bitmap.Config.ARGB_8888)
-      val cropCanvas = Canvas(cropBmp)
-      cropCanvas.drawColor(Color.WHITE)
-      val borderP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#E2E8F0")
-        strokeWidth = 2f
-        style = Paint.Style.STROKE
-      }
-      cropCanvas.drawRect(0f, 0f, 400f, 260f, borderP)
-
-      val headerP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#0F172A")
-        textSize = 18f
-        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-      }
-      val bodyP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#334155")
-        textSize = 14f
-      }
-
-      val sec = activeDocument?.sections?.getOrNull(pageIndex) ?: activeDocument?.sections?.firstOrNull()
-      val title = sec?.heading ?: activeDocument?.title ?: "Document"
-      cropCanvas.drawText("📖 $title", 20f, 36f, headerP)
-
-      val lines = sec?.paragraphs ?: listOf("Historical excerpt and excerpted diagram.")
-      var y = 70f
-      for (line in lines) {
-        val sub = if (line.length > 45) line.substring(0, 42) + "..." else line
-        cropCanvas.drawText(sub, 20f, y, bodyP)
-        y += 26f
-        if (y > 230f) break
-      }
-      return cropBmp
-    }
-
-    return null
-  }
-
-  private fun saveCropToFile(bmp: Bitmap): String {
-    val file = File(context.cacheDir, "crop_${System.currentTimeMillis()}_${(1000..9999).random()}.png")
-    try {
-      FileOutputStream(file).use { out ->
-        bmp.compress(Bitmap.CompressFormat.PNG, 90, out)
-      }
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-    return file.absolutePath
-  }
+  // ── Crop Bitmap Generation & Saving Extracted to ThinkspaceViewSelection.kt ──
 
   override fun onDetachedFromWindow() {
     super.onDetachedFromWindow()
@@ -2028,449 +1163,11 @@ class ThinkspaceView : View {
   }
 
   // ---------------------------------------------------------------------------
-  // Document Configuration
+  // Document Configuration, Multi-Document Engine & Workspace Data Loaders
+  // Extracted to ThinkspaceViewDocument.kt as extension functions
   // ---------------------------------------------------------------------------
 
-  fun setDocumentFromJson(json: String?) {
-    if (json.isNullOrEmpty()) {
-      activePdfDoc = null
-      activeDocument = null
-      invalidate()
-      return
-    }
-    try {
-      val obj = JSONObject(json)
-      val id = obj.optString("id", obj.optString("documentId", "default-doc")).ifEmpty { "default-doc" }
-      activeDocumentId = id
-      val uri = obj.optString("uri", "")
-      val title = obj.optString("title", "Document")
-      val pageCount = obj.optInt("pageCount", 1)
-
-      // 1. Try to find an already opened PDF in PdfEngineModule
-      val existingPdf = PdfEngineModule.openDocuments[id]
-      if (existingPdf != null) {
-        activePdfDoc = existingPdf
-        activeDocument = null
-        pageBitmaps.evictAll()
-        pageWordsCache.clear()
-        docScrollY = 0f
-        invalidate()
-        return
-      }
-
-      // 2. If URI provided, open via DefaultPdfDocumentEngine asynchronously
-      if (uri.isNotEmpty()) {
-        renderScope.launch(Dispatchers.IO) {
-          try {
-            val engine = PdfEngineModule.getOrCreateEngine(context)
-            val source = PdfEngineModule.resolveSource(context, uri)
-            val doc = engine.open(source)
-            PdfEngineModule.openDocuments[id] = doc
-            withContext(Dispatchers.Main) {
-              activePdfDoc = doc
-              activeDocument = null
-              pageBitmaps.evictAll()
-              pageWordsCache.clear()
-              docScrollY = 0f
-              invalidate()
-            }
-          } catch (e: Exception) {
-            e.printStackTrace()
-          }
-        }
-      }
-
-      // 3. Fallback to structured document sections (for demo/preloaded text)
-      val secList = mutableListOf<NativeSection>()
-      val secArr = obj.optJSONArray("sections")
-      if (secArr != null) {
-        for (i in 0 until secArr.length()) {
-          val sObj = secArr.getJSONObject(i)
-          val sId = sObj.optString("id", "sec-$i")
-          val pageNumber = sObj.optInt("pageNumber", i + 1)
-          val heading = sObj.optString("heading", "Chapter $i")
-          val pArr = sObj.optJSONArray("paragraphs")
-          val pList = mutableListOf<String>()
-          if (pArr != null) {
-            for (j in 0 until pArr.length()) pList.add(pArr.getString(j))
-          }
-          secList.add(NativeSection(sId, pageNumber, heading, pList, null, null))
-        }
-      }
-      activeDocument = NativeDoc(id, title, pageCount, secList)
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-    invalidate()
-  }
-
-  // ── Multi-Document Engine Methods ────────────────────────────────────────────
-
-  /**
-   * Called when the React Native layer passes a new workspace documents list.
-   * Registers all document entries in workspaceDocumentEntries.
-   * Does NOT immediately open all PDFs — only the active one is opened eagerly;
-   * others are opened lazily when switchToDocument() is called.
-   *
-   * @param json JSON array of WorkspaceDocumentEntry objects.
-   */
-  fun setWorkspaceDocumentsFromJson(json: String?) {
-    if (json.isNullOrEmpty()) return
-    try {
-      val arr = JSONArray(json)
-      val incoming = mutableListOf<WorkspaceDocumentEntry>()
-      val palette = docColorPalette
-
-      for (i in 0 until arr.length()) {
-        val obj = arr.getJSONObject(i)
-        val id = obj.optString("id", "doc-$i")
-        val title = obj.optString("title", "Document")
-        val pageCount = obj.optInt("pageCount", 1)
-        val uri = obj.optString("uri", "")
-        // Assign a color from palette if not provided, cycling by index
-        val existingAccent = workspaceDocumentEntries.find { it.id == id }?.colorAccent
-        val colorHex = obj.optString("colorAccent", "").takeIf { it.isNotEmpty() }
-          ?: existingAccent
-          ?: "#%06X".format(palette[i % palette.size] and 0xFFFFFF)
-        val folderId = obj.optString("folderId", "").takeIf { it.isNotEmpty() }
-        incoming.add(WorkspaceDocumentEntry(id, title, pageCount, uri, colorHex, folderId))
-      }
-
-      // Preserve ordering: update existing entries, add new ones
-      workspaceDocumentEntries.clear()
-      workspaceDocumentEntries.addAll(incoming)
-
-      // For each entry, check if already in PdfEngineModule registry
-      for (entry in incoming) {
-        val existing = PdfEngineModule.openDocuments[entry.id]
-        if (existing != null) {
-          documentRegistry[entry.id] = existing
-        }
-      }
-
-      // If no active doc is set yet, activate the first one
-      if (activeDocumentId.isEmpty() && incoming.isNotEmpty()) {
-        switchToDocument(incoming[0].id)
-      }
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-  }
-
-  /**
-   * Called when the React Native layer passes workspace folders for hierarchical organization.
-   *
-   * @param json JSON array of WorkspaceFolder objects.
-   */
-  fun setWorkspaceFoldersFromJson(json: String?) {
-    if (json.isNullOrEmpty()) return
-    try {
-      val arr = JSONArray(json)
-      workspaceFolders.clear()
-      for (i in 0 until arr.length()) {
-        val obj = arr.getJSONObject(i)
-        val id = obj.optString("id", "folder-$i")
-        val name = obj.optString("name", "New Folder")
-        val parentId = obj.optString("parentId", "").takeIf { it.isNotEmpty() }
-        val createdAt = obj.optLong("createdAt", System.currentTimeMillis())
-        workspaceFolders.add(WorkspaceFolder(id, name, parentId, createdAt))
-      }
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-  }
-
-  /**
-   * Switch the active PDF/document viewport to the given document ID.
-   * The workspace canvas (cards, strokes, ink, notes) is NOT affected.
-   * Only the document pane changes.
-   *
-   * If the document is already opened in the registry, switching is instant.
-   * If not yet opened, opens it asynchronously from the stored URI.
-   *
-   * @param docId The document ID to activate.
-   */
-  fun switchToDocument(docId: String) {
-    if (docId == activeDocumentId && activePdfDoc != null) return // Already active
-
-    activeDocumentId = docId
-
-    // Check registry first (instant switch)
-    val cached = documentRegistry[docId] ?: PdfEngineModule.openDocuments[docId]
-    if (cached != null) {
-      documentRegistry[docId] = cached
-      activePdfDoc = cached
-      activeDocument = null
-      // Clear per-page caches for the previous document's bitmaps
-      pageBitmaps.evictAll()
-      pageWordsCache.clear()
-      compressionEngine.resetAllToNormal(animate = false) {}
-      docScrollY = 0f
-      val targetPage = pendingScrollToPage
-      val targetRects = pendingPulseRects
-      pendingScrollToPage = null
-      pendingPulseRects = null
-      if (targetPage != null) {
-        post { scrollToDocumentPage(targetPage, targetRects ?: emptyList()) }
-      }
-      invalidate()
-      return
-    }
-
-    // Not yet open — find the entry and open from URI asynchronously
-    val entry = workspaceDocumentEntries.find { it.id == docId }
-    if (entry != null && entry.uri.isNotEmpty()) {
-      renderScope.launch(Dispatchers.IO) {
-        try {
-          val engine = PdfEngineModule.getOrCreateEngine(context)
-          val source = PdfEngineModule.resolveSource(context, entry.uri)
-          val doc = engine.open(source)
-          PdfEngineModule.openDocuments[docId] = doc
-          documentRegistry[docId] = doc
-          withContext(Dispatchers.Main) {
-            if (activeDocumentId == docId) {
-              activePdfDoc = doc
-              activeDocument = null
-              pageBitmaps.evictAll()
-              pageWordsCache.clear()
-              compressionEngine.resetAllToNormal(animate = false) {}
-              docScrollY = 0f
-              val targetPage = pendingScrollToPage
-              val targetRects = pendingPulseRects
-              pendingScrollToPage = null
-              pendingPulseRects = null
-              if (targetPage != null) {
-                post { scrollToDocumentPage(targetPage, targetRects ?: emptyList()) }
-              }
-              invalidate()
-            }
-          }
-        } catch (e: Exception) {
-          e.printStackTrace()
-          withContext(Dispatchers.Main) {
-            hudToast.show("Document could not be opened")
-          }
-        }
-      }
-    }
-  }
-
-  /**
-   * Dispatch a React Native event requesting the RN layer to switch to a specific
-   * document and page. Called when the user taps the source badge on a card.
-   *
-   * @param cardId   The card whose source badge was tapped.
-   * @param docId    The source document ID.
-   * @param pageNum  The source page number (1-based).
-   */
-  private fun dispatchRequestDocumentSwitchEvent(cardId: String, docId: String, pageNum: Int) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val dispatcher: EventDispatcher? = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("documentId", docId)
-      putInt("sourcePageNumber", pageNum)
-      putString("cardId", cardId)
-    }
-    dispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topRequestDocumentSwitch", data))
-  }
-
-  // ── End Multi-Document Engine Methods ────────────────────────────────────────
-
-  fun setAnnotationsFromJson(json: String?) {
-    if (json.isNullOrEmpty()) {
-      return
-    }
-    try {
-      val arr = JSONArray(json)
-      if (arr.length() == 0 && annotations.isNotEmpty()) {
-        return
-      }
-      val incoming = mutableListOf<NativeAnnotation>()
-      for (i in 0 until arr.length()) {
-        val obj = arr.getJSONObject(i)
-        val id = obj.optString("id", "ann-$i")
-        val sectionId = obj.optString("sectionId", "")
-        val pIdx = obj.optInt("paragraphIndex", 0)
-        val pageNumber = obj.optInt("pageNumber", 1)
-        val colorHex = obj.optString("color", "#00ADB5")
-        val color = try { Color.parseColor(colorHex) } catch (e: Exception) { Color.YELLOW }
-        val text = obj.optString("text", "")
-        val rects = mutableListOf<RectF>()
-        val rectsArr = obj.optJSONArray("rects")
-        if (rectsArr != null) {
-          for (rIdx in 0 until rectsArr.length()) {
-            val ro = rectsArr.getJSONObject(rIdx)
-            rects.add(RectF(
-              ro.optDouble("left", 0.0).toFloat(),
-              ro.optDouble("top", 0.0).toFloat(),
-              ro.optDouble("right", 0.0).toFloat(),
-              ro.optDouble("bottom", 0.0).toFloat()
-            ))
-          }
-        }
-        incoming.add(NativeAnnotation(id, sectionId, pIdx, pageNumber, color, text, rects))
-      }
-      val incomingIds = incoming.map { it.id }.toSet()
-      val localOnly = annotations.filter { !incomingIds.contains(it.id) }
-      annotations.clear()
-      annotations.addAll(incoming)
-      annotations.addAll(localOnly)
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-    invalidate()
-  }
-
-  fun setStrokesFromJson(json: String?) {
-    strokes.clear()
-    if (json.isNullOrEmpty()) {
-      invalidate()
-      return
-    }
-    try {
-      val arr = JSONArray(json)
-      for (i in 0 until arr.length()) {
-        val obj = arr.getJSONObject(i)
-        val id = obj.optString("id", "stroke-$i")
-        val colorHex = obj.optString("color", "#00ADB5")
-        val color = try { Color.parseColor(colorHex) } catch (e: Exception) { Color.WHITE }
-        val strokeWidth = obj.optDouble("strokeWidth", 3.5).toFloat()
-        val isHighlighter = obj.optBoolean("isHighlighter", false)
-
-        val ptsArr = obj.optJSONArray("points")
-        val pts = mutableListOf<NativePoint>()
-        if (ptsArr != null) {
-          for (j in 0 until ptsArr.length()) {
-            val ptObj = ptsArr.getJSONObject(j)
-            pts.add(NativePoint(ptObj.getDouble("x").toFloat(), ptObj.getDouble("y").toFloat()))
-          }
-        }
-        strokes.add(NativeStroke(id, pts, color, strokeWidth, isHighlighter))
-      }
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-    invalidate()
-  }
-
-  fun setCardsFromJson(json: String?) {
-    if (json.isNullOrEmpty()) {
-      return
-    }
-    try {
-      val arr = JSONArray(json)
-      if (arr.length() == 0 && cards.isNotEmpty()) {
-        return
-      }
-
-      val updatedList = mutableListOf<NativeCard>()
-      for (i in 0 until arr.length()) {
-        val obj = arr.getJSONObject(i)
-        val id = obj.optString("id", "card-$i")
-        var existing = cards.find { it.id == id }
-        val isImage = obj.optBoolean("isImage", existing?.isImage ?: false)
-        val pageNumber = obj.optInt("pageNumber", existing?.pageNumber ?: 1)
-        if (existing == null && isImage) {
-          existing = cards.find { it.isImage && it.pageNumber == pageNumber && !it.imageUrl.isNullOrEmpty() }
-        }
-        val text = obj.optString("text", existing?.text ?: "")
-        if (existing == null && text.isNotEmpty()) {
-          existing = cards.find { it.pageNumber == pageNumber && it.text == text }
-        }
-
-        val x = if (obj.has("x") && obj.getDouble("x") != 0.0) obj.getDouble("x").toFloat() else (existing?.x ?: 60f)
-        val y = if (obj.has("y") && obj.getDouble("y") != 0.0) obj.getDouble("y").toFloat() else (existing?.y ?: 60f)
-        val width = obj.optDouble("width", (existing?.width ?: 220f).toDouble()).toFloat()
-        val colorHex = obj.optString("color", "#00ADB5")
-        val color = try { Color.parseColor(colorHex) } catch (e: Exception) { existing?.color ?: Color.WHITE }
-        val comment = if (obj.has("comment") && !obj.isNull("comment")) obj.getString("comment") else existing?.comment
-        val clusterId = if (obj.has("clusterId") && !obj.isNull("clusterId")) obj.getString("clusterId") else existing?.clusterId
-        val stackCount = obj.optInt("stackCount", existing?.stackCount ?: 1)
-        val imageUrl = if (obj.has("imageUrl") && !obj.isNull("imageUrl") && obj.getString("imageUrl").isNotEmpty()) {
-          obj.getString("imageUrl")
-        } else {
-          existing?.imageUrl
-        }
-        val isTable = obj.optBoolean("isTable", existing?.isTable ?: false)
-
-        // Cache association for image card bitmap
-        if (isImage) {
-          val cachedBmp = (if (!imageUrl.isNullOrEmpty()) cardBitmapCache.get(imageUrl) else null)
-            ?: (if (existing != null) cardBitmapCache.get(existing.id) else null)
-            ?: cardBitmapCache.get("page_${pageNumber}_image")
-          if (cachedBmp != null) {
-            cardBitmapCache.put(id, cachedBmp)
-            if (!imageUrl.isNullOrEmpty()) {
-              cardBitmapCache.put(imageUrl, cachedBmp)
-            }
-          }
-        }
-
-        val parsedSourceRects = mutableListOf<RectF>()
-        if (obj.has("sourceRects") && !obj.isNull("sourceRects")) {
-          val sArr = obj.getJSONArray("sourceRects")
-          for (rIdx in 0 until sArr.length()) {
-            val rObj = sArr.getJSONObject(rIdx)
-            val l = rObj.optDouble("left", 0.0).toFloat()
-            val t = rObj.optDouble("top", 0.0).toFloat()
-            val r = rObj.optDouble("right", 0.0).toFloat()
-            val b = rObj.optDouble("bottom", 0.0).toFloat()
-            parsedSourceRects.add(RectF(l, t, r, b))
-          }
-        } else if (existing != null && existing.sourceRects.isNotEmpty()) {
-          parsedSourceRects.addAll(existing.sourceRects)
-        }
-
-        // Multi-document: parse documentId, falling back to existing or activeDocumentId
-        val cardDocumentId = obj.optString(
-          "documentId",
-          existing?.documentId?.takeIf { it.isNotEmpty() } ?: activeDocumentId
-        )
-
-        updatedList.add(
-          NativeCard(
-            id, x, y, width, text, color, pageNumber, comment, clusterId, stackCount,
-            isImage, imageUrl, isTable, existing?.tableRows,
-            existing?.groupedItems,
-            parsedSourceRects,
-            documentId = cardDocumentId
-          )
-        )
-      }
-
-      cards.clear()
-      cards.addAll(updatedList)
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-    invalidate()
-  }
-
-  fun setLinksFromJson(json: String?) {
-    if (json.isNullOrEmpty()) {
-      return
-    }
-    try {
-      val arr = JSONArray(json)
-      if (arr.length() == 0 && links.isNotEmpty()) {
-        return
-      }
-      links.clear()
-      for (i in 0 until arr.length()) {
-        val obj = arr.getJSONObject(i)
-        val id = obj.optString("id", "link-$i")
-        val sourceExcerptId = obj.optString("sourceExcerptId", "")
-        val colorHex = obj.optString("color", "#00ADB5")
-        val color = try { Color.parseColor(colorHex) } catch (e: Exception) { Color.CYAN }
-        links.add(NativeLink(id, sourceExcerptId, color))
-      }
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-    invalidate()
-  }
-
-  private fun triggerShockwave(wx: Float, wy: Float, color: Int) {
+  internal fun triggerShockwave(wx: Float, wy: Float, color: Int) {
     rippleOriginX = wx
     rippleOriginY = wy
     rippleColor = color
@@ -2488,187 +1185,17 @@ class ThinkspaceView : View {
     }
   }
 
-  private fun canvasScreenToWorld(sx: Float, sy: Float, canvasTopY: Float): Pair<Float, Float> {
+  internal fun canvasScreenToWorld(sx: Float, sy: Float, canvasTopY: Float): Pair<Float, Float> {
     return Pair(camera.screenToWorldX(sx), camera.screenToWorldY(sy, canvasTopY))
   }
 
-  private fun canvasWorldToScreen(wx: Float, wy: Float, canvasTopY: Float): Pair<Float, Float> {
+  internal fun canvasWorldToScreen(wx: Float, wy: Float, canvasTopY: Float): Pair<Float, Float> {
     return Pair(camera.worldToScreenX(wx), camera.worldToScreenY(wy, canvasTopY))
   }
 
-  /**
-   * Draws the sleek, minimalist LiquidText-style selection callout bar matching competitor screenshot:
-   * - Rounded slate-gray pill background (#5A6B82) with subtle crisp border (#72849B) and layered drop shadows
-   * - Row 1: "Comment" | "AutoExcerpt" | "Bookmark" | "•••" (cyan dots)
-   * - Row 2: 5 bright color dots | Clear dot (white with slash) | Rainbow spectrum dot | "|" | "Tags"
-   */
-  private fun drawCompetitorSelectionCallout(
-    canvas: Canvas,
-    calloutR: RectF,
-    commentBtn: RectF,
-    excerptBtn: RectF,
-    bookmarkBtn: RectF,
-    moreBtn: RectF,
-    colorBtns: List<Pair<RectF, Int>>,
-    clearBtn: RectF,
-    rainbowBtn: RectF,
-    tagsBtn: RectF,
-    activeColor: Int
-  ) {
-    val d = density
-
-    // 1. Layered soft drop shadows
-    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    shadowPaint.color = Color.argb(35, 0, 0, 0)
-    canvas.drawRoundRect(calloutR.left - 1f * d, calloutR.top + 2f * d, calloutR.right + 1f * d, calloutR.bottom + 8f * d, 16f * d, 16f * d, shadowPaint)
-    shadowPaint.color = Color.argb(45, 0, 0, 0)
-    canvas.drawRoundRect(calloutR.left, calloutR.top + 1f * d, calloutR.right, calloutR.bottom + 4f * d, 14f * d, 14f * d, shadowPaint)
-
-    // 2. Slate-gray Card Background & Crisp Border
-    val cardBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#5A6B82")
-      style = Paint.Style.FILL
-    }
-    val cardBrdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#72849B")
-      strokeWidth = 1f * d
-      style = Paint.Style.STROKE
-    }
-    canvas.drawRoundRect(calloutR, 14f * d, 14f * d, cardBgPaint)
-    canvas.drawRoundRect(calloutR, 14f * d, 14f * d, cardBrdPaint)
-
-    // 3. Row 1: Actions (Comment, AutoExcerpt, Bookmark, •••)
-    val actionTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      textSize = 12.5f * d
-      typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-      textAlign = Paint.Align.CENTER
-    }
-    val actFm = actionTextPaint.fontMetrics
-    val actShift = (actFm.descent + actFm.ascent) / 2f
-
-    // "Comment"
-    canvas.drawText("Comment", commentBtn.centerX(), commentBtn.centerY() - actShift, actionTextPaint)
-
-    // "AutoExcerpt"
-    canvas.drawText("AutoExcerpt", excerptBtn.centerX(), excerptBtn.centerY() - actShift, actionTextPaint)
-
-    // "Bookmark"
-    canvas.drawText("Bookmark", bookmarkBtn.centerX(), bookmarkBtn.centerY() - actShift, actionTextPaint)
-
-    // "•••" (More) in light cyan / blue dots matching reference screenshot
-    val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#38BDF8")
-      style = Paint.Style.FILL
-    }
-    val moreCx = moreBtn.centerX()
-    val moreCy = moreBtn.centerY()
-    val dotR = 2.2f * d
-    val dotSpacing = 5f * d
-    canvas.drawCircle(moreCx - dotSpacing, moreCy, dotR, dotPaint)
-    canvas.drawCircle(moreCx, moreCy, dotR, dotPaint)
-    canvas.drawCircle(moreCx + dotSpacing, moreCy, dotR, dotPaint)
-
-    // 4. Row 2: Color Swatches
-    val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    val swatchRad = 9.5f * d
-
-    for (cb in colorBtns) {
-      val cx = cb.first.centerX()
-      val cy = cb.first.centerY()
-      val col = cb.second
-      val isSelected = (col == activeColor)
-
-      // Active selection ring
-      if (isSelected) {
-        val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.WHITE
-          strokeWidth = 2f * d
-          style = Paint.Style.STROKE
-        }
-        canvas.drawCircle(cx, cy, swatchRad + 3f * d, haloPaint)
-      }
-
-      circlePaint.color = col
-      canvas.drawCircle(cx, cy, swatchRad, circlePaint)
-    }
-
-    // 5. Clear / Remove Highlight Swatch (White circle with diagonal slash)
-    val clearCx = clearBtn.centerX()
-    val clearCy = clearBtn.centerY()
-    circlePaint.color = Color.WHITE
-    canvas.drawCircle(clearCx, clearCy, swatchRad, circlePaint)
-    val slashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#64748B")
-      strokeWidth = 1.8f * d
-      strokeCap = Paint.Cap.ROUND
-    }
-    val slashLen = 5.5f * d
-    canvas.drawLine(clearCx - slashLen, clearCy + slashLen, clearCx + slashLen, clearCy - slashLen, slashPaint)
-
-    // 6. Rainbow Spectrum Swatch
-    val rainCx = rainbowBtn.centerX()
-    val rainCy = rainbowBtn.centerY()
-    val rainbowShader = android.graphics.SweepGradient(
-      rainCx, rainCy,
-      intArrayOf(
-        Color.parseColor("#EF4444"),
-        Color.parseColor("#F59E0B"),
-        Color.parseColor("#10B981"),
-        Color.parseColor("#3B82F6"),
-        Color.parseColor("#8B5CF6"),
-        Color.parseColor("#EC4899"),
-        Color.parseColor("#EF4444")
-      ),
-      null
-    )
-    val rainPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      shader = rainbowShader
-      style = Paint.Style.FILL
-    }
-    canvas.drawCircle(rainCx, rainCy, swatchRad, rainPaint)
-
-    // 7. Vertical Divider Line `|` before Tags
-    val divX = (rainCx + swatchRad + tagsBtn.left) / 2f
-    val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#78889B")
-      strokeWidth = 1f * d
-    }
-    canvas.drawLine(divX, clearCy - 9f * d, divX, clearCy + 9f * d, divPaint)
-
-    // 8. Tags Button: 🏷️ Tags
-    val tagPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      strokeWidth = 1.3f * d
-      strokeCap = Paint.Cap.ROUND
-      strokeJoin = Paint.Join.ROUND
-      style = Paint.Style.STROKE
-    }
-    val tagCy = clearCy
-    val tagLeft = tagsBtn.left + 2f * d
-    val tagPath = Path().apply {
-      moveTo(tagLeft + 2.5f * d, tagCy - 4.5f * d)
-      lineTo(tagLeft + 7.5f * d, tagCy - 4.5f * d)
-      lineTo(tagLeft + 11.5f * d, tagCy)
-      lineTo(tagLeft + 5.5f * d, tagCy + 5.5f * d)
-      lineTo(tagLeft + 2.5f * d, tagCy + 1.5f * d)
-      close()
-    }
-    canvas.drawPath(tagPath, tagPaint)
-    val tagHole = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      style = Paint.Style.FILL
-    }
-    canvas.drawCircle(tagLeft + 4.8f * d, tagCy - 1.8f * d, 0.9f * d, tagHole)
-
-    val tagsTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      textSize = 12f * d
-      typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-    }
-    val tagFm = tagsTextPaint.fontMetrics
-    canvas.drawText("Tags", tagLeft + 15f * d, tagCy - (tagFm.descent + tagFm.ascent) / 2f, tagsTextPaint)
-  }
+  // ── Competitor Selection Callout ─────────────────────────────────────────────
+  // Extracted to ThinkspaceViewToolbar.kt as extension functions
+  // ─────────────────────────────────────────────────────────────────────────────
 
   // ---------------------------------------------------------------------------
   // Master OnDraw (100% Native Kotlin Workspace)
@@ -3451,32 +1978,38 @@ class ThinkspaceView : View {
         }
         canvas.drawRect(cropSel.screenRect, borderPaint)
 
-        // Diagonal Corner Circular Handles matching Screenshot (Top-Left & Bottom-Right)
-        val handleR = 7.5f * density
+        // All 4 Corner Circular Handles matching LiquidText
+        val handleR = 8.5f * density
         val handleFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
           color = cropColor
           style = Paint.Style.FILL
         }
         val handleBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
           color = Color.WHITE
-          strokeWidth = 1.8f * density
+          strokeWidth = 2.2f * density
           style = Paint.Style.STROKE
         }
 
         // Top-Left Circle Handle
-        val tlX = cropSel.screenRect.left
-        val tlY = cropSel.screenRect.top
-        canvas.drawCircle(tlX, tlY, handleR, handleFill)
-        canvas.drawCircle(tlX, tlY, handleR, handleBorder)
+        canvas.drawCircle(cropSel.screenRect.left, cropSel.screenRect.top, handleR, handleFill)
+        canvas.drawCircle(cropSel.screenRect.left, cropSel.screenRect.top, handleR, handleBorder)
+
+        // Top-Right Circle Handle
+        canvas.drawCircle(cropSel.screenRect.right, cropSel.screenRect.top, handleR, handleFill)
+        canvas.drawCircle(cropSel.screenRect.right, cropSel.screenRect.top, handleR, handleBorder)
+
+        // Bottom-Left Circle Handle
+        canvas.drawCircle(cropSel.screenRect.left, cropSel.screenRect.bottom, handleR, handleFill)
+        canvas.drawCircle(cropSel.screenRect.left, cropSel.screenRect.bottom, handleR, handleBorder)
 
         // Bottom-Right Circle Handle
-        val brX = cropSel.screenRect.right
-        val brY = cropSel.screenRect.bottom
-        canvas.drawCircle(brX, brY, handleR, handleFill)
-        canvas.drawCircle(brX, brY, handleR, handleBorder)
+        canvas.drawCircle(cropSel.screenRect.right, cropSel.screenRect.bottom, handleR, handleFill)
+        canvas.drawCircle(cropSel.screenRect.right, cropSel.screenRect.bottom, handleR, handleBorder)
 
         // Sleek LiquidText-style Floating Crop-Selection Toolbar matching Competitor Screenshot
-        if (!isDraggingCrop && !isDraggingCropTopLeftHandle && !isDraggingCropBottomRightHandle) {
+        val isAdjustingHandles = isDraggingCropTopLeftHandle || isDraggingCropTopRightHandle ||
+          isDraggingCropBottomLeftHandle || isDraggingCropBottomRightHandle || isMovingCropSelection
+        if (!isDraggingCrop && !isAdjustingHandles) {
           drawCompetitorSelectionCallout(
             canvas = canvas,
             calloutR = cropSel.calloutRect,
@@ -4685,845 +3218,9 @@ class ThinkspaceView : View {
       }
     }
 
-  // ── Vector Icon Drawing Helpers for Apple Selection Toolbar ────────────────
-  private fun drawCommentIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
-    val r = size * 0.46f
-    val rect = RectF(cx - r, cy - r * 0.8f, cx + r, cy + r * 0.65f)
-    val corner = 4.5f * density
-    val path = Path().apply {
-      addRoundRect(rect, corner, corner, Path.Direction.CW)
-      moveTo(cx - r * 0.4f, cy + r * 0.65f)
-      lineTo(cx - r * 0.75f, cy + r * 1.15f)
-      lineTo(cx - r * 0.1f, cy + r * 0.65f)
-      close()
-    }
-    val fillPaint = Paint(paint).apply { style = Paint.Style.FILL; color = Color.WHITE }
-    canvas.drawPath(path, fillPaint)
-  }
-
-  private fun drawEditIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
-    val s = size * 0.44f
-    val path = Path().apply {
-      moveTo(cx + s * 0.65f, cy - s * 0.85f)
-      lineTo(cx + s * 0.88f, cy - s * 0.62f)
-      lineTo(cx - s * 0.35f, cy + s * 0.62f)
-      lineTo(cx - s * 0.88f, cy + s * 0.88f)
-      lineTo(cx - s * 0.62f, cy + s * 0.35f)
-      close()
-    }
-    val fillPaint = Paint(paint).apply { style = Paint.Style.FILL; color = Color.WHITE }
-    canvas.drawPath(path, fillPaint)
-  }
-
-  private fun drawCopyIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint, bgCol: Int) {
-    val s = size * 0.42f
-    val corner = 2.5f * density
-    val strokeP = Paint(paint).apply {
-      style = Paint.Style.STROKE
-      strokeWidth = 1.8f * density
-      color = Color.WHITE
-    }
-    // Back doc
-    canvas.drawRoundRect(RectF(cx - s * 0.35f, cy - s * 0.85f, cx + s * 0.85f, cy + s * 0.35f), corner, corner, strokeP)
-    // Front doc background erase
-    val eraseP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgCol; style = Paint.Style.FILL }
-    val frontRect = RectF(cx - s * 0.85f, cy - s * 0.35f, cx + s * 0.35f, cy + s * 0.85f)
-    canvas.drawRoundRect(frontRect, corner, corner, eraseP)
-    // Front doc stroke
-    canvas.drawRoundRect(frontRect, corner, corner, strokeP)
-  }
-
-  private fun drawDeleteIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
-    val s = size * 0.44f
-    val strokeP = Paint(paint).apply {
-      style = Paint.Style.STROKE
-      strokeWidth = 1.8f * density
-      strokeCap = Paint.Cap.ROUND
-      color = Color.parseColor("#FF6B6B")
-    }
-    // Lid
-    canvas.drawLine(cx - s * 0.85f, cy - s * 0.5f, cx + s * 0.85f, cy - s * 0.5f, strokeP)
-    // Handle
-    canvas.drawRoundRect(RectF(cx - s * 0.35f, cy - s * 0.85f, cx + s * 0.35f, cy - s * 0.5f), 1.8f * density, 1.8f * density, strokeP)
-    // Can body
-    val body = Path().apply {
-      moveTo(cx - s * 0.65f, cy - s * 0.5f)
-      lineTo(cx - s * 0.5f, cy + s * 0.85f)
-      lineTo(cx + s * 0.5f, cy + s * 0.85f)
-      lineTo(cx + s * 0.65f, cy - s * 0.5f)
-    }
-    canvas.drawPath(body, strokeP)
-    // Vertical slats
-    canvas.drawLine(cx - s * 0.22f, cy - s * 0.2f, cx - s * 0.18f, cy + s * 0.6f, strokeP)
-    canvas.drawLine(cx + s * 0.22f, cy - s * 0.2f, cx + s * 0.18f, cy + s * 0.6f, strokeP)
-  }
-
-  private fun drawTagsIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
-    val s = size * 0.44f
-    val strokeP = Paint(paint).apply {
-      style = Paint.Style.STROKE
-      strokeWidth = 1.8f * density
-      strokeCap = Paint.Cap.ROUND
-      strokeJoin = Paint.Join.ROUND
-      color = Color.WHITE
-    }
-    val tagPath = Path().apply {
-      moveTo(cx - s * 0.85f, cy)
-      lineTo(cx - s * 0.22f, cy - s * 0.68f)
-      lineTo(cx + s * 0.8f, cy + s * 0.32f)
-      lineTo(cx + s * 0.18f, cy + s * 1.0f)
-      close()
-    }
-    canvas.drawPath(tagPath, strokeP)
-    // Eyelet hole
-    val fillP = Paint(paint).apply { style = Paint.Style.FILL; color = Color.WHITE }
-    canvas.drawCircle(cx - s * 0.38f, cy, 1.8f * density, fillP)
-  }
-
-  private fun drawBackMenuIcon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
-    val fillPaint = Paint(paint).apply {
-      style = Paint.Style.FILL
-      color = Color.WHITE
-    }
-    val w = size
-    val h = size * 0.85f
-    val path = Path().apply {
-      // Arrowhead tip pointing left
-      moveTo(cx - 0.48f * w, cy)
-      // Top barb
-      lineTo(cx - 0.08f * w, cy - 0.49f * h)
-      // Top notch at junction with arrow body
-      lineTo(cx - 0.08f * w, cy - 0.23f * h)
-      // Upper curve arching smoothly right and downwards
-      cubicTo(
-        cx + 0.20f * w, cy - 0.23f * h,
-        cx + 0.48f * w, cy - 0.05f * h,
-        cx + 0.48f * w, cy + 0.26f * h
-      )
-      // Rounded bottom tail tip
-      cubicTo(
-        cx + 0.48f * w, cy + 0.40f * h,
-        cx + 0.45f * w, cy + 0.49f * h,
-        cx + 0.42f * w, cy + 0.49f * h
-      )
-      // Inner curve returning back towards arrowhead junction
-      cubicTo(
-        cx + 0.40f * w, cy + 0.28f * h,
-        cx + 0.20f * w, cy + 0.19f * h,
-        cx - 0.08f * w, cy + 0.19f * h
-      )
-      // Bottom barb
-      lineTo(cx - 0.08f * w, cy + 0.49f * h)
-      close()
-    }
-    canvas.drawPath(path, fillPaint)
-  }
-
-  private fun drawCardActionBar(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float, canvasTopY: Float) {
-    val isDocked = isKeyboardActive()
-    val kbH = getKeyboardHeight()
-    val isEditing = editingCardId != null
-
-    // Safe view bounds ensuring toolbar is never clipped by edges, split line, or bottom navigation
-    val safeTop = canvasTopY + 12f * density
-    val safeBottom = viewH - 72f * density
-    val safeLeft = 12f * density
-    val safeRight = viewW - 12f * density
-
-    // Height 58dp for generous, comfortable touch targets and easily readable labels
-    val abH = 58f * density
-    val maxAvailableW = safeRight - safeLeft
-    val isTablet = viewW >= 600f * density
-    val abW = if (isTablet) min(maxAvailableW, 460f * density) else min(maxAvailableW, 400f * density)
-
-    val (scLeft, scTop) = canvasWorldToScreen(card.x, card.y, canvasTopY)
-    val (scRight, scBottom) = canvasWorldToScreen(card.x + card.width, card.y + card.getHeight(), canvasTopY)
-    val cardCenterX = (scLeft + scRight) / 2f
-
-    // Horizontally centered on card, clamped to screen margins
-    val abLeft = (cardCenterX - abW / 2f).coerceIn(safeLeft, safeRight - abW)
-
-    // Intelligently position above or below card, or dock near workspace top if card fills viewport
-    val abTop = if (isDocked) {
-      (viewH - kbH - abH - 10f * density).coerceIn(safeTop, safeBottom - abH)
-    } else {
-      val margin = 12f * density
-      val spaceAbove = scTop - safeTop
-      val spaceBelow = safeBottom - scBottom
-
-      when {
-        spaceAbove >= abH + margin -> scTop - abH - margin
-        spaceBelow >= abH + margin -> scBottom + margin
-        else -> {
-          if (scTop - safeTop >= 20f * density) {
-            (scTop - abH - 6f * density).coerceIn(safeTop, safeBottom - abH)
-          } else {
-            safeTop + 8f * density
-          }
-        }
-      }
-    }.coerceIn(safeTop, safeBottom - abH)
-
-    cardActionBarRect.set(abLeft, abTop, abLeft + abW, abTop + abH)
-    val cornerRadius = abH / 2f
-
-    // Theme detection: Dark Slate Glass vs Frosted Light Slate
-    val isNightMode = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
-    val barBgColor = if (isNightMode) Color.parseColor("#1E2534") else Color.parseColor("#5A6B82")
-    val barBorderColor = if (isNightMode) Color.parseColor("#475569") else Color.parseColor("#72849B")
-
-    // Ambient Apple Drop Shadow (Dual layer)
-    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    shadowPaint.color = Color.argb(45, 0, 0, 0)
-    canvas.drawRoundRect(RectF(abLeft, abTop + 4f * density, abLeft + abW, abTop + abH + 4f * density), cornerRadius, cornerRadius, shadowPaint)
-    shadowPaint.color = Color.argb(35, 0, 0, 0)
-    canvas.drawRoundRect(RectF(abLeft, abTop + 1f * density, abLeft + abW, abTop + abH + 1f * density), cornerRadius, cornerRadius, shadowPaint)
-
-    // Capsule Background & Border
-    val abBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = barBgColor
-      style = Paint.Style.FILL
-    }
-    val abBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = barBorderColor
-      strokeWidth = 1.3f * density
-      style = Paint.Style.STROKE
-    }
-    canvas.drawRoundRect(cardActionBarRect, cornerRadius, cornerRadius, abBgPaint)
-    canvas.drawRoundRect(cardActionBarRect, cornerRadius, cornerRadius, abBorderPaint)
-
-    val labelPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      textSize = 12.5f * density
-      isFakeBoldText = true
-      textAlign = Paint.Align.CENTER
-    }
-
-    val deleteLabelPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#FF6B6B")
-      textSize = 12.5f * density
-      isFakeBoldText = true
-      textAlign = Paint.Align.CENTER
-    }
-
-    val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-    }
-    val deleteIconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#FF6B6B")
-    }
-
-    val innerLeft = abLeft + 8f * density
-    val innerRight = abLeft + abW - 8f * density
-    val innerW = innerRight - innerLeft
-
-    val wColor = 34f * density
-    val wDiv = 8f * density
-    val wTypo = 40f * density
-
-    val iconCenterY = abTop + 20f * density
-    val iconSize = 20f * density
-    val labelBaselineY = abTop + 47.5f * density
-
-    var curX = innerLeft
-
-    if (isEditing) {
-      // Edit Mode: Comment, Copy, Delete, Tags, Color, Tt
-      val remainingW = innerW - wColor - wDiv - wTypo
-      val btnW = remainingW / 4f
-
-      // 1. Comment
-      btnCardCommentRect.set(curX, abTop, curX + btnW, abTop + abH)
-      drawCommentIcon(canvas, btnCardCommentRect.centerX(), iconCenterY, iconSize, iconPaint)
-      canvas.drawText("Comment", btnCardCommentRect.centerX(), labelBaselineY, labelPaint)
-      curX += btnW
-
-      // 2. Copy
-      btnCardCopyRect.set(curX, abTop, curX + btnW, abTop + abH)
-      drawCopyIcon(canvas, btnCardCopyRect.centerX(), iconCenterY, iconSize, iconPaint, barBgColor)
-      canvas.drawText("Copy", btnCardCopyRect.centerX(), labelBaselineY, labelPaint)
-      curX += btnW
-
-      // 3. Delete
-      btnCardDeleteRect.set(curX, abTop, curX + btnW, abTop + abH)
-      drawDeleteIcon(canvas, btnCardDeleteRect.centerX(), iconCenterY, iconSize, deleteIconPaint)
-      canvas.drawText("Delete", btnCardDeleteRect.centerX(), labelBaselineY, deleteLabelPaint)
-      curX += btnW
-
-      // 4. Tags
-      btnCardTagsRect.set(curX, abTop, curX + btnW, abTop + abH)
-      drawTagsIcon(canvas, btnCardTagsRect.centerX(), iconCenterY, iconSize, iconPaint)
-      canvas.drawText("Tags", btnCardTagsRect.centerX(), labelBaselineY, labelPaint)
-      curX += btnW
-
-      // 5. Color Swatch
-      btnCardColorWheelRect.set(curX, abTop, curX + wColor, abTop + abH)
-      drawRainbowSwatch(canvas, btnCardColorWheelRect, card.color)
-      curX += wColor
-
-      // 6. Hairline Divider |
-      val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = barBorderColor
-        strokeWidth = 1.2f * density
-      }
-      val divX = curX + wDiv / 2f
-      canvas.drawLine(divX, abTop + 14f * density, divX, abTop + abH - 14f * density, divPaint)
-      curX += wDiv
-
-      // 7. Typography Button [Tt]
-      btnCardTypographyRect.set(curX, abTop, innerRight, abTop + abH)
-      drawTypographyGlyph(canvas, btnCardTypographyRect, density, isTypographyBarVisible)
-
-      btnCardEditRect.setEmpty()
-    } else {
-      // Normal Card Selection Bar: Comment, Edit, Copy, Delete, Tags, Color, Tt
-      val remainingW = innerW - wColor - wDiv - wTypo
-      val btnW = remainingW / 5f
-
-      // 1. Comment
-      btnCardCommentRect.set(curX, abTop, curX + btnW, abTop + abH)
-      drawCommentIcon(canvas, btnCardCommentRect.centerX(), iconCenterY, iconSize, iconPaint)
-      canvas.drawText("Comment", btnCardCommentRect.centerX(), labelBaselineY, labelPaint)
-      curX += btnW
-
-      // 2. Edit
-      btnCardEditRect.set(curX, abTop, curX + btnW, abTop + abH)
-      drawEditIcon(canvas, btnCardEditRect.centerX(), iconCenterY, iconSize, iconPaint)
-      canvas.drawText("Edit", btnCardEditRect.centerX(), labelBaselineY, labelPaint)
-      curX += btnW
-
-      // 3. Copy
-      btnCardCopyRect.set(curX, abTop, curX + btnW, abTop + abH)
-      drawCopyIcon(canvas, btnCardCopyRect.centerX(), iconCenterY, iconSize, iconPaint, barBgColor)
-      canvas.drawText("Copy", btnCardCopyRect.centerX(), labelBaselineY, labelPaint)
-      curX += btnW
-
-      // 4. Delete
-      btnCardDeleteRect.set(curX, abTop, curX + btnW, abTop + abH)
-      drawDeleteIcon(canvas, btnCardDeleteRect.centerX(), iconCenterY, iconSize, deleteIconPaint)
-      canvas.drawText("Delete", btnCardDeleteRect.centerX(), labelBaselineY, deleteLabelPaint)
-      curX += btnW
-
-      // 5. Tags
-      btnCardTagsRect.set(curX, abTop, curX + btnW, abTop + abH)
-      drawTagsIcon(canvas, btnCardTagsRect.centerX(), iconCenterY, iconSize, iconPaint)
-      canvas.drawText("Tags", btnCardTagsRect.centerX(), labelBaselineY, labelPaint)
-      curX += btnW
-
-      // 6. Color Swatch
-      btnCardColorWheelRect.set(curX, abTop, curX + wColor, abTop + abH)
-      drawRainbowSwatch(canvas, btnCardColorWheelRect, card.color)
-      curX += wColor
-
-      // 7. Hairline Divider |
-      val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = barBorderColor
-        strokeWidth = 1.2f * density
-      }
-      val divX = curX + wDiv / 2f
-      canvas.drawLine(divX, abTop + 14f * density, divX, abTop + abH - 14f * density, divPaint)
-      curX += wDiv
-
-      // 8. Typography Button [Tt]
-      btnCardTypographyRect.set(curX, abTop, innerRight, abTop + abH)
-      drawTypographyGlyph(canvas, btnCardTypographyRect, density, isTypographyBarVisible)
-    }
-  }
-
-  private fun drawRainbowSwatch(canvas: Canvas, rect: RectF, cardColor: Int) {
-    val cwCenter = rect.centerX()
-    val cwY = rect.centerY()
-    val cwRad = 13.5f * density
-
-    val rainbowShader = android.graphics.SweepGradient(
-      cwCenter, cwY,
-      intArrayOf(
-        Color.parseColor("#EF4444"),
-        Color.parseColor("#F59E0B"),
-        Color.parseColor("#10B981"),
-        Color.parseColor("#3B82F6"),
-        Color.parseColor("#8B5CF6"),
-        Color.parseColor("#EC4899"),
-        Color.parseColor("#EF4444")
-      ),
-      null
-    )
-    val rainbowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      shader = rainbowShader
-      style = Paint.Style.FILL
-    }
-    canvas.drawCircle(cwCenter, cwY, cwRad, rainbowPaint)
-
-    val cwRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#A0FFFFFF")
-      strokeWidth = 1.4f * density
-      style = Paint.Style.STROKE
-    }
-    canvas.drawCircle(cwCenter, cwY, cwRad, cwRing)
-
-    val innerDot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = cardColor
-      style = Paint.Style.FILL
-    }
-    canvas.drawCircle(cwCenter, cwY, 4.2f * density, innerDot)
-  }
-
-  private fun drawTypographyGlyph(canvas: Canvas, rect: RectF, density: Float, isActive: Boolean) {
-    if (isActive) {
-      val activePill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#2563EB")
-        style = Paint.Style.FILL
-      }
-      canvas.drawRoundRect(
-        RectF(rect.centerX() - 17f * density, rect.centerY() - 17f * density, rect.centerX() + 17f * density, rect.centerY() + 17f * density),
-        9f * density, 9f * density, activePill
-      )
-    }
-
-    val tBigPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      textSize = 18f * density
-      typeface = Typeface.create("serif", Typeface.BOLD)
-    }
-    val tSmallPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      textSize = 13f * density
-      typeface = Typeface.create("serif", Typeface.BOLD)
-    }
-
-    val wBigT = tBigPaint.measureText("T")
-    val wSmallT = tSmallPaint.measureText("T")
-    val totalW = wBigT + wSmallT + 1.2f * density
-    val startX = rect.centerX() - totalW / 2f
-
-    val fmBig = tBigPaint.fontMetrics
-    val bigY = rect.centerY() - (fmBig.ascent + fmBig.descent) / 2f
-    val fmSmall = tSmallPaint.fontMetrics
-    val smallY = rect.centerY() - (fmSmall.ascent + fmSmall.descent) / 2f + 2.8f * density
-
-    canvas.drawText("T", startX, bigY, tBigPaint)
-    canvas.drawText("T", startX + wBigT + 1.2f * density, smallY, tSmallPaint)
-  }
-
-  private fun drawTypographyBar(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float, canvasTopY: Float) {
-    val isDocked = isKeyboardActive()
-    val kbH = getKeyboardHeight()
-
-    val safeTop = canvasTopY + 12f * density
-    val safeBottom = viewH - 72f * density
-    val safeLeft = 12f * density
-    val safeRight = viewW - 12f * density
-
-    val typoH = 58f * density
-    val maxAvailableW = safeRight - safeLeft
-    val isTablet = viewW >= 600f * density
-    val typoW = if (isTablet) min(maxAvailableW, 460f * density) else min(maxAvailableW, 400f * density)
-
-    val (scLeft, scTop) = canvasWorldToScreen(card.x, card.y, canvasTopY)
-    val (scRight, scBottom) = canvasWorldToScreen(card.x + card.width, card.y + card.getHeight(), canvasTopY)
-    val cardCenterX = (scLeft + scRight) / 2f
-
-    val typoLeft = (cardCenterX - typoW / 2f).coerceIn(safeLeft, safeRight - typoW)
-    val typoTop = if (isDocked) {
-      (viewH - kbH - typoH - 10f * density).coerceIn(safeTop, safeBottom - typoH)
-    } else {
-      val margin = 12f * density
-      val spaceAbove = scTop - safeTop
-      val spaceBelow = safeBottom - scBottom
-
-      when {
-        spaceAbove >= typoH + margin -> scTop - typoH - margin
-        spaceBelow >= typoH + margin -> scBottom + margin
-        else -> {
-          if (scTop - safeTop >= 20f * density) {
-            (scTop - typoH - 6f * density).coerceIn(safeTop, safeBottom - typoH)
-          } else {
-            safeTop + 8f * density
-          }
-        }
-      }
-    }.coerceIn(safeTop, safeBottom - typoH)
-
-    typographyBarRect.set(typoLeft, typoTop, typoLeft + typoW, typoTop + typoH)
-    val cornerRadius = typoH / 2f
-
-    val isNightMode = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
-    val barBgColor = if (isNightMode) Color.parseColor("#1E2534") else Color.parseColor("#5A6B82")
-    val barBorderColor = if (isNightMode) Color.parseColor("#475569") else Color.parseColor("#72849B")
-
-    // Ambient Apple Drop Shadow (Dual layer)
-    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    shadowPaint.color = Color.argb(45, 0, 0, 0)
-    canvas.drawRoundRect(RectF(typoLeft, typoTop + 4f * density, typoLeft + typoW, typoTop + typoH + 4f * density), cornerRadius, cornerRadius, shadowPaint)
-    shadowPaint.color = Color.argb(35, 0, 0, 0)
-    canvas.drawRoundRect(RectF(typoLeft, typoTop + 1f * density, typoLeft + typoW, typoTop + typoH + 1f * density), cornerRadius, cornerRadius, shadowPaint)
-
-    // Capsule Background & Border
-    val barBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = barBgColor
-      style = Paint.Style.FILL
-    }
-    val barBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = barBorderColor
-      strokeWidth = 1.3f * density
-      style = Paint.Style.STROKE
-    }
-    canvas.drawRoundRect(typographyBarRect, cornerRadius, cornerRadius, barBg)
-    canvas.drawRoundRect(typographyBarRect, cornerRadius, cornerRadius, barBorder)
-
-    val itemPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      textSize = 15f * density
-      isFakeBoldText = true
-      typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-    }
-    val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = barBorderColor
-      strokeWidth = 1.2f * density
-    }
-    val activePillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#2563EB")
-      style = Paint.Style.FILL
-    }
-
-    val innerLeft = typoLeft + 10f * density
-    val innerRight = typoLeft + typoW - 10f * density
-    val btnTop = typoTop
-    val btnBottom = typoTop + typoH
-
-    val wUndo = 38f * density
-    val wDiv1 = 6f * density
-    val wStyle = 62f * density
-    val wDiv2 = 6f * density
-    val wBold = 34f * density
-    val wItalic = 34f * density
-    val wUnderline = 34f * density
-    val wStrike = 34f * density
-    val wDiv3 = 6f * density
-    val wSize = 32f * density
-    val wColor = 34f * density
-    val wMore = 34f * density
-    val fixedTotal = wUndo + wDiv1 + wStyle + wDiv2 + wBold + wItalic + wUnderline + wStrike + wDiv3 + wSize + wColor + wMore
-    val gap = ((innerRight - innerLeft - fixedTotal) / 11f).coerceAtLeast(1.5f * density)
-
-    val fm = itemPaint.fontMetrics
-    val centerY = typographyBarRect.centerY() - (fm.ascent + fm.descent) / 2f
-    var curX = innerLeft
-
-    // 1. Back to main card selection menu [ ↩ ]
-    btnTypoBackRect.set(curX, btnTop, curX + wUndo, btnBottom)
-    drawBackMenuIcon(canvas, btnTypoBackRect.centerX(), typographyBarRect.centerY(), 22f * density, itemPaint)
-    curX += wUndo + gap
-
-    // Divider 1
-    val d1X = curX + wDiv1 / 2f
-    canvas.drawLine(d1X, typoTop + 14f * density, d1X, typoTop + typoH - 14f * density, divPaint)
-    curX += wDiv1 + gap
-
-    // 2. Style
-    btnTypoStyleRect.set(curX, btnTop, curX + wStyle, btnBottom)
-    if (isStyleSheetOpen) {
-      val stylePill = RectF(btnTypoStyleRect.centerX() - 29f * density, btnTypoStyleRect.centerY() - 16f * density, btnTypoStyleRect.centerX() + 29f * density, btnTypoStyleRect.centerY() + 16f * density)
-      canvas.drawRoundRect(stylePill, 8f * density, 8f * density, activePillPaint)
-    }
-    val styleLabel = if (card.textStyleName != "Default") card.textStyleName else "Style"
-    val stylePaint = TextPaint(itemPaint).apply { textSize = 15f * density }
-    canvas.drawText(styleLabel, btnTypoStyleRect.centerX() - stylePaint.measureText(styleLabel) / 2f, centerY, stylePaint)
-    curX += wStyle + gap
-
-    // Divider 2
-    val d2X = curX + wDiv2 / 2f
-    canvas.drawLine(d2X, typoTop + 14f * density, d2X, typoTop + typoH - 14f * density, divPaint)
-    curX += wDiv2 + gap
-
-    // 3. Bold [ B ]
-    btnTypoBoldRect.set(curX, btnTop, curX + wBold, btnBottom)
-    if (card.isBold) {
-      val bPill = RectF(btnTypoBoldRect.centerX() - 15f * density, btnTypoBoldRect.centerY() - 15f * density, btnTypoBoldRect.centerX() + 15f * density, btnTypoBoldRect.centerY() + 15f * density)
-      canvas.drawRoundRect(bPill, 8f * density, 8f * density, activePillPaint)
-    }
-    val boldPaint = TextPaint(itemPaint).apply { isFakeBoldText = true; textSize = 18f * density }
-    canvas.drawText("B", btnTypoBoldRect.centerX() - boldPaint.measureText("B") / 2f, centerY, boldPaint)
-    curX += wBold + gap
-
-    // 4. Italic [ I ]
-    btnTypoItalicRect.set(curX, btnTop, curX + wItalic, btnBottom)
-    if (card.isItalic) {
-      val iPill = RectF(btnTypoItalicRect.centerX() - 15f * density, btnTypoItalicRect.centerY() - 15f * density, btnTypoItalicRect.centerX() + 15f * density, btnTypoItalicRect.centerY() + 15f * density)
-      canvas.drawRoundRect(iPill, 8f * density, 8f * density, activePillPaint)
-    }
-    val italicPaint = TextPaint(itemPaint).apply { textSkewX = -0.22f; textSize = 18f * density }
-    canvas.drawText("I", btnTypoItalicRect.centerX() - italicPaint.measureText("I") / 2f, centerY, italicPaint)
-    curX += wItalic + gap
-
-    // 5. Underline [ U ]
-    btnTypoUnderlineRect.set(curX, btnTop, curX + wUnderline, btnBottom)
-    if (card.isUnderline) {
-      val uPill = RectF(btnTypoUnderlineRect.centerX() - 15f * density, btnTypoUnderlineRect.centerY() - 15f * density, btnTypoUnderlineRect.centerX() + 15f * density, btnTypoUnderlineRect.centerY() + 15f * density)
-      canvas.drawRoundRect(uPill, 8f * density, 8f * density, activePillPaint)
-    }
-    val ulPaint = TextPaint(itemPaint).apply { isUnderlineText = true; textSize = 18f * density }
-    canvas.drawText("U", btnTypoUnderlineRect.centerX() - ulPaint.measureText("U") / 2f, centerY, ulPaint)
-    curX += wUnderline + gap
-
-    // 6. Strikethrough [ S ]
-    btnTypoStrikeRect.set(curX, btnTop, curX + wStrike, btnBottom)
-    if (card.isStrikethrough) {
-      val sPill = RectF(btnTypoStrikeRect.centerX() - 15f * density, btnTypoStrikeRect.centerY() - 15f * density, btnTypoStrikeRect.centerX() + 15f * density, btnTypoStrikeRect.centerY() + 15f * density)
-      canvas.drawRoundRect(sPill, 8f * density, 8f * density, activePillPaint)
-    }
-    val strikePaint = TextPaint(itemPaint).apply { isStrikeThruText = true; textSize = 18f * density }
-    canvas.drawText("S", btnTypoStrikeRect.centerX() - strikePaint.measureText("S") / 2f, centerY, strikePaint)
-    curX += wStrike + gap
-
-    // Divider 3
-    val d3X = curX + wDiv3 / 2f
-    canvas.drawLine(d3X, typoTop + 14f * density, d3X, typoTop + typoH - 14f * density, divPaint)
-    curX += wDiv3 + gap
-
-    // 7. Size indicator '0'
-    btnTypoFontSizeRect.set(curX, btnTop, curX + wSize, btnBottom)
-    val sizeText = "0"
-    val sizePaint = TextPaint(itemPaint).apply { textSize = 16f * density }
-    canvas.drawText(sizeText, btnTypoFontSizeRect.centerX() - sizePaint.measureText(sizeText) / 2f, centerY, sizePaint)
-    curX += wSize + gap
-
-    // 8. Text Color [ A_ ]
-    btnTypoTextColorRect.set(curX, btnTop, curX + wColor, btnBottom)
-    if (isTypoTextColorPaletteOpen) {
-      val aPill = RectF(btnTypoTextColorRect.centerX() - 15f * density, btnTypoTextColorRect.centerY() - 15f * density, btnTypoTextColorRect.centerX() + 15f * density, btnTypoTextColorRect.centerY() + 15f * density)
-      canvas.drawRoundRect(aPill, 8f * density, 8f * density, activePillPaint)
-    }
-    val aPaint = TextPaint(itemPaint).apply { textSize = 17.5f * density; isFakeBoldText = true }
-    val fmA = aPaint.fontMetrics
-    val aY = typographyBarRect.centerY() - (fmA.ascent + fmA.descent) / 2f - 2f * density
-    canvas.drawText("A", btnTypoTextColorRect.centerX() - aPaint.measureText("A") / 2f, aY, aPaint)
-    val colorBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = card.textColor
-      strokeWidth = 3.5f * density
-      strokeCap = Paint.Cap.ROUND
-    }
-    val aBarY = typographyBarRect.centerY() + 9f * density
-    canvas.drawLine(btnTypoTextColorRect.centerX() - 8f * density, aBarY, btnTypoTextColorRect.centerX() + 8f * density, aBarY, colorBarPaint)
-    curX += wColor + gap
-
-    // 9. More Options ···
-    btnTypoMoreRect.set(curX, btnTop, innerRight, btnBottom)
-    val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      style = Paint.Style.FILL
-    }
-    val dotR = 2.8f * density
-    val dotSpacing = 6.5f * density
-    val moreCx = btnTypoMoreRect.centerX()
-    val moreCy = typographyBarRect.centerY()
-    canvas.drawCircle(moreCx - dotSpacing, moreCy, dotR, dotPaint)
-    canvas.drawCircle(moreCx, moreCy, dotR, dotPaint)
-    canvas.drawCircle(moreCx + dotSpacing, moreCy, dotR, dotPaint)
-  }
-
-  private fun drawStyleSheetPopover(canvas: Canvas, card: NativeCard, viewW: Float, viewH: Float) {
-    val popW = min(viewW - 24f * density, 300f * density)
-    val rowH = 44f * density
-    val options = listOf(
-      Pair("Title", 20f),
-      Pair("Subtitle", 16f),
-      Pair("Heading 1", 18f),
-      Pair("Heading 2", 16f),
-      Pair("Heading 3", 14f),
-      Pair("Default Style for New Excerpts", 13f)
-    )
-    val popH = options.size * rowH
-
-    val popLeft = (typographyBarRect.left + 10f * density).coerceIn(10f * density, viewW - popW - 10f * density)
-    val isDocked = isKeyboardActive()
-    val popTop = if (isDocked) {
-      typographyBarRect.top - popH - 8f * density
-    } else {
-      (typographyBarRect.bottom + 6f * density).coerceAtMost(viewH - popH - 12f * density)
-    }
-    styleSheetRect.set(popLeft, popTop, popLeft + popW, popTop + popH)
-
-    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#4D000000")
-      style = Paint.Style.FILL
-    }
-    canvas.drawRoundRect(
-      RectF(popLeft, popTop + 4f * density, popLeft + popW, popTop + popH + 4f * density),
-      14f * density, 14f * density, shadowPaint
-    )
-
-    val cardBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#1C2331")
-      style = Paint.Style.FILL
-    }
-    val cardBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#384457")
-      strokeWidth = 1.2f * density
-      style = Paint.Style.STROKE
-    }
-    canvas.drawRoundRect(styleSheetRect, 14f * density, 14f * density, cardBg)
-    canvas.drawRoundRect(styleSheetRect, 14f * density, 14f * density, cardBorder)
-
-    styleOptionRects.clear()
-    val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#2D3748")
-      strokeWidth = 1f * density
-    }
-    val dotsPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#64748B")
-      textSize = 14f * density
-      isFakeBoldText = true
-    }
-
-    for (i in options.indices) {
-      val name = options[i].first
-      val rTop = popTop + i * rowH
-      val rowRect = RectF(popLeft, rTop, popLeft + popW, rTop + rowH)
-      val menuRect = RectF(rowRect.right - 28f * density, rTop, rowRect.right, rTop + rowH)
-      styleOptionRects.add(Triple(rowRect, name, menuRect))
-
-      val isSelected = card.textStyleName == name || (name == "Default Style for New Excerpts" && card.textStyleName == "Default")
-      if (isSelected) {
-        val selRowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#2563EB")
-          alpha = 75
-          style = Paint.Style.FILL
-        }
-        canvas.drawRoundRect(rowRect, 8f * density, 8f * density, selRowPaint)
-      }
-
-      val rowTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = if (isSelected) Color.parseColor("#60A5FA") else Color.parseColor("#F1F5F9")
-        textSize = when (name) {
-          "Title" -> 18f * density
-          "Subtitle" -> 14.5f * density
-          "Heading 1" -> 16.5f * density
-          "Heading 2" -> 15f * density
-          "Heading 3" -> 13.5f * density
-          else -> 12.5f * density
-        }
-        isFakeBoldText = name != "Subtitle" && name != "Default Style for New Excerpts"
-        if (name == "Subtitle") textSkewX = -0.15f
-      }
-
-      canvas.drawText(name, rowRect.left + 14f * density, rowRect.centerY() + 4.5f * density, rowTextPaint)
-      canvas.drawText("⋮", rowRect.right - 18f * density, rowRect.centerY() + 4.5f * density, dotsPaint)
-
-      if (i < options.size - 1) {
-        canvas.drawLine(popLeft + 10f * density, rowRect.bottom, popLeft + popW - 10f * density, rowRect.bottom, divPaint)
-      }
-    }
-  }
-
-  private fun drawCardColorPalette(canvas: Canvas, card: NativeCard) {
-    val paletteColors = listOf(
-      Color.parseColor("#EAB308"), // Yellow
-      Color.parseColor("#3B82F6"), // Blue
-      Color.parseColor("#22C55E"), // Green
-      Color.parseColor("#8B5CF6"), // Purple
-      Color.parseColor("#EC4899"), // Pink
-      Color.parseColor("#EF4444")  // Red
-    )
-    val swatchSize = 24f * density
-    val spacing = 8f * density
-    val pW = paletteColors.size * (swatchSize + spacing) + 14f * density
-    val pH = swatchSize + 14f * density
-    val pLeft = (btnCardColorWheelRect.centerX() - pW / 2f).coerceIn(10f * density, width - pW - 10f * density)
-    val isDocked = isKeyboardActive()
-    val anchorTop = if (isTypographyBarVisible) typographyBarRect.top else cardActionBarRect.top
-    val anchorBottom = if (isTypographyBarVisible) typographyBarRect.bottom else cardActionBarRect.bottom
-    val pTop = if (isDocked) {
-      anchorTop - pH - 8f * density
-    } else {
-      (anchorBottom + 6f * density).coerceAtMost(height - pH - 12f * density)
-    }
-    val pRect = RectF(pLeft, pTop, pLeft + pW, pTop + pH)
-
-    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#4D000000")
-      style = Paint.Style.FILL
-    }
-    canvas.drawRoundRect(
-      RectF(pLeft, pTop + 3f * density, pLeft + pW, pTop + pH + 3f * density),
-      14f * density, 14f * density, shadowPaint
-    )
-
-    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#1C2331"); style = Paint.Style.FILL }
-    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#384457"); strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
-    canvas.drawRoundRect(pRect, 14f * density, 14f * density, bg)
-    canvas.drawRoundRect(pRect, 14f * density, 14f * density, border)
-
-    cardColorPaletteRects.clear()
-    for (i in paletteColors.indices) {
-      val col = paletteColors[i]
-      val sLeft = pLeft + 7f * density + i * (swatchSize + spacing)
-      val sTop = pTop + 7f * density
-      val sRect = RectF(sLeft, sTop, sLeft + swatchSize, sTop + swatchSize)
-      cardColorPaletteRects.add(Pair(sRect, col))
-
-      val sp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = col; style = Paint.Style.FILL }
-      canvas.drawCircle(sRect.centerX(), sRect.centerY(), swatchSize / 2f, sp)
-      if (col == card.color) {
-        val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2.5f * density; style = Paint.Style.STROKE }
-        canvas.drawCircle(sRect.centerX(), sRect.centerY(), swatchSize / 2f + 2f * density, ring)
-      }
-    }
-  }
-
-  private fun drawTypoTextColorPalette(canvas: Canvas, card: NativeCard) {
-    val textColors = listOf(
-      Color.parseColor("#FFFFFF"), // White
-      Color.parseColor("#94A3B8"), // Slate
-      Color.parseColor("#000000"), // Black
-      Color.parseColor("#2563EB"), // Blue
-      Color.parseColor("#16A34A"), // Green
-      Color.parseColor("#DC2626"), // Red
-      Color.parseColor("#D97706")  // Amber
-    )
-    val swatchSize = 24f * density
-    val spacing = 8f * density
-    val pW = textColors.size * (swatchSize + spacing) + 14f * density
-    val pH = swatchSize + 14f * density
-    val pLeft = (btnTypoTextColorRect.centerX() - pW / 2f).coerceIn(10f * density, width - pW - 10f * density)
-    val isDocked = isKeyboardActive()
-    val pTop = if (isDocked) {
-      typographyBarRect.top - pH - 8f * density
-    } else {
-      (typographyBarRect.bottom + 6f * density).coerceAtMost(height - pH - 12f * density)
-    }
-    val pRect = RectF(pLeft, pTop, pLeft + pW, pTop + pH)
-
-    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.parseColor("#4D000000")
-      style = Paint.Style.FILL
-    }
-    canvas.drawRoundRect(
-      RectF(pLeft, pTop + 3f * density, pLeft + pW, pTop + pH + 3f * density),
-      14f * density, 14f * density, shadowPaint
-    )
-
-    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#1C2331"); style = Paint.Style.FILL }
-    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#384457"); strokeWidth = 1.2f * density; style = Paint.Style.STROKE }
-    canvas.drawRoundRect(pRect, 14f * density, 14f * density, bg)
-    canvas.drawRoundRect(pRect, 14f * density, 14f * density, border)
-
-    typoTextColorPaletteRects.clear()
-    for (i in textColors.indices) {
-      val col = textColors[i]
-      val sLeft = pLeft + 7f * density + i * (swatchSize + spacing)
-      val sTop = pTop + 7f * density
-      val sRect = RectF(sLeft, sTop, sLeft + swatchSize, sTop + swatchSize)
-      typoTextColorPaletteRects.add(Pair(sRect, col))
-
-      val sp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = col; style = Paint.Style.FILL }
-      canvas.drawCircle(sRect.centerX(), sRect.centerY(), swatchSize / 2f, sp)
-      if (col == card.textColor) {
-        val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2.5f * density; style = Paint.Style.STROKE }
-        canvas.drawCircle(sRect.centerX(), sRect.centerY(), swatchSize / 2f + 2f * density, ring)
-      }
-    }
-  }
+  // ── Vector Icon Drawing Helpers & Card Toolbar / Typography Rendering ───────
+  // Extracted to ThinkspaceViewToolbar.kt as extension functions
+  // ─────────────────────────────────────────────────────────────────────────────
 
   // ---------------------------------------------------------------------------
   // Touch Handling & Unified Gesture Arbitration
@@ -5575,13 +3272,8 @@ class ThinkspaceView : View {
       gestureDetector.onTouchEvent(event)
     }
 
-    // Only pass events to scaleGestureDetector when NOT performing document compression
-    val shouldRouteToScaleDetector = if (event.pointerCount >= 2 && inDocZoneMulti) {
-      pdfScaleFactor > 1.25f && !compressionEngine.isManualPinching
-    } else {
-      !compressionEngine.isManualPinching
-    }
-    if (shouldRouteToScaleDetector) {
+    // Always route multi-touch events to scaleGestureDetector
+    if (event.pointerCount >= 2) {
       scaleGestureDetector.onTouchEvent(event)
     }
 
@@ -5591,52 +3283,21 @@ class ThinkspaceView : View {
         when (event.actionMasked) {
           MotionEvent.ACTION_POINTER_DOWN -> {
             if (event.pointerCount == 2) {
-              val y0 = event.getY(0)
-              val y1 = event.getY(1)
               val x0 = event.getX(0)
               val x1 = event.getX(1)
-              docPinchInitialSpan = hypot(x0 - x1, y0 - y1)
-              docPinchInitialDistY = abs(y0 - y1)
+              val y0 = event.getY(0)
+              val y1 = event.getY(1)
               lastTouchScreenX = (x0 + x1) / 2f
               lastTouchScreenY = (y0 + y1) / 2f
-
-              if (pdfScaleFactor <= 1.15f) {
-                val pageBounds = pageLayouts.map { it.boundsOnScreen }
-                val pageIndices = pageLayouts.map { it.pageIndex }
-                val annotatedPages = (annotations.map { it.pageNumber - 1 } + cards.map { it.pageNumber - 1 }).toSet()
-                compressionEngine.onManualPinchBegin(y0, y1, pageBounds, pageIndices, annotatedPages)
-              }
             }
           }
           MotionEvent.ACTION_MOVE -> {
-            val y0 = event.getY(0)
-            val y1 = event.getY(1)
-            val x0 = event.getX(0)
-            val x1 = event.getX(1)
-            val currentDistY = abs(y0 - y1)
-            val currentSpan = hypot(x0 - x1, y0 - y1)
-
-            if (!compressionEngine.isManualPinching && pdfScaleFactor <= 1.15f) {
-              val spanDelta = docPinchInitialSpan - currentSpan
-              val distYDelta = docPinchInitialDistY - currentDistY
-              val isPinchingInward = spanDelta > 8f * density || distYDelta > 8f * density
-              val isVerticalPinch = currentDistY > 24f * density
-
-              if (isPinchingInward || isVerticalPinch) {
-                val pageBounds = pageLayouts.map { it.boundsOnScreen }
-                val pageIndices = pageLayouts.map { it.pageIndex }
-                val annotatedPages = (annotations.map { it.pageNumber - 1 } + cards.map { it.pageNumber - 1 }).toSet()
-                compressionEngine.onManualPinchBegin(y0, y1, pageBounds, pageIndices, annotatedPages)
-              }
-            }
-
-            if (compressionEngine.isManualPinching) {
-              val handled = compressionEngine.onManualPinchMove(y0, y1)
-              if (handled) {
-                invalidate()
-                return true
-              }
-            } else {
+            // Two-finger panning when document is zoomed in
+            if (pdfScaleFactor > 1.02f && !compressionEngine.isManualPinching && event.pointerCount >= 2) {
+              val x0 = event.getX(0)
+              val x1 = event.getX(1)
+              val y0 = event.getY(0)
+              val y1 = event.getY(1)
               val midX = (x0 + x1) / 2f
               val midY = (y0 + y1) / 2f
               if (lastTouchScreenX != 0f && lastTouchScreenY != 0f) {
@@ -5657,8 +3318,6 @@ class ThinkspaceView : View {
                 onHaptic = { performHapticFeedback(HapticFeedbackConstants.CONFIRM) }
               )
             }
-            docPinchInitialSpan = 0f
-            docPinchInitialDistY = 0f
             lastTouchScreenX = 0f
             lastTouchScreenY = 0f
           }
@@ -6483,13 +4142,35 @@ class ThinkspaceView : View {
               return true
             }
 
-            // 2. Check Diagonal Corner Handles (Top-Left & Bottom-Right)
+            // 2. Check All 4 Diagonal Corner Handles (Top-Left, Top-Right, Bottom-Left, Bottom-Right)
             val distTL = hypot(sx - cropSel.screenRect.left, sy - cropSel.screenRect.top)
+            val distTR = hypot(sx - cropSel.screenRect.right, sy - cropSel.screenRect.top)
+            val distBL = hypot(sx - cropSel.screenRect.left, sy - cropSel.screenRect.bottom)
             val distBR = hypot(sx - cropSel.screenRect.right, sy - cropSel.screenRect.bottom)
-            val handleHitRadius = 34f * density
+            val handleHitRadius = 38f * density
 
             if (distTL <= handleHitRadius) {
               isDraggingCropTopLeftHandle = true
+              isDraggingCropTopRightHandle = false
+              isDraggingCropBottomLeftHandle = false
+              isDraggingCropBottomRightHandle = false
+              isScrollingDoc = false
+              parent?.requestDisallowInterceptTouchEvent(true)
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              return true
+            } else if (distTR <= handleHitRadius) {
+              isDraggingCropTopRightHandle = true
+              isDraggingCropTopLeftHandle = false
+              isDraggingCropBottomLeftHandle = false
+              isDraggingCropBottomRightHandle = false
+              isScrollingDoc = false
+              parent?.requestDisallowInterceptTouchEvent(true)
+              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              return true
+            } else if (distBL <= handleHitRadius) {
+              isDraggingCropBottomLeftHandle = true
+              isDraggingCropTopLeftHandle = false
+              isDraggingCropTopRightHandle = false
               isDraggingCropBottomRightHandle = false
               isScrollingDoc = false
               parent?.requestDisallowInterceptTouchEvent(true)
@@ -6498,6 +4179,8 @@ class ThinkspaceView : View {
             } else if (distBR <= handleHitRadius) {
               isDraggingCropBottomRightHandle = true
               isDraggingCropTopLeftHandle = false
+              isDraggingCropTopRightHandle = false
+              isDraggingCropBottomLeftHandle = false
               isScrollingDoc = false
               parent?.requestDisallowInterceptTouchEvent(true)
               performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -6561,16 +4244,17 @@ class ThinkspaceView : View {
           downDocX = sx
           downDocY = sy
 
-          // Start 350ms Long-Press Timer for Android-style Text Selection (handles & callout)
-          // ONLY when activeTool is explicitly "select"
-          if (activeTool == "select") {
+          // Start 300ms Long-Press Timer for Android-style Text Selection (handles & callout)
+          // or Area Crop Framing
+          if (activeTool == "select" || activeTool == "pan") {
             longPressStartX = sx
             longPressStartY = sy
             pendingLongPressRunnable?.let { longPressHandler.removeCallbacks(it) }
             pendingLongPressRunnable = Runnable {
+              isScrollingDoc = false
               triggerLongPressSelect(longPressStartX, longPressStartY)
             }
-            longPressHandler.postDelayed(pendingLongPressRunnable!!, 350)
+            longPressHandler.postDelayed(pendingLongPressRunnable!!, 300)
           }
           return true
         }
@@ -6863,10 +4547,12 @@ class ThinkspaceView : View {
         lastTouchScreenX = sx
         lastTouchScreenY = sy
 
-        if (hypot(sx - longPressStartX, sy - longPressStartY) > 18f * density) {
-          pendingLongPressRunnable?.let {
-            longPressHandler.removeCallbacks(it)
-            pendingLongPressRunnable = null
+        if (hypot(sx - longPressStartX, sy - longPressStartY) > 24f * density) {
+          if (!isDraggingCrop && !isSelectingPdfText) {
+            pendingLongPressRunnable?.let {
+              longPressHandler.removeCallbacks(it)
+              pendingLongPressRunnable = null
+            }
           }
         }
 
@@ -7036,9 +4722,9 @@ class ThinkspaceView : View {
           val sel = activeCropSelection!!
           val pl = pageLayouts.find { it.pageIndex == sel.pageIndex }
           val leftBound = pl?.boundsOnScreen?.left ?: 12f
-          val rightBound = sel.screenRect.right - 48f * density
+          val rightBound = sel.screenRect.right - 36f * density
           val topBound = pl?.boundsOnScreen?.top ?: subheaderH
-          val bottomBound = sel.screenRect.bottom - 48f * density
+          val bottomBound = sel.screenRect.bottom - 28f * density
 
           val newLeft = sx.coerceIn(leftBound, rightBound)
           val newTop = sy.coerceIn(topBound, bottomBound)
@@ -7059,13 +4745,69 @@ class ThinkspaceView : View {
           return true
         }
 
+        // Dragging Top-Right Handle of Area Excerpt
+        if (isDraggingCropTopRightHandle && activeCropSelection != null) {
+          val sel = activeCropSelection!!
+          val pl = pageLayouts.find { it.pageIndex == sel.pageIndex }
+          val leftBound = sel.screenRect.left + 36f * density
+          val rightBound = pl?.boundsOnScreen?.right ?: (width - 12f)
+          val topBound = pl?.boundsOnScreen?.top ?: subheaderH
+          val bottomBound = sel.screenRect.bottom - 28f * density
+
+          val newRight = sx.coerceIn(leftBound, rightBound)
+          val newTop = sy.coerceIn(topBound, bottomBound)
+          sel.screenRect.right = newRight
+          sel.screenRect.top = newTop
+
+          if (pl != null) {
+            val pW = pl.pageSize.width
+            val pH = pl.pageSize.height
+            val pageLeft = (sel.screenRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageTop = (sel.screenRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            val pageRight = (sel.screenRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageBottom = (sel.screenRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            sel.pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom))
+          }
+          recomputeCropCalloutRects(sel)
+          invalidate()
+          return true
+        }
+
+        // Dragging Bottom-Left Handle of Area Excerpt
+        if (isDraggingCropBottomLeftHandle && activeCropSelection != null) {
+          val sel = activeCropSelection!!
+          val pl = pageLayouts.find { it.pageIndex == sel.pageIndex }
+          val leftBound = pl?.boundsOnScreen?.left ?: 12f
+          val rightBound = sel.screenRect.right - 36f * density
+          val topBound = sel.screenRect.top + 28f * density
+          val bottomBound = pl?.boundsOnScreen?.bottom ?: (splitY - 14f)
+
+          val newLeft = sx.coerceIn(leftBound, rightBound)
+          val newBottom = sy.coerceIn(topBound, bottomBound)
+          sel.screenRect.left = newLeft
+          sel.screenRect.bottom = newBottom
+
+          if (pl != null) {
+            val pW = pl.pageSize.width
+            val pH = pl.pageSize.height
+            val pageLeft = (sel.screenRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageTop = (sel.screenRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            val pageRight = (sel.screenRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+            val pageBottom = (sel.screenRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            sel.pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom))
+          }
+          recomputeCropCalloutRects(sel)
+          invalidate()
+          return true
+        }
+
         // Dragging Bottom-Right Handle of Area Excerpt
         if (isDraggingCropBottomRightHandle && activeCropSelection != null) {
           val sel = activeCropSelection!!
           val pl = pageLayouts.find { it.pageIndex == sel.pageIndex }
-          val leftBound = sel.screenRect.left + 48f * density
+          val leftBound = sel.screenRect.left + 36f * density
           val rightBound = pl?.boundsOnScreen?.right ?: (width - 12f)
-          val topBound = sel.screenRect.top + 48f * density
+          val topBound = sel.screenRect.top + 28f * density
           val bottomBound = pl?.boundsOnScreen?.bottom ?: (splitY - 14f)
 
           val newRight = sx.coerceIn(leftBound, rightBound)
@@ -7333,31 +5075,41 @@ class ThinkspaceView : View {
         if (isDraggingCrop) {
           isDraggingCrop = false
           val sel = activeCropSelection
-          if (sel != null && (sel.screenRect.width() < 24f * density || sel.screenRect.height() < 24f * density)) {
+          if (sel != null) {
             val pl = pageLayouts.find { it.pageIndex == sel.pageIndex }
-            if (pl != null) {
-              val defW = min(pl.boundsOnScreen.width() * 0.70f, 240f * density)
-              val defH = min(pl.boundsOnScreen.height() * 0.35f, 160f * density)
-              val sRect = RectF(
-                (cropStartX - defW / 2f).coerceIn(pl.boundsOnScreen.left + 8f * density, pl.boundsOnScreen.right - defW - 8f * density),
-                (cropStartY - defH / 2f).coerceIn(pl.boundsOnScreen.top + 8f * density, pl.boundsOnScreen.bottom - defH - 8f * density),
-                (cropStartX + defW / 2f).coerceIn(pl.boundsOnScreen.left + defW + 8f * density, pl.boundsOnScreen.right - 8f * density),
-                (cropStartY + defH / 2f).coerceIn(pl.boundsOnScreen.top + defH + 8f * density, pl.boundsOnScreen.bottom - 8f * density)
-              )
-              val pW = pl.pageSize.width
-              val pH = pl.pageSize.height
-              val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-              val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
-              val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-              val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+            val dragDist = hypot(sx - cropStartX, sy - cropStartY)
+            if (dragDist < 12f * density || sel.screenRect.width() < 24f * density || sel.screenRect.height() < 20f * density) {
+              // Stationary long-press and release without intentional framing drag:
+              // Provide an elegant, clean starter framing box (130dp x 90dp) centered on the touch point
+              if (pl != null) {
+                val defW = min(pl.boundsOnScreen.width() * 0.70f, 220f * density)
+                val defH = min(pl.boundsOnScreen.height() * 0.35f, 150f * density)
+                val sRect = RectF(
+                  (cropStartX - defW / 2f).coerceIn(pl.boundsOnScreen.left + 8f * density, pl.boundsOnScreen.right - defW - 8f * density),
+                  (cropStartY - defH / 2f).coerceIn(pl.boundsOnScreen.top + 8f * density, pl.boundsOnScreen.bottom - defH - 8f * density),
+                  (cropStartX + defW / 2f).coerceIn(pl.boundsOnScreen.left + defW + 8f * density, pl.boundsOnScreen.right - 8f * density),
+                  (cropStartY + defH / 2f).coerceIn(pl.boundsOnScreen.top + defH + 8f * density, pl.boundsOnScreen.bottom - 8f * density)
+                )
+                val pW = pl.pageSize.width
+                val pH = pl.pageSize.height
+                val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+                val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
+                val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
+                val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
 
-              activeCropSelection = createCropSelection(
-                pageIndex = pl.pageIndex,
-                sRect = sRect,
-                pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
-                color = selectedColor,
-                dimensionsText = "Page ${pl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)"
-              )
+                val newCropSel = createCropSelection(
+                  pageIndex = pl.pageIndex,
+                  sRect = sRect,
+                  pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
+                  color = selectedColor,
+                  dimensionsText = "Page ${pl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)"
+                )
+                recomputeCropCalloutRects(newCropSel)
+                activeCropSelection = newCropSel
+              }
+            } else {
+              // User dragged out a custom crop region: preserve their framed box!
+              recomputeCropCalloutRects(sel)
             }
           }
           invalidate()
@@ -7366,6 +5118,8 @@ class ThinkspaceView : View {
         isDraggingStartHandle = false
         isDraggingEndHandle = false
         isDraggingCropTopLeftHandle = false
+        isDraggingCropTopRightHandle = false
+        isDraggingCropBottomLeftHandle = false
         isDraggingCropBottomRightHandle = false
         isMovingCropSelection = false
         isDraggingDivider = false
@@ -7789,2884 +5543,32 @@ class ThinkspaceView : View {
   }
 
   // ---------------------------------------------------------------------------
-  // Document Tap Selection Handling
-  // ---------------------------------------------------------------------------
-  private fun handleDocTap(tapX: Float, tapY: Float) {
-    // 0. If user tapped outside an active selection, dismiss it and return!
-    if (activeCropSelection != null || activePdfSelection != null) {
-      activeCropSelection = null
-      activePdfSelection = null
-      docMode = "text"
-      invalidate()
-      return
-    }
-
-    // 1. Real PDF Word Selection or InkLink Tap
-    if (activePdfDoc != null) {
-      for (pl in pageLayouts) {
-        if (pl.boundsOnScreen.contains(tapX, tapY)) {
-          val px = (tapX - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
-          val py = (tapY - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
-
-          // Check if tapped on or near an InkLink anchor pin in the PDF
-          val matchingLink = semanticInkLinks.find {
-            it.sourceDocId == activeDocumentId &&
-            it.sourcePageIndex == pl.pageIndex &&
-            hypot(it.sourcePdfPoint.x - px, it.sourcePdfPoint.y - py) < 28f
-          }
-          if (matchingLink != null) {
-            val targetCard = cards.find { it.id == matchingLink.targetCardId }
-            if (targetCard != null) {
-              val targetCx = targetCard.x + targetCard.width / 2f
-              val targetCy = targetCard.y + targetCard.getHeight() / 2f
-              val hasDoc = activePdfDoc != null || activeDocument != null
-              val curCanvasTopY = if (hasDoc && effectiveSplitRatio > 0f) height * effectiveSplitRatio + 14f else 0f
-              val viewW = width.toFloat()
-              val viewH = height - curCanvasTopY
-              camera.panX = -targetCx + (viewW / 2f) / camera.scaleFactor
-              camera.panY = -targetCy + (viewH / 2f) / camera.scaleFactor
-              selectedCardId = targetCard.id
-              performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-              hudToast.show("Jumped to Linked Card in Workspace")
-              invalidate()
-              return
-            }
-          }
-
-          if (pl.isFolded) {
-            compressionEngine.expandPage(pl.pageIndex, animate = true) { invalidate() }
-            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            return
-          }
-          val words = pageWordsCache[pl.pageIndex]
-          if (words != null && words.isNotEmpty() && activeTool == "select") {
-            val px = (tapX - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pl.pageSize.width
-            val py = (tapY - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pl.pageSize.height
-            val hitWord = words.find { w ->
-              val b = w.bounds
-              px >= b.left - 6f && px <= b.right + 6f && py >= b.top - 8f && py <= b.bottom + 8f
-            } ?: words.minByOrNull { w ->
-              val b = w.bounds
-              val cx = (b.left + b.right) / 2f
-              val cy = (b.top + b.bottom) / 2f
-              (cx - px) * (cx - px) + (cy - py) * (cy - py)
-            }?.takeIf { w ->
-              val b = w.bounds
-              val cx = (b.left + b.right) / 2f
-              val cy = (b.top + b.bottom) / 2f
-              val distSq = (cx - px) * (cx - px) + (cy - py) * (cy - py)
-              distSq < 36f * 36f
-            }
-
-            if (hitWord != null) {
-              updatePdfSelection(pl, hitWord, hitWord)
-              invalidate()
-              return
-            }
-          }
-
-          // If no text word was hit:
-          // ONLY create a Figure Crop selection if the user explicitly switched to "crop" mode!
-          if (docMode == "crop") {
-            val cropW = min(pl.boundsOnScreen.width() * 0.85f, 320f * density)
-            val cropH = min(pl.boundsOnScreen.height() * 0.45f, 220f * density)
-            val sRect = RectF(
-              (tapX - cropW / 2f).coerceIn(pl.boundsOnScreen.left + 8f * density, pl.boundsOnScreen.right - cropW - 8f * density),
-              (tapY - cropH / 2f).coerceIn(pl.boundsOnScreen.top + 8f * density, pl.boundsOnScreen.bottom - cropH - 8f * density),
-              (tapX + cropW / 2f).coerceIn(pl.boundsOnScreen.left + cropW + 8f * density, pl.boundsOnScreen.right - 8f * density),
-              (tapY + cropH / 2f).coerceIn(pl.boundsOnScreen.top + cropH + 8f * density, pl.boundsOnScreen.bottom - 8f * density)
-            )
-
-            val pW = pl.pageSize.width
-            val pH = pl.pageSize.height
-            val pageLeft = (sRect.left - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-            val pageTop = (sRect.top - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
-            val pageRight = (sRect.right - pl.boundsOnScreen.left) / pl.boundsOnScreen.width() * pW
-            val pageBottom = (sRect.bottom - pl.boundsOnScreen.top) / pl.boundsOnScreen.height() * pH
-
-            val cW = 200f * density
-            val cH = 44f * density
-            val cLeft = sRect.centerX() - cW / 2f
-            val cTop = if (sRect.top - cH - 12f * density > subheaderH) sRect.top - cH - 12f * density else sRect.bottom + 12f * density
-            val calloutR = RectF(cLeft, cTop, cLeft + cW, cTop + cH)
-            val excerptBtn = RectF(cLeft + 8f * density, cTop + 4f * density, cLeft + cW - 44f * density, cTop + cH - 4f * density)
-            val closeBtn = RectF(cLeft + cW - 40f * density, cTop + 4f * density, cLeft + cW - 4f * density, cTop + cH - 4f * density)
-
-            activeCropSelection = createCropSelection(
-              pageIndex = pl.pageIndex,
-              sRect = sRect,
-              pageBounds = BoundingBox(pageLeft, pageTop, max(pageLeft + 1f, pageRight), max(pageTop + 1f, pageBottom)),
-              color = selectedColor,
-              dimensionsText = "Page ${pl.pageIndex + 1} (${pW.toInt()}x${pH.toInt()} pt)"
-            )
-            activePdfSelection = null
-            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-            invalidate()
-            return
-          } else {
-            // Normal tap on blank whitespace in text mode: toggle immersive mode!
-            activeCropSelection = null
-            activePdfSelection = null
-            toggleImmersiveMode()
-            invalidate()
-            return
-          }
-        }
-      }
-    }
-
-    // 2. Structured Sections Document
-    if (activeDocument != null && activePdfDoc == null && activeTool == "select") {
-      for (pInfo in paragraphLayouts) {
-        val paraH = pInfo.layout.height.toFloat() + 16f
-        val pRect = RectF(pInfo.paperX, pInfo.topY, pInfo.paperX + pInfo.width + 56f, pInfo.topY + paraH)
-        if (pRect.contains(tapX, tapY)) {
-          val hlLeft = pInfo.paperX + 24f
-          val hlTop = pInfo.topY - 4f
-          val hlRight = pInfo.paperX + pInfo.width + 32f
-          val hlBottom = pInfo.topY + pInfo.layout.height + 4f
-          val highlightR = RectF(hlLeft, hlTop, hlRight, hlBottom)
-
-          val layout = computeSelectionCalloutLayout(listOf(highlightR))
-
-          activePdfSelection = NativePdfSelection(
-            pageIndex = pInfo.pageNumber - 1,
-            text = pInfo.text,
-            highlightRects = listOf(highlightR),
-            pdfRects = emptyList(),
-            startHandle = RectF(hlLeft - 12f * density, hlTop - 20f * density, hlLeft + 12f * density, hlBottom),
-            endHandle = RectF(hlRight - 12f * density, hlTop, hlRight + 12f * density, hlBottom + 20f * density),
-            calloutRect = layout.calloutRect,
-            calloutExcerptBtn = layout.excerptBtn,
-            calloutCopyBtn = layout.copyBtn,
-            calloutHighlightBtn = layout.highlightBtn,
-            calloutCloseBtn = layout.closeBtn,
-            startWordIndex = 0,
-            endWordIndex = 0,
-            calloutAddWordLeftBtn = layout.addWordLeftBtn,
-            calloutAddWordRightBtn = layout.addWordRightBtn,
-            calloutSelectAllBtn = layout.selectAllBtn,
-            charCountText = "${pInfo.text.length} chars",
-            calloutColorBtns = layout.colorBtns,
-            calloutMoreBtn = layout.moreBtn,
-            calloutTagsBtn = layout.tagsBtn,
-            calloutSubCardRect = layout.subCardRect,
-            calloutMainCardRect = layout.mainCardRect,
-            calloutRainbowBtn = layout.rainbowBtn,
-            calloutCommentBtn = layout.commentBtn,
-            calloutBookmarkBtn = layout.bookmarkBtn,
-            calloutClearBtn = layout.clearBtn
-          )
-          invalidate()
-          return
-        }
-      }
-    }
-
-    // 3. Tapped outside -> Dismiss selection or toggle immersive mode
-    val hadSelection = activePdfSelection != null || activeCropSelection != null
-    activePdfSelection = null
-    activeCropSelection = null
-    if (!hadSelection) {
-      toggleImmersiveMode()
-    }
-    invalidate()
-  }
-
-  // ---------------------------------------------------------------------------
-  // Real PDF Word Selection Engine matching LiquidText
+  // Document Tap Selection & Real PDF Word Selection Engine
+  // Extracted to ThinkspaceViewSelection.kt as extension functions
   // ---------------------------------------------------------------------------
 
-  /**
-   * LiquidText-Style Line Clustering:
-   * Groups selected consecutive words belonging to the same horizontal text line and
-   * merges them into single continuous bounding rectangles covering all spaces between words.
-   */
-  private fun clusterWordsIntoLineRects(
-    words: List<TextWord>,
-    pl: PdfPageLayout
-  ): Pair<List<RectF>, List<RectF>> {
-    if (words.isEmpty()) return Pair(emptyList(), emptyList())
-
-    val lineGroups = mutableListOf<MutableList<TextWord>>()
-    for (word in words) {
-      if (lineGroups.isEmpty()) {
-        lineGroups.add(mutableListOf(word))
-      } else {
-        val currentGroup = lineGroups.last()
-        val prev = currentGroup.last()
-
-        val overlapTop = max(prev.bounds.top, word.bounds.top)
-        val overlapBottom = min(prev.bounds.bottom, word.bounds.bottom)
-        val overlapH = overlapBottom - overlapTop
-        val minH = min(prev.bounds.height, word.bounds.height)
-
-        val baselineMatch = if (prev.baseline > 0f && word.baseline > 0f) {
-          abs(prev.baseline - word.baseline) <= max(prev.fontSize, word.fontSize) * 0.45f
-        } else false
-
-        val isSameLine = baselineMatch ||
-          (minH > 0f && overlapH >= minH * 0.45f) ||
-          (abs(prev.bounds.top - word.bounds.top) <= max(prev.bounds.height, word.bounds.height) * 0.35f)
-
-        if (isSameLine) {
-          currentGroup.add(word)
-        } else {
-          lineGroups.add(mutableListOf(word))
-        }
-      }
-    }
-
-    val screenRects = mutableListOf<RectF>()
-    val pdfRects = mutableListOf<RectF>()
-
-    for (group in lineGroups) {
-      if (group.isEmpty()) continue
-      val sorted = group.sortedBy { it.bounds.left }
-      val lineLeft = sorted.minOf { it.bounds.left }
-      val lineRight = sorted.maxOf { it.bounds.right }
-      val lineTop = sorted.minOf { it.bounds.top }
-      val lineBottom = sorted.maxOf { it.bounds.bottom }
-
-      val pRect = RectF(lineLeft, lineTop, lineRight, lineBottom)
-      pdfRects.add(pRect)
-
-      val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull() ?: pl.pageSize
-      val pW = pSize.width
-      val pH = pSize.height
-      val l = pl.boundsOnScreen.left + (lineLeft / pW) * pl.boundsOnScreen.width()
-      val t = pl.boundsOnScreen.top + (lineTop / pH) * pl.boundsOnScreen.height()
-      val r = pl.boundsOnScreen.left + (lineRight / pW) * pl.boundsOnScreen.width()
-      val b = pl.boundsOnScreen.top + (lineBottom / pH) * pl.boundsOnScreen.height()
-      screenRects.add(RectF(l, t, r, b))
-    }
-
-    return Pair(screenRects, pdfRects)
-  }
-
-  private fun buildPdfSelectionForLayout(
-    pl: PdfPageLayout,
-    startIdx: Int,
-    endIdx: Int
-  ): NativePdfSelection? {
-    val words = pageWordsCache[pl.pageIndex] ?: return null
-    if (words.isEmpty()) return null
-    val clampedStart = startIdx.coerceIn(0, words.size - 1)
-    val clampedEnd = endIdx.coerceIn(clampedStart, words.size - 1)
-    val selWords = words.subList(clampedStart, clampedEnd + 1)
-    val combinedText = selWords.joinToString(" ") { it.text }
-
-    val (rects, pRects) = clusterWordsIntoLineRects(selWords, pl)
-    if (rects.isEmpty()) return null
-
-    val firstR = rects.first()
-    val lastR = rects.last()
-    val startHandle = RectF(firstR.left - 14f * density, firstR.bottom - 4f * density, firstR.left + 14f * density, firstR.bottom + 22f * density)
-    val endHandle = RectF(lastR.right - 14f * density, lastR.bottom - 4f * density, lastR.right + 14f * density, lastR.bottom + 22f * density)
-
-    val charCount = combinedText.length
-    val previewSnippet = if (combinedText.length > 22) combinedText.substring(0, 20) + "..." else combinedText
-    val charCountText = "$charCount chars selected \"$previewSnippet\""
-
-    val layout = computeSelectionCalloutLayout(rects)
-
-    return NativePdfSelection(
-      pageIndex = pl.pageIndex,
-      text = combinedText,
-      highlightRects = rects,
-      pdfRects = pRects,
-      startHandle = startHandle,
-      endHandle = endHandle,
-      calloutRect = layout.calloutRect,
-      calloutExcerptBtn = layout.excerptBtn,
-      calloutCopyBtn = layout.copyBtn,
-      calloutHighlightBtn = layout.highlightBtn,
-      calloutCloseBtn = layout.closeBtn,
-      startWordIndex = clampedStart,
-      endWordIndex = clampedEnd,
-      calloutAddWordLeftBtn = layout.addWordLeftBtn,
-      calloutAddWordRightBtn = layout.addWordRightBtn,
-      calloutSelectAllBtn = layout.selectAllBtn,
-      charCountText = "${combinedText.length} chars",
-      calloutColorBtns = layout.colorBtns,
-      calloutMoreBtn = layout.moreBtn,
-      calloutTagsBtn = layout.tagsBtn,
-      calloutSubCardRect = layout.subCardRect,
-      calloutMainCardRect = layout.mainCardRect,
-      calloutRainbowBtn = layout.rainbowBtn,
-      calloutCommentBtn = layout.commentBtn,
-      calloutBookmarkBtn = layout.bookmarkBtn,
-      calloutClearBtn = layout.clearBtn
-    )
-  }
-
-  private fun syncPdfSelectionWithLayout(
-    sel: NativePdfSelection,
-    pl: PdfPageLayout
-  ): NativePdfSelection {
-    val words = pageWordsCache[pl.pageIndex]
-    if (!words.isNullOrEmpty() && sel.startWordIndex >= 0 && sel.endWordIndex < words.size) {
-      val built = buildPdfSelectionForLayout(pl, sel.startWordIndex, sel.endWordIndex)
-      if (built != null) return built
-    }
-
-    // Fallback projection using sel.pdfRects directly
-    val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull() ?: pl.pageSize
-    val pW = pSize.width
-    val pH = pSize.height
-    val screenRects = sel.pdfRects.map { pRect ->
-      val l = pl.boundsOnScreen.left + (pRect.left / pW) * pl.boundsOnScreen.width()
-      val t = pl.boundsOnScreen.top + (pRect.top / pH) * pl.boundsOnScreen.height()
-      val r = pl.boundsOnScreen.left + (pRect.right / pW) * pl.boundsOnScreen.width()
-      val b = pl.boundsOnScreen.top + (pRect.bottom / pH) * pl.boundsOnScreen.height()
-      RectF(l, t, r, b)
-    }
-
-    if (screenRects.isEmpty()) return sel
-
-    val firstR = screenRects.first()
-    val lastR = screenRects.last()
-    val startHandle = RectF(firstR.left - 14f * density, firstR.bottom - 4f * density, firstR.left + 14f * density, firstR.bottom + 22f * density)
-    val endHandle = RectF(lastR.right - 14f * density, lastR.bottom - 4f * density, lastR.right + 14f * density, lastR.bottom + 22f * density)
-
-    val layout = computeSelectionCalloutLayout(screenRects, sel.calloutColorBtns.map { it.second })
-
-    return sel.copy(
-      highlightRects = screenRects,
-      startHandle = startHandle,
-      endHandle = endHandle,
-      calloutRect = layout.calloutRect,
-      calloutExcerptBtn = layout.excerptBtn,
-      calloutCopyBtn = layout.copyBtn,
-      calloutHighlightBtn = layout.highlightBtn,
-      calloutCloseBtn = layout.closeBtn,
-      calloutAddWordLeftBtn = layout.addWordLeftBtn,
-      calloutAddWordRightBtn = layout.addWordRightBtn,
-      calloutSelectAllBtn = layout.selectAllBtn,
-      calloutColorBtns = layout.colorBtns,
-      calloutMoreBtn = layout.moreBtn,
-      calloutTagsBtn = layout.tagsBtn,
-      calloutSubCardRect = layout.subCardRect,
-      calloutMainCardRect = layout.mainCardRect,
-      calloutRainbowBtn = layout.rainbowBtn,
-      calloutCommentBtn = layout.commentBtn,
-      calloutBookmarkBtn = layout.bookmarkBtn,
-      calloutClearBtn = layout.clearBtn
-    )
-  }
-
-  private fun updatePdfSelectionByIndex(pl: PdfPageLayout, startIdx: Int, endIdx: Int) {
-    val sel = buildPdfSelectionForLayout(pl, startIdx, endIdx) ?: return
-    activePdfSelection = sel
-    invalidate()
-  }
-
-  private fun updatePdfSelection(pl: PdfPageLayout, w1: TextWord, w2: TextWord) {
-    val words = pageWordsCache[pl.pageIndex] ?: return
-    val idx1 = words.indexOf(w1)
-    val idx2 = words.indexOf(w2)
-    if (idx1 == -1 || idx2 == -1) return
-    val startIdx = min(idx1, idx2)
-    val endIdx = max(idx1, idx2)
-    updatePdfSelectionByIndex(pl, startIdx, endIdx)
-  }
-
   // ---------------------------------------------------------------------------
-  // Excerpt & Annotation Helpers with Collision-Free Drop & Toast Feedback
+  // Excerpt & Annotation Helpers, Erasing & Document Scroll Navigation
+  // Extracted to ThinkspaceViewExcerpt.kt as extension functions
   // ---------------------------------------------------------------------------
-  private fun extractExcerptToCanvas(text: String, pageNumber: Int, color: Int, pdfRects: List<RectF> = emptyList()) {
-    val newId = "card-${System.currentTimeMillis()}"
-    val (dropWx, dropWy) = canvasScreenToWorld(width / 2f, height * splitRatio + 80f, height * splitRatio + 14f)
-
-    val cardW = 220f
-    val cardH = if (text.length > 70) 130f else 105f
-    val resolved = CollisionPlacementSolver.findNonOverlappingPosition(
-      desiredX = dropWx - cardW / 2f,
-      desiredY = dropWy - cardH / 2f,
-      cardWidth = cardW,
-      cardHeight = cardH,
-      existingCards = cards
-    )
-
-    val card = NativeCard(
-      id = newId,
-      x = resolved.x,
-      y = resolved.y,
-      width = cardW,
-      text = text,
-      color = color,
-      pageNumber = pageNumber,
-      comment = null,
-      clusterId = null,
-      stackCount = 1,
-      isImage = false,
-      imageUrl = null,
-      isTable = false,
-      tableRows = null,
-      groupedItems = null,
-      sourceRects = pdfRects,
-      documentId = activeDocumentId
-    )
-    cards.add(card)
-
-    val newLink = NativeLink("link-${System.currentTimeMillis()}", newId, color)
-    links.add(newLink)
-    undoRedoManager.record(CreateCardAction(
-      card = card,
-      link = newLink,
-      cardsList = cards,
-      linksList = links,
-      onUndoDispatched = { c ->
-        dispatchCardDeleteEvent(c.id)
-        invalidate()
-      },
-      onRedoDispatched = { c, _ ->
-        dispatchExtractExcerptEvent(
-          c.text, c.pageNumber, c.color, c.isImage, c.imageUrl, c.x, c.y, c.id, c.sourceRects
-        )
-        invalidate()
-      }
-    ))
-    triggerShockwave(resolved.x + cardW / 2f, resolved.y + cardH / 2f, color)
-    performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-    dispatchExtractExcerptEvent(
-      text = text,
-      pageNumber = pageNumber,
-      color = color,
-      isImg = false,
-      x = resolved.x,
-      y = resolved.y,
-      cardId = newId,
-      sourceRects = pdfRects
-    )
-    hudToast.show("Excerpt placed without overlap with live Ink-Link!")
-    invalidate()
-  }
-
-  private fun extractCropToCanvas(cropSel: NativeCropSelection) {
-    val newId = "card-${System.currentTimeMillis()}"
-    val (dropWx, dropWy) = canvasScreenToWorld(width / 2f, height * splitRatio + 80f, height * splitRatio + 14f)
-
-    val bmp = generateCropBitmap(cropSel.pageIndex, cropSel.pageBounds)
-    val imgPath = if (bmp != null) {
-      val p = saveCropToFile(bmp)
-      cardBitmapCache.put(p, bmp)
-      cardBitmapCache.put(newId, bmp)
-      cardBitmapCache.put("page_${cropSel.pageIndex + 1}_image", bmp)
-      p
-    } else null
-
-    val cardW = 240f
-    val cardH = 160f
-    val resolved = CollisionPlacementSolver.findNonOverlappingPosition(
-      desiredX = dropWx - cardW / 2f,
-      desiredY = dropWy - cardH / 2f,
-      cardWidth = cardW,
-      cardHeight = cardH,
-      existingCards = cards
-    )
-
-    val cropSourceRects = listOf(RectF(cropSel.pageBounds.left, cropSel.pageBounds.top, cropSel.pageBounds.right, cropSel.pageBounds.bottom))
-    val card = NativeCard(
-      id = newId,
-      x = resolved.x,
-      y = resolved.y,
-      width = cardW,
-      text = "[Photo Excerpt]",
-      color = cropSel.color,
-      pageNumber = cropSel.pageIndex + 1,
-      comment = null,
-      clusterId = null,
-      stackCount = 1,
-      isImage = true,
-      imageUrl = imgPath,
-      isTable = false,
-      tableRows = null,
-      groupedItems = null,
-      sourceRects = cropSourceRects,
-      documentId = activeDocumentId
-    )
-    cards.add(card)
-
-    // Reset docMode and dismiss crop selector so user can scroll immediately
-    activeCropSelection = null
-    docMode = "text"
-
-    val newLink = NativeLink("link-${System.currentTimeMillis()}", newId, cropSel.color)
-    links.add(newLink)
-    undoRedoManager.record(CreateCardAction(
-      card = card,
-      link = newLink,
-      cardsList = cards,
-      linksList = links,
-      onUndoDispatched = { c ->
-        dispatchCardDeleteEvent(c.id)
-        invalidate()
-      },
-      onRedoDispatched = { c, _ ->
-        dispatchExtractExcerptEvent(
-          c.text, c.pageNumber, c.color, c.isImage, c.imageUrl, c.x, c.y, c.id, c.sourceRects
-        )
-        invalidate()
-      }
-    ))
-    triggerShockwave(resolved.x + cardW / 2f, resolved.y + cardH / 2f, cropSel.color)
-    performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-    dispatchExtractExcerptEvent(
-      text = card.text,
-      pageNumber = card.pageNumber,
-      color = card.color,
-      isImg = card.isImage,
-      imageUrl = card.imageUrl,
-      x = card.x,
-      y = card.y,
-      cardId = card.id,
-      sourceRects = cropSourceRects
-    )
-    hudToast.show("Extracted figure placed neatly with live Ink-Link!")
-    invalidate()
-  }
-
-  private fun tidyCards() {
-    if (cards.isEmpty()) {
-      hudToast.show("No cards to tidy")
-      invalidate()
-      return
-    }
-    var curX = 60f
-    var curY = 40f
-    for (c in cards) {
-      c.x = curX
-      c.y = curY
-      curX += c.width + 24f
-      if (curX > 600f) {
-        curX = 60f
-        curY += c.getHeight() + 24f
-      }
-    }
-    performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-    hudToast.show("✨ Workspace tidied neatly!")
-    invalidate()
-  }
-
-  private fun addAnnotation(text: String, pageNumber: Int, color: Int, rects: List<RectF> = emptyList()) {
-    val annId = "ann-${System.currentTimeMillis()}"
-    val ann = NativeAnnotation(annId, "page-$pageNumber", 0, pageNumber, color, text, rects)
-    annotations.add(ann)
-    undoRedoManager.record(AddAnnotationAction(
-      annotation = ann,
-      annotationsList = annotations,
-      onUndoDispatched = { invalidate() },
-      onRedoDispatched = { invalidate() }
-    ))
-    invalidate()
-  }
-
-  private fun eraseAnnotationNear(sx: Float, sy: Float): Boolean {
-    val threshold = 28f * density
-    val targetAnn = annotations.findLast { ann ->
-      val pl = pageLayouts.find { it.pageNumber == ann.pageNumber }
-      if (pl != null && !pl.isFolded) {
-        val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
-          ?: com.thinkspace.pdfengine.model.PageSize.LETTER
-        val pW = pSize.width
-        val pH = pSize.height
-        ann.rects.any { r ->
-          val l = pl.boundsOnScreen.left + (r.left / pW) * pl.boundsOnScreen.width()
-          val t = pl.boundsOnScreen.top + (r.top / pH) * pl.boundsOnScreen.height()
-          val right = pl.boundsOnScreen.left + (r.right / pW) * pl.boundsOnScreen.width()
-          val b = pl.boundsOnScreen.top + (r.bottom / pH) * pl.boundsOnScreen.height()
-          val hRect = RectF(l - threshold, t - threshold, right + threshold, b + threshold)
-          hRect.contains(sx, sy)
-        }
-      } else false
-    }
-
-    if (targetAnn != null) {
-      annotations.remove(targetAnn)
-      undoRedoManager.record(DeleteAnnotationAction(
-        annotation = targetAnn,
-        annotationsList = annotations,
-        onUndoDispatched = { invalidate() },
-        onRedoDispatched = { invalidate() }
-      ))
-      hudToast.show("🗑️ Highlight erased")
-      performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-      invalidate()
-      return true
-    }
-    return false
-  }
-
-  private fun copyToClipboard(text: String) {
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-    val clip = ClipData.newPlainText("Excerpt", text)
-    clipboard?.setPrimaryClip(clip)
-    copiedToastText = "✓ Copied!"
-    postDelayed({
-      copiedToastText = null
-      invalidate()
-    }, 1500)
-    invalidate()
-  }
-
-  private fun eraseStrokesNear(wx: Float, wy: Float) {
-    val threshold = 28f
-    val toRemove = strokes.filter { s ->
-      s.points.any { hypot(it.x - wx, it.y - wy) <= threshold }
-    }
-    if (toRemove.isNotEmpty()) {
-      strokes.removeAll(toRemove)
-      undoRedoManager.record(EraseStrokesAction(
-        erasedStrokes = toRemove,
-        strokesList = strokes,
-        onUndoDispatched = { restored ->
-          for (s in restored) {
-            dispatchAddStrokeEvent(s)
-          }
-          invalidate()
-        },
-        onRedoDispatched = { removed ->
-          for (s in removed) {
-            dispatchEraseStrokeEvent(s.id)
-          }
-          invalidate()
-        }
-      ))
-      for (s in toRemove) {
-        dispatchEraseStrokeEvent(s.id)
-      }
-      invalidate()
-    }
-
-    val curCanvasTopY = if ((activePdfDoc != null || activeDocument != null) && effectiveSplitRatio > 0f) height * effectiveSplitRatio + 14f else 0f
-    val erasedLinks = semanticInkLinks.filter { link ->
-      val card = cards.find { it.id == link.targetCardId }
-      if (card == null) false
-      else {
-        val srcWorldX: Float
-        val srcWorldY: Float
-        val pl = pageLayouts.find { it.pageIndex == link.sourcePageIndex }
-        if (pl != null && link.sourceDocId == activeDocumentId) {
-          val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
-            ?: com.thinkspace.pdfengine.model.PageSize.LETTER
-          val rawSx = pl.boundsOnScreen.left + (link.sourcePdfPoint.x / pSize.width) * pl.boundsOnScreen.width()
-          val rawSy = pl.boundsOnScreen.top + (link.sourcePdfPoint.y / pSize.height) * pl.boundsOnScreen.height()
-          srcWorldX = camera.screenToWorldX(rawSx)
-          srcWorldY = camera.screenToWorldY(rawSy, curCanvasTopY)
-        } else {
-          srcWorldX = card.x
-          srcWorldY = card.y - 120f
-        }
-        val edge = getCardEdgeAnchor(card, srcWorldX, srcWorldY)
-        val d = distToSegment(wx, wy, srcWorldX, srcWorldY, edge.x, edge.y)
-        d <= threshold || hypot(edge.x - wx, edge.y - wy) <= threshold * 1.4f
-      }
-    }
-    if (erasedLinks.isNotEmpty()) {
-      semanticInkLinks.removeAll(erasedLinks)
-      for (el in erasedLinks) {
-        undoRedoManager.record(DeleteSemanticInkLinkAction(
-          link = el,
-          linksList = semanticInkLinks,
-          onUndoDispatched = { l ->
-            dispatchInkLinkCreateEvent(l)
-            persistSemanticInkLinksLocally()
-            invalidate()
-          },
-          onRedoDispatched = { l ->
-            dispatchInkLinkDeleteEvent(l.id)
-            persistSemanticInkLinksLocally()
-            invalidate()
-          }
-        ))
-        dispatchInkLinkDeleteEvent(el.id)
-      }
-      persistSemanticInkLinksLocally()
-      invalidate()
-    }
-  }
-
-  private fun eraseDocStrokesNear(sx: Float, sy: Float): Boolean {
-    var erasedAny = false
-    for (pl in pageLayouts) {
-      if (!pl.boundsOnScreen.contains(sx, sy)) continue
-      val pSize = runCatching { activePdfDoc?.getPage(pl.pageIndex)?.size }.getOrNull()
-        ?: com.thinkspace.pdfengine.model.PageSize.LETTER
-      val pW = pSize.width
-      val pH = pSize.height
-      val px = ((sx - pl.boundsOnScreen.left) / pl.boundsOnScreen.width()) * pW
-      val py = ((sy - pl.boundsOnScreen.top) / pl.boundsOnScreen.height()) * pH
-
-      val list = pageStrokes[pl.pageIndex] ?: continue
-      val threshold = 28f * (pW / pl.boundsOnScreen.width().coerceAtLeast(1f))
-      val toRemove = list.filter { s ->
-        s.points.any { hypot(it.x - px, it.y - py) <= threshold }
-      }
-      if (toRemove.isNotEmpty()) {
-        list.removeAll(toRemove)
-        undoRedoManager.record(ErasePageStrokesAction(
-          erasedStrokes = toRemove,
-          pageStrokesMap = pageStrokes,
-          onUndoDispatched = { invalidate() },
-          onRedoDispatched = { invalidate() }
-        ))
-        erasedAny = true
-        invalidate()
-      }
-
-      val erasedDocLinks = semanticInkLinks.filter { link ->
-        link.sourceDocId == activeDocumentId &&
-        link.sourcePageIndex == pl.pageIndex &&
-        hypot(link.sourcePdfPoint.x - px, link.sourcePdfPoint.y - py) <= threshold
-      }
-      if (erasedDocLinks.isNotEmpty()) {
-        semanticInkLinks.removeAll(erasedDocLinks)
-        for (el in erasedDocLinks) {
-          undoRedoManager.record(DeleteSemanticInkLinkAction(
-            link = el,
-            linksList = semanticInkLinks,
-            onUndoDispatched = { l ->
-              dispatchInkLinkCreateEvent(l)
-              persistSemanticInkLinksLocally()
-              invalidate()
-            },
-            onRedoDispatched = { l ->
-              dispatchInkLinkDeleteEvent(l.id)
-              persistSemanticInkLinksLocally()
-              invalidate()
-            }
-          ))
-          dispatchInkLinkDeleteEvent(el.id)
-        }
-        persistSemanticInkLinksLocally()
-        erasedAny = true
-        invalidate()
-      }
-    }
-    return erasedAny
-  }
-
-  private var docScrollAnimator: ValueAnimator? = null
-  private var pulseAnimator: ValueAnimator? = null
-  private var canvasAnimator: ValueAnimator? = null
-
-  fun scrollToPage(targetPageNum: Int) {
-    post {
-      scrollToDocumentPage(targetPageNum)
-      invalidate()
-    }
-  }
-
-  private fun scrollToDocumentPage(targetPageNum: Int, sourceRects: List<RectF> = emptyList()) {
-    val viewW = width.toFloat().coerceAtLeast(100f)
-    val viewH = height.toFloat().coerceAtLeast(100f)
-    val docBottomY = viewH * splitRatio
-    val viewportH = max(100f, docBottomY - subheaderH)
-
-    val targetScrollY: Float
-    val safePageNum: Int
-
-    if (activePdfDoc != null) {
-      val pCount = activePdfDoc?.pageCount ?: 1
-      safePageNum = targetPageNum.coerceIn(1, max(1, pCount))
-      val pageIdx = safePageNum - 1
-
-      val paperMargin = 10f * density
-      val basePaperW = viewW - paperMargin * 2f
-      val paperW = basePaperW * pdfScaleFactor
-      val pSize = runCatching { activePdfDoc?.getPage(pageIdx)?.size }.getOrNull() ?: com.thinkspace.pdfengine.model.PageSize.LETTER
-      val docAspectRatio = if (pSize.width > 0f) pSize.height / pSize.width else 1.294f
-      val standardPageH = paperW * docAspectRatio
-      val standardGap = 16f * pdfScaleFactor
-      val totalDocH = compressionEngine.getTotalDocHeight(standardPageH, standardGap)
-      val maxScroll = max(0f, totalDocH - (docBottomY - subheaderH) + 60f)
-
-      val pageTopDocY = compressionEngine.getPageTopDocY(pageIdx, standardPageH, standardGap)
-      val displayedH = compressionEngine.getDisplayedPageHeight(pageIdx, standardPageH)
-
-      targetScrollY = if (sourceRects.isNotEmpty()) {
-        val minY = sourceRects.minOf { it.top }
-        val maxY = sourceRects.maxOf { it.bottom }
-        val centerPdfY = (minY + maxY) / 2f
-        val pdfH = pSize.height
-        val scale = if (pdfH > 0f) displayedH / pdfH else 1f
-        val sourceOffset = centerPdfY * scale
-        val sourceDocY = pageTopDocY + sourceOffset
-        (sourceDocY - viewportH / 2f + 16f).coerceIn(0f, maxScroll)
-      } else {
-        pageTopDocY.coerceIn(0f, maxScroll)
-      }
-    } else {
-      // Structured document mode
-      safePageNum = targetPageNum
-      val targetP = paragraphLayouts.find { it.pageNumber == targetPageNum }
-      targetScrollY = if (targetP != null) {
-        (docScrollY + targetP.topY - subheaderH - 16f).coerceIn(0f, maxDocScrollY)
-      } else {
-        0f
-      }
-    }
-
-    docScrollAnimator?.cancel()
-    val animator = ValueAnimator.ofFloat(docScrollY, targetScrollY).apply {
-      duration = 420
-      interpolator = DecelerateInterpolator()
-      addUpdateListener {
-        docScrollY = it.animatedValue as Float
-        invalidate()
-      }
-      start()
-    }
-    docScrollAnimator = animator
-
-    pulsePageNumber = safePageNum
-    pulseSourceRects = sourceRects
-    pulseAlpha = 240
-
-    pulseAnimator?.cancel()
-    val pulseAnim = ValueAnimator.ofInt(240, 0).apply {
-      duration = 1400
-      addUpdateListener {
-        pulseAlpha = it.animatedValue as Int
-        invalidate()
-      }
-      start()
-    }
-    pulseAnimator = pulseAnim
-
-    // Center horizontally if zoomed in
-    if (activePdfDoc != null && sourceRects.isNotEmpty() && maxDocScrollX > 0f) {
-      val minX = sourceRects.minOf { it.left }
-      val maxX = sourceRects.maxOf { it.right }
-      val centerPdfX = (minX + maxX) / 2f
-      val pSize = runCatching { activePdfDoc?.getPage(safePageNum - 1)?.size }.getOrNull() ?: com.thinkspace.pdfengine.model.PageSize.LETTER
-      val pdfW = pSize.width
-      val paperMargin = 10f * density
-      val basePaperW = viewW - paperMargin * 2f
-      val paperW = basePaperW * pdfScaleFactor
-      val scaleX = if (pdfW > 0f) paperW / pdfW else 1f
-      val sourceX = centerPdfX * scaleX
-      docScrollX = (sourceX - basePaperW / 2f).coerceIn(0f, maxDocScrollX)
-    }
-
-    invalidate()
-  }
 
   // ---------------------------------------------------------------------------
   // Native PDF Engine Search & Navigation
+  // Extracted to ThinkspaceViewSearch.kt as extension functions
   // ---------------------------------------------------------------------------
-
-  fun closeSearch() {
-    // Cancel any running search coroutine
-    searchJob?.cancel()
-    searchJob = null
-    isSearchActive = false
-    isSearching = false
-    searchMatches.clear()
-    currentSearchIndex = 0
-    compressionEngine.resetAllToNormal(animate = true) { invalidate() }
-    // Remove native overlay panel if visible
-    removeSearchOverlay()
-    invalidate()
-  }
-
-  fun triggerSearchCollapse() {
-    if (activePdfDoc == null || searchMatches.isEmpty()) return
-    val matchingPages = searchMatches.map { it.pageIndex }.toSet()
-    compressionEngine.applySearchMatches(matchingPages, animate = true) {
-      invalidate()
-    }
-  }
-
-  private fun removeSearchOverlay() {
-    val ov = searchOverlayView ?: return
-    (ov.parent as? android.view.ViewGroup)?.removeView(ov)
-    // Dismiss keyboard
-    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
-    imm?.hideSoftInputFromWindow(windowToken, 0)
-    searchOverlayView = null
-    searchCounterLabel = null
-  }
-
-  fun goToNextMatch() {
-    if (searchMatches.isEmpty()) return
-    currentSearchIndex = (currentSearchIndex + 1) % searchMatches.size
-    scrollToCurrentMatch()
-    updateSearchCounter()
-    invalidate()
-  }
-
-  fun goToPreviousMatch() {
-    if (searchMatches.isEmpty()) return
-    currentSearchIndex = (currentSearchIndex - 1 + searchMatches.size) % searchMatches.size
-    scrollToCurrentMatch()
-    updateSearchCounter()
-    invalidate()
-  }
-
-  private fun scrollToCurrentMatch() {
-    val match = searchMatches.getOrNull(currentSearchIndex) ?: return
-    scrollToDocumentPage(match.pageIndex + 1, match.rects)
-  }
-
-  fun performSearch(query: String) {
-    val q = query.trim()
-    if (q.isEmpty()) {
-      closeSearch()
-      return
-    }
-    // Cancel previous search immediately
-    searchJob?.cancel()
-    searchJob = null
-
-    currentSearchQuery = q
-    isSearchActive = true
-    isSearching = true
-    searchMatches.clear()
-    currentSearchIndex = 0
-    invalidate()
-
-    // Update counter label while searching
-    updateSearchCounter()
-
-    searchJob = renderScope.launch {
-      val pdf = activePdfDoc
-      if (pdf != null) {
-        // ── Incremental path: results stream in page-by-page ──────────────────
-        val engine = PdfEngineModule.getOrCreateEngine(context)
-        val docEngine = engine as? com.thinkspace.pdfengine.core.DefaultPdfDocumentEngine
-
-        if (docEngine != null) {
-          var navigatedToFirst = false
-          try {
-            docEngine.searchIncremental(
-              document = pdf,
-              query = q,
-              onMatchFound = { pageResults, _ ->
-                val newMatches = pageResults.map { sr ->
-                  val rects = if (sr.quads.isNotEmpty()) {
-                    sr.quads.map { qd ->
-                      RectF(
-                        minOf(qd.topLeft.x, qd.bottomLeft.x),
-                        minOf(qd.topLeft.y, qd.topRight.y),
-                        maxOf(qd.topRight.x, qd.bottomRight.x),
-                        maxOf(qd.bottomLeft.y, qd.bottomRight.y)
-                      )
-                    }
-                  } else {
-                    listOf(RectF(sr.bounds.left, sr.bounds.top, sr.bounds.right, sr.bounds.bottom))
-                  }
-                  NativeSearchMatch(
-                    pageIndex = sr.pageIndex,
-                    matchedText = sr.matchedText,
-                    rects = rects,
-                    contextSnippet = sr.context
-                  )
-                }
-
-                withContext(Dispatchers.Main) {
-                  // Maintain sorted order as matches arrive
-                  searchMatches.addAll(newMatches)
-                  searchMatches.sortWith(compareBy({ it.pageIndex }, { it.rects.firstOrNull()?.top ?: 0f }, { it.rects.firstOrNull()?.left ?: 0f }))
-
-                  // Navigate to the FIRST match immediately (only once)
-                  if (!navigatedToFirst && searchMatches.isNotEmpty()) {
-                    navigatedToFirst = true
-                    currentSearchIndex = 0
-                    scrollToCurrentMatch()
-                  } else if (navigatedToFirst) {
-                    // Keep currentSearchIndex pointing at the same logical match
-                    // (its position in the sorted list may have shifted if earlier-page results arrived late)
-                    // Nothing to do: index is still valid, new matches are appended after
-                  }
-                  updateSearchCounter()
-                  invalidate()
-                }
-                true // continue searching
-              }
-            )
-          } catch (e: kotlinx.coroutines.CancellationException) {
-            // Normal — new query cancelled this job
-            return@launch
-          } catch (e: Exception) {
-            e.printStackTrace()
-          }
-
-          withContext(Dispatchers.Main) {
-            isSearching = false
-            updateSearchCounter()
-            if (searchMatches.isEmpty()) {
-              hudToast.show("No matches for \"$q\"")
-            } else {
-              val matchingPages = searchMatches.map { it.pageIndex }.toSet()
-              compressionEngine.applySearchMatches(matchingPages, animate = true) {
-                invalidate()
-              }
-            }
-            invalidate()
-          }
-        } else {
-          // Fallback: old blocking search via engine interface
-          try {
-            val searchResults = engine.search(pdf, q)
-            val results = searchResults.map { sr ->
-              val rects = if (sr.quads.isNotEmpty()) {
-                sr.quads.map { qd ->
-                  RectF(
-                    minOf(qd.topLeft.x, qd.bottomLeft.x),
-                    minOf(qd.topLeft.y, qd.topRight.y),
-                    maxOf(qd.topRight.x, qd.bottomRight.x),
-                    maxOf(qd.bottomLeft.y, qd.bottomRight.y)
-                  )
-                }
-              } else {
-                listOf(RectF(sr.bounds.left, sr.bounds.top, sr.bounds.right, sr.bounds.bottom))
-              }
-              NativeSearchMatch(
-                pageIndex = sr.pageIndex,
-                matchedText = sr.matchedText,
-                rects = rects,
-                contextSnippet = sr.context
-              )
-            }
-            withContext(Dispatchers.Main) {
-              isSearching = false
-              searchMatches.clear()
-              searchMatches.addAll(results)
-              currentSearchIndex = 0
-              updateSearchCounter()
-              if (searchMatches.isNotEmpty()) {
-                val matchingPages = searchMatches.map { it.pageIndex }.toSet()
-                compressionEngine.applySearchMatches(matchingPages, animate = true) {
-                  invalidate()
-                }
-                scrollToCurrentMatch()
-              } else {
-                hudToast.show("No matches for \"$q\"")
-              }
-              invalidate()
-            }
-          } catch (e: Exception) {
-            e.printStackTrace()
-          }
-        }
-      } else if (activeDocument != null) {
-        // Structured document (NativeDoc) search — keep original behavior
-        val doc = activeDocument!!
-        val results = mutableListOf<NativeSearchMatch>()
-        for (sec in doc.sections) {
-          for ((pIdx, pText) in sec.paragraphs.withIndex()) {
-            var idx = 0
-            val lowerP = pText.lowercase()
-            val lowerQ = q.lowercase()
-            while (idx < lowerP.length) {
-              val found = lowerP.indexOf(lowerQ, idx)
-              if (found == -1) break
-              val pLayout = paragraphLayouts.find { it.secId == sec.id && it.pIdx == pIdx }
-              val rects = if (pLayout != null && pLayout.layout.lineCount > 0) {
-                val line = pLayout.layout.getLineForOffset(found)
-                val lineTop = pLayout.topY + pLayout.layout.getLineTop(line).toFloat()
-                val lineBottom = pLayout.topY + pLayout.layout.getLineBottom(line).toFloat()
-                val startX = pLayout.paperX + pLayout.layout.getPrimaryHorizontal(found)
-                val endX = pLayout.paperX + pLayout.layout.getPrimaryHorizontal(minOf(found + q.length, pText.length))
-                listOf(RectF(minOf(startX, endX), lineTop, maxOf(startX, endX), lineBottom))
-              } else {
-                listOf(RectF(20f, 20f, 200f, 40f))
-              }
-              results.add(
-                NativeSearchMatch(
-                  pageIndex = sec.pageNumber - 1,
-                  matchedText = pText.substring(found, minOf(found + q.length, pText.length)),
-                  rects = rects,
-                  contextSnippet = pText
-                )
-              )
-              idx = found + maxOf(1, lowerQ.length)
-            }
-          }
-        }
-        results.sortWith(compareBy({ it.pageIndex }, { it.rects.firstOrNull()?.top ?: 0f }, { it.rects.firstOrNull()?.left ?: 0f }))
-        withContext(Dispatchers.Main) {
-          isSearching = false
-          searchMatches.clear()
-          searchMatches.addAll(results)
-          currentSearchIndex = 0
-          updateSearchCounter()
-          if (searchMatches.isNotEmpty()) {
-            scrollToCurrentMatch()
-          } else {
-            hudToast.show("No matches for \"$q\"")
-          }
-          invalidate()
-        }
-      }
-    }
-  }
-
-  /**
-   * Opens the native search panel — a real Android overlay ViewGroup containing
-   * an EditText (with real keyboard) placed at the top of the document area.
-   * The existing canvas-drawn HUD (‹ Prev | X / N | Next › | ✕) handles navigation.
-   * This replaces the old AlertDialog approach.
-   */
-  fun promptSearchDialog() {
-    // If panel already open, just focus the input
-    val existing = searchOverlayView
-    if (existing != null) {
-      existing.findViewWithTag<EditText>("search_input")?.requestFocus()
-      return
-    }
-
-    // Find activity root to attach to
-    val activity = generateSequence(context) {
-      (it as? android.content.ContextWrapper)?.baseContext
-    }.filterIsInstance<Activity>().firstOrNull()
-
-    val rootView = activity?.window?.decorView
-      ?.findViewById<android.widget.FrameLayout>(android.R.id.content)
-      ?: run { showFallbackDialog(); return }
-
-    val d = density
-
-    // ── Panel container ────────────────────────────────────────────────────
-    val panel = android.widget.LinearLayout(context).apply {
-      orientation = android.widget.LinearLayout.HORIZONTAL
-      gravity = android.view.Gravity.CENTER_VERTICAL
-      setBackgroundColor(Color.parseColor("#0F172A"))
-      elevation = 20f * d
-      // Round bottom corners only (top is flush with subheader)
-      outlineProvider = object : android.view.ViewOutlineProvider() {
-        override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
-          outline.setRoundRect(0, 0, view.width, view.height, 12f * d)
-        }
-      }
-      clipToOutline = true
-      setPadding((10f * d).toInt(), (6f * d).toInt(), (6f * d).toInt(), (6f * d).toInt())
-    }
-
-    // Lens icon
-    val lensLabel = android.widget.TextView(context).apply {
-      text = "🔍"
-      textSize = 15f
-      setPadding(0, 0, (6f * d).toInt(), 0)
-    }
-
-    // Text input
-    val input = EditText(context).apply {
-      tag = "search_input"
-      hint = "Search in document…"
-      setText(currentSearchQuery)
-      setSelection(text.length)
-      setSingleLine(true)
-      setTextColor(Color.WHITE)
-      setHintTextColor(Color.parseColor("#64748B"))
-      background = null
-      textSize = 14f
-      imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
-      inputType = android.text.InputType.TYPE_CLASS_TEXT
-      layoutParams = android.widget.LinearLayout.LayoutParams(
-        0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-      )
-    }
-
-    // Counter label (e.g. "3 / 12" or "Searching…")
-    val counter = android.widget.TextView(context).apply {
-      text = if (isSearching) "Searching…" else if (searchMatches.isNotEmpty()) "${currentSearchIndex + 1} / ${searchMatches.size}" else ""
-      setTextColor(Color.parseColor("#00ADB5"))
-      textSize = 12f
-      android.text.TextUtils.TruncateAt.END
-      setPadding((6f * d).toInt(), 0, (6f * d).toInt(), 0)
-    }
-    searchCounterLabel = counter
-
-    // Previous button [ ‹ ]
-    val prevBtn = android.widget.TextView(context).apply {
-      text = "‹"
-      textSize = 18f
-      setTextColor(Color.parseColor("#00ADB5"))
-      gravity = android.view.Gravity.CENTER
-      setBackgroundColor(Color.parseColor("#1E293B"))
-      val btnPadH = (8f * d).toInt()
-      val btnPadV = (2f * d).toInt()
-      setPadding(btnPadH, btnPadV, btnPadH, btnPadV)
-      val marginParams = android.widget.LinearLayout.LayoutParams(
-        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
-        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-      ).apply {
-        leftMargin = (2f * d).toInt()
-        rightMargin = (2f * d).toInt()
-      }
-      layoutParams = marginParams
-      setOnClickListener { goToPreviousMatch() }
-    }
-
-    // Next button [ › ]
-    val nextBtn = android.widget.TextView(context).apply {
-      text = "›"
-      textSize = 18f
-      setTextColor(Color.parseColor("#00ADB5"))
-      gravity = android.view.Gravity.CENTER
-      setBackgroundColor(Color.parseColor("#1E293B"))
-      val btnPadH = (8f * d).toInt()
-      val btnPadV = (2f * d).toInt()
-      setPadding(btnPadH, btnPadV, btnPadH, btnPadV)
-      val marginParams = android.widget.LinearLayout.LayoutParams(
-        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
-        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-      ).apply {
-        leftMargin = (2f * d).toInt()
-        rightMargin = (4f * d).toInt()
-      }
-      layoutParams = marginParams
-      setOnClickListener { goToNextMatch() }
-    }
-
-    // Close button
-    val closeBtn = android.widget.TextView(context).apply {
-      text = "✕"
-      textSize = 14f
-      setTextColor(Color.parseColor("#94A3B8"))
-      setPadding((8f * d).toInt(), (6f * d).toInt(), (8f * d).toInt(), (6f * d).toInt())
-      setOnClickListener { closeSearch() }
-    }
-
-    panel.addView(lensLabel)
-    panel.addView(input)
-    panel.addView(prevBtn)
-    panel.addView(counter)
-    panel.addView(nextBtn)
-    panel.addView(closeBtn)
-
-    // ── Position the panel at the top of the document area ─────────────────
-    val viewLocation = IntArray(2)
-    getLocationInWindow(viewLocation)
-    val rootLocation = IntArray(2)
-    rootView.getLocationInWindow(rootLocation)
-
-    val panelTop = viewLocation[1] - rootLocation[1] + (4f * d).toInt()
-    val panelLeft = viewLocation[0] - rootLocation[0] + (10f * d).toInt()
-    val panelWidth = width - (20f * d).toInt()
-    val panelHeight = (44f * d).toInt()
-
-    val params = android.widget.FrameLayout.LayoutParams(panelWidth, panelHeight).apply {
-      topMargin = panelTop
-      leftMargin = panelLeft
-    }
-    rootView.addView(panel, params)
-    searchOverlayView = panel
-
-    // ── Wire up real-time search as user types ─────────────────────────────
-    input.addTextChangedListener(object : android.text.TextWatcher {
-      private var debounceJob: kotlinx.coroutines.Job? = null
-      override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-      override fun afterTextChanged(s: android.text.Editable?) {}
-      override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-        val q = s?.toString()?.trim() ?: ""
-        debounceJob?.cancel()
-        if (q.isEmpty()) {
-          searchJob?.cancel()
-          searchJob = null
-          isSearchActive = false
-          isSearching = false
-          searchMatches.clear()
-          currentSearchIndex = 0
-          currentSearchQuery = ""
-          updateSearchCounter()
-          invalidate()
-          return
-        }
-        // Debounce 250 ms so we don't search every keystroke
-        debounceJob = renderScope.launch {
-          kotlinx.coroutines.delay(250)
-          performSearch(q)
-        }
-      }
-    })
-
-    input.setOnEditorActionListener { _, actionId, _ ->
-      if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) {
-        val q = input.text.toString().trim()
-        if (q.isNotEmpty()) performSearch(q)
-        true
-      } else false
-    }
-
-    // Show keyboard
-    input.requestFocus()
-    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
-    imm?.showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
-
-    // If we already have results (re-opening), show them immediately
-    if (searchMatches.isNotEmpty()) {
-      isSearchActive = true
-      invalidate()
-    }
-  }
-
-  /** Updates the counter label in the search overlay panel (e.g. "3 / 12"). */
-  private fun updateSearchCounter() {
-    val lbl = searchCounterLabel ?: return
-    lbl.post {
-      lbl.text = when {
-        isSearching && searchMatches.isEmpty() -> "Searching…"
-        isSearching -> "${currentSearchIndex + 1} / ${searchMatches.size}+"
-        searchMatches.isEmpty() && currentSearchQuery.isNotEmpty() -> "No results"
-        searchMatches.isEmpty() -> ""
-        else -> "${currentSearchIndex + 1} / ${searchMatches.size}"
-      }
-    }
-  }
-
-  /** Fallback for when we can't find the activity root view. */
-  private fun showFallbackDialog() {
-    val act = (context as? Activity)
-      ?: ((context as? android.content.ContextWrapper)?.baseContext as? Activity)
-    val ctx = act ?: context
-    val input = EditText(ctx).apply {
-      hint = "Search in document..."
-      setText(currentSearchQuery)
-      selectAll()
-      setSingleLine(true)
-      setTextColor(Color.WHITE)
-      setHintTextColor(Color.parseColor("#64748B"))
-      setBackgroundColor(Color.parseColor("#1E293B"))
-      setPadding((16f * density).toInt(), (12f * density).toInt(), (16f * density).toInt(), (12f * density).toInt())
-      imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
-    }
-    val container = android.widget.FrameLayout(ctx).apply {
-      setPadding((18f * density).toInt(), (10f * density).toInt(), (18f * density).toInt(), (6f * density).toInt())
-      addView(input)
-    }
-    val dialog = android.app.AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-      .setTitle("Search Document")
-      .setView(container)
-      .setPositiveButton("Search") { _, _ ->
-        val q = input.text.toString().trim()
-        if (q.isNotEmpty()) performSearch(q)
-      }
-      .setNegativeButton("Cancel", null)
-      .create()
-    input.setOnEditorActionListener { _, actionId, _ ->
-      if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) {
-        val q = input.text.toString().trim()
-        if (q.isNotEmpty()) performSearch(q)
-        dialog.dismiss()
-        true
-      } else false
-    }
-    dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
-    dialog.show()
-    input.requestFocus()
-  }
 
   // ---------------------------------------------------------------------------
   // Native LiquidText Document Drawer & Folder Management System
+  // Extracted to ThinkspaceViewDrawer.kt as extension functions
   // ---------------------------------------------------------------------------
-
-  fun closeDocumentsSheet() {
-    post {
-      documentsSheetDialog?.dismiss()
-      documentsSheetDialog = null
-    }
-  }
-
-  fun openDocumentsSheet() {
-    post {
-      val activity = generateSequence(context) {
-        (it as? android.content.ContextWrapper)?.baseContext
-      }.filterIsInstance<Activity>().firstOrNull() ?: return@post
-
-      documentsSheetDialog?.dismiss()
-      val dialog = Dialog(activity, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen)
-      documentsSheetDialog = dialog
-
-      val d = density
-      val dm = activity.resources.displayMetrics
-      val cardW = min(450f * d, dm.widthPixels * 0.92f).toInt()
-      val cardH = min(620f * d, dm.heightPixels * 0.85f).toInt()
-
-      val rootLayout = FrameLayout(activity).apply {
-        layoutParams = FrameLayout.LayoutParams(
-          ViewGroup.LayoutParams.MATCH_PARENT,
-          ViewGroup.LayoutParams.MATCH_PARENT
-        )
-        setBackgroundColor(Color.parseColor("#B3050C16"))
-        setOnClickListener { dialog.dismiss() }
-      }
-
-      val card = LinearLayout(activity).apply {
-        orientation = LinearLayout.VERTICAL
-        layoutParams = FrameLayout.LayoutParams(cardW, cardH).apply {
-          gravity = Gravity.CENTER
-        }
-        background = GradientDrawable().apply {
-          setColor(Color.parseColor("#141D2B"))
-          cornerRadius = 18f * d
-          setStroke((1.5f * d).toInt(), Color.parseColor("#2C3A4E"))
-        }
-        elevation = 28f * d
-        setPadding(0, (14f * d).toInt(), 0, (14f * d).toInt())
-        setOnClickListener { /* consume click so sheet does not dismiss */ }
-      }
-
-      // Top Header
-      val headerLayout = LinearLayout(activity).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding((16f * d).toInt(), 0, (16f * d).toInt(), (10f * d).toInt())
-      }
-
-      val titleView = TextView(activity).apply {
-        text = "📄 Documents"
-        setTextColor(Color.WHITE)
-        textSize = 17f
-        typeface = Typeface.DEFAULT_BOLD
-        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-      }
-      headerLayout.addView(titleView)
-
-      // + Doc button
-      val addDocBtn = TextView(activity).apply {
-        text = "+ Doc"
-        setTextColor(Color.parseColor("#00ADB5"))
-        textSize = 12f
-        typeface = Typeface.DEFAULT_BOLD
-        background = GradientDrawable().apply {
-          setColor(Color.parseColor("#0A2B35"))
-          cornerRadius = 8f * d
-          setStroke((1.2f * d).toInt(), Color.parseColor("#00ADB5"))
-        }
-        setPadding((12f * d).toInt(), (6f * d).toInt(), (12f * d).toInt(), (6f * d).toInt())
-        layoutParams = LinearLayout.LayoutParams(
-          ViewGroup.LayoutParams.WRAP_CONTENT,
-          ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { rightMargin = (8f * d).toInt() }
-        setOnClickListener {
-          dispatchRequestAddDocumentEvent()
-          hudToast.show("Select a PDF to import")
-        }
-      }
-      headerLayout.addView(addDocBtn)
-
-      // + Folder button
-      val addFolderBtn = TextView(activity).apply {
-        text = "📁+ Folder"
-        setTextColor(Color.parseColor("#E2E8F0"))
-        textSize = 12f
-        typeface = Typeface.DEFAULT_BOLD
-        background = GradientDrawable().apply {
-          setColor(Color.parseColor("#1E293B"))
-          cornerRadius = 8f * d
-          setStroke((1.2f * d).toInt(), Color.parseColor("#334155"))
-        }
-        setPadding((10f * d).toInt(), (6f * d).toInt(), (10f * d).toInt(), (6f * d).toInt())
-        layoutParams = LinearLayout.LayoutParams(
-          ViewGroup.LayoutParams.WRAP_CONTENT,
-          ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { rightMargin = (8f * d).toInt() }
-      }
-      headerLayout.addView(addFolderBtn)
-
-      // Close button
-      val closeBtn = TextView(activity).apply {
-        text = "✕"
-        setTextColor(Color.parseColor("#94A3B8"))
-        textSize = 13f
-        gravity = Gravity.CENTER
-        background = GradientDrawable().apply {
-          setColor(Color.parseColor("#1E293B"))
-          cornerRadius = 14f * d
-        }
-        layoutParams = LinearLayout.LayoutParams((28f * d).toInt(), (28f * d).toInt())
-        setOnClickListener { dialog.dismiss() }
-      }
-      headerLayout.addView(closeBtn)
-      card.addView(headerLayout)
-
-      // Search bar
-      var filterQuery = ""
-      val searchContainer = LinearLayout(activity).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        layoutParams = LinearLayout.LayoutParams(
-          ViewGroup.LayoutParams.MATCH_PARENT,
-          ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
-          setMargins((16f * d).toInt(), 0, (16f * d).toInt(), (12f * d).toInt())
-        }
-        background = GradientDrawable().apply {
-          setColor(Color.parseColor("#0B1320"))
-          cornerRadius = 10f * d
-          setStroke((1f * d).toInt(), Color.parseColor("#243142"))
-        }
-        setPadding((10f * d).toInt(), (4f * d).toInt(), (10f * d).toInt(), (4f * d).toInt())
-      }
-
-      val searchIcon = TextView(activity).apply {
-        text = "🔍"
-        textSize = 13f
-        setPadding(0, 0, (6f * d).toInt(), 0)
-      }
-      searchContainer.addView(searchIcon)
-
-      val searchInput = EditText(activity).apply {
-        hint = "Search documents & folders…"
-        setHintTextColor(Color.parseColor("#64748B"))
-        setTextColor(Color.WHITE)
-        textSize = 13.5f
-        background = null
-        setSingleLine(true)
-        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-      }
-      searchContainer.addView(searchInput)
-      card.addView(searchContainer)
-
-      // Scrollable Tree Layout
-      val scrollView = ScrollView(activity).apply {
-        layoutParams = LinearLayout.LayoutParams(
-          ViewGroup.LayoutParams.MATCH_PARENT,
-          0,
-          1f
-        )
-      }
-      val treeLayout = LinearLayout(activity).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(0, 0, 0, (12f * d).toInt())
-      }
-      scrollView.addView(treeLayout)
-      card.addView(scrollView)
-      rootLayout.addView(card)
-
-      // Recursive tree builder
-      lateinit var renderTree: (String) -> Unit
-      renderTree = { query ->
-        treeLayout.removeAllViews()
-        val q = query.trim().lowercase()
-
-        if (workspaceDocumentEntries.isEmpty() && workspaceFolders.isEmpty()) {
-          val emptyTv = TextView(activity).apply {
-            text = "No documents in workspace.\nTap + Doc to add a PDF."
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#64748B"))
-            textSize = 13.5f
-            setPadding((24f * d).toInt(), (48f * d).toInt(), (24f * d).toInt(), (48f * d).toInt())
-          }
-          treeLayout.addView(emptyTv)
-        } else {
-          lateinit var renderFolderItem: (WorkspaceFolder, Int) -> Unit
-          lateinit var renderDocumentItem: (WorkspaceDocumentEntry, Int) -> Unit
-
-          renderFolderItem = { folder, depth ->
-            val childFolders = workspaceFolders.filter { it.parentId == folder.id }
-            val childDocs = workspaceDocumentEntries.filter { it.folderId == folder.id }
-
-            val folderMatches = q.isEmpty() || folder.name.lowercase().contains(q)
-            val anyChildMatches = q.isNotEmpty() && (
-              childFolders.any { it.name.lowercase().contains(q) } ||
-              childDocs.any { it.title.lowercase().contains(q) }
-            )
-
-            if (!(q.isNotEmpty() && !folderMatches && !anyChildMatches)) {
-              val isExpanded = expandedFolderIds.contains(folder.id) || q.isNotEmpty()
-
-              val folderRow = LinearLayout(activity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                  ViewGroup.LayoutParams.MATCH_PARENT,
-                  ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                  setMargins((12f * d).toInt(), (2f * d).toInt(), (12f * d).toInt(), (2f * d).toInt())
-                }
-                background = GradientDrawable().apply {
-                  setColor(Color.parseColor("#1B2536"))
-                  cornerRadius = 8f * d
-                }
-                setPadding(
-                  ((14f + depth * 18f) * d).toInt(),
-                  (8f * d).toInt(),
-                  (10f * d).toInt(),
-                  (8f * d).toInt()
-                )
-                setOnClickListener {
-                  if (expandedFolderIds.contains(folder.id)) {
-                    expandedFolderIds.remove(folder.id)
-                  } else {
-                    expandedFolderIds.add(folder.id)
-                  }
-                  renderTree(filterQuery)
-                }
-              }
-
-              val chevronIcon = TextView(activity).apply {
-                text = if (isExpanded) "▾  📂 " else "▸  📁 "
-                textSize = 14f
-                setTextColor(Color.parseColor("#94A3B8"))
-              }
-              folderRow.addView(chevronIcon)
-
-              val folderTitle = TextView(activity).apply {
-                text = folder.name
-                setTextColor(Color.parseColor("#F1F5F9"))
-                textSize = 13.5f
-                typeface = Typeface.DEFAULT_BOLD
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-              }
-              folderRow.addView(folderTitle)
-
-              val countBadge = TextView(activity).apply {
-                text = "(${childDocs.size + childFolders.size})"
-                setTextColor(Color.parseColor("#64748B"))
-                textSize = 11.5f
-                setPadding((6f * d).toInt(), 0, (8f * d).toInt(), 0)
-              }
-              folderRow.addView(countBadge)
-
-              val folderDotsBtn = TextView(activity).apply {
-                text = "⋮"
-                setTextColor(Color.parseColor("#94A3B8"))
-                textSize = 16f
-                gravity = Gravity.CENTER
-                setPadding((6f * d).toInt(), (2f * d).toInt(), (6f * d).toInt(), (2f * d).toInt())
-                setOnClickListener {
-                  promptFolderActions(activity, folder) { renderTree(filterQuery) }
-                }
-              }
-              folderRow.addView(folderDotsBtn)
-              treeLayout.addView(folderRow)
-
-              if (isExpanded) {
-                for (sub in childFolders) {
-                  renderFolderItem(sub, depth + 1)
-                }
-                for (doc in childDocs) {
-                  renderDocumentItem(doc, depth + 1)
-                }
-              }
-            }
-          }
-
-          renderDocumentItem = { doc, depth ->
-            if (q.isEmpty() || doc.title.lowercase().contains(q)) {
-              val isActive = doc.id == activeDocumentId
-
-              val docRow = LinearLayout(activity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                  ViewGroup.LayoutParams.MATCH_PARENT,
-                  ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                  setMargins((12f * d).toInt(), (2f * d).toInt(), (12f * d).toInt(), (2f * d).toInt())
-                }
-                background = GradientDrawable().apply {
-                  if (isActive) {
-                    setColor(Color.parseColor("#092833"))
-                    cornerRadius = 8f * d
-                    setStroke((1.5f * d).toInt(), Color.parseColor("#00ADB5"))
-                  } else {
-                    setColor(Color.parseColor("#151E2C"))
-                    cornerRadius = 8f * d
-                  }
-                }
-                setPadding(
-                  ((14f + depth * 18f) * d).toInt(),
-                  (8f * d).toInt(),
-                  (10f * d).toInt(),
-                  (8f * d).toInt()
-                )
-                setOnClickListener {
-                  switchToDocument(doc.id)
-                  dispatchDocumentChangeEvent(doc)
-                  dialog.dismiss()
-                }
-              }
-
-              val accentBar = View(activity).apply {
-                layoutParams = LinearLayout.LayoutParams((3f * d).toInt(), (16f * d).toInt()).apply {
-                  rightMargin = (6f * d).toInt()
-                }
-                background = GradientDrawable().apply {
-                  setColor(getDocumentAccentColor(doc.id))
-                  cornerRadius = 1.5f * d
-                }
-              }
-              docRow.addView(accentBar)
-
-              val docIcon = TextView(activity).apply {
-                text = "📄 "
-                textSize = 13.5f
-              }
-              docRow.addView(docIcon)
-
-              val docTitle = TextView(activity).apply {
-                text = doc.title
-                setTextColor(if (isActive) Color.parseColor("#00ADB5") else Color.parseColor("#F8FAFC"))
-                textSize = 13f
-                typeface = if (isActive) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-              }
-              docRow.addView(docTitle)
-
-              val pageBadge = TextView(activity).apply {
-                text = "${doc.pageCount} pgs"
-                setTextColor(Color.parseColor("#64748B"))
-                textSize = 11f
-                setPadding((4f * d).toInt(), 0, (6f * d).toInt(), 0)
-              }
-              docRow.addView(pageBadge)
-
-              if (isActive) {
-                val checkBadge = TextView(activity).apply {
-                  text = "✓ "
-                  setTextColor(Color.parseColor("#00ADB5"))
-                  textSize = 13f
-                  typeface = Typeface.DEFAULT_BOLD
-                }
-                docRow.addView(checkBadge)
-              }
-
-              val docDotsBtn = TextView(activity).apply {
-                text = "⋮"
-                setTextColor(Color.parseColor("#94A3B8"))
-                textSize = 16f
-                gravity = Gravity.CENTER
-                setPadding((6f * d).toInt(), (2f * d).toInt(), (6f * d).toInt(), (2f * d).toInt())
-                setOnClickListener {
-                  promptDocumentActions(activity, doc) { renderTree(filterQuery) }
-                }
-              }
-              docRow.addView(docDotsBtn)
-              treeLayout.addView(docRow)
-            }
-          }
-
-          val rootFolders = workspaceFolders.filter { it.parentId.isNullOrEmpty() }
-          for (f in rootFolders) {
-            renderFolderItem(f, 0)
-          }
-
-          val rootDocs = workspaceDocumentEntries.filter { it.folderId.isNullOrEmpty() }
-          for (docEntry in rootDocs) {
-            renderDocumentItem(docEntry, 0)
-          }
-        }
-      }
-
-      addFolderBtn.setOnClickListener {
-        promptCreateFolder(activity) { renderTree(filterQuery) }
-      }
-
-      searchInput.addTextChangedListener(object : TextWatcher {
-        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-          filterQuery = s?.toString() ?: ""
-          renderTree(filterQuery)
-        }
-        override fun afterTextChanged(s: Editable?) {}
-      })
-
-      renderTree("")
-      dialog.setContentView(rootLayout)
-      dialog.show()
-    }
-  }
-
-  private fun promptCreateFolder(activity: Activity, onDone: () -> Unit) {
-    val d = density
-    val input = EditText(activity).apply {
-      hint = "Folder name"
-      setHintTextColor(Color.parseColor("#64748B"))
-      setTextColor(Color.WHITE)
-      setBackgroundColor(Color.parseColor("#1E293B"))
-      setPadding((16f * d).toInt(), (12f * d).toInt(), (16f * d).toInt(), (12f * d).toInt())
-      setSingleLine(true)
-    }
-    val container = FrameLayout(activity).apply {
-      setPadding((18f * d).toInt(), (10f * d).toInt(), (18f * d).toInt(), (6f * d).toInt())
-      addView(input)
-    }
-    AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-      .setTitle("New Folder")
-      .setView(container)
-      .setPositiveButton("Create") { _, _ ->
-        val name = input.text.toString().trim().ifEmpty { "New Folder" }
-        val newFolder = WorkspaceFolder(id = UUID.randomUUID().toString(), name = name)
-        workspaceFolders.add(newFolder)
-        expandedFolderIds.add(newFolder.id)
-        dispatchDocumentsUpdatedEvent()
-        onDone()
-      }
-      .setNegativeButton("Cancel", null)
-      .show()
-  }
-
-  private fun promptFolderActions(activity: Activity, folder: WorkspaceFolder, onDone: () -> Unit) {
-    val options = arrayOf("Rename Folder", "Delete Folder")
-    AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-      .setTitle("Folder: ${folder.name}")
-      .setItems(options) { _, which ->
-        when (which) {
-          0 -> {
-            val d = density
-            val input = EditText(activity).apply {
-              setText(folder.name)
-              setSelection(text.length)
-              setTextColor(Color.WHITE)
-              setBackgroundColor(Color.parseColor("#1E293B"))
-              setPadding((16f * d).toInt(), (12f * d).toInt(), (16f * d).toInt(), (12f * d).toInt())
-              setSingleLine(true)
-            }
-            val container = FrameLayout(activity).apply {
-              setPadding((18f * d).toInt(), (10f * d).toInt(), (18f * d).toInt(), (6f * d).toInt())
-              addView(input)
-            }
-            AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-              .setTitle("Rename Folder")
-              .setView(container)
-              .setPositiveButton("Save") { _, _ ->
-                val newName = input.text.toString().trim()
-                if (newName.isNotEmpty()) {
-                  folder.name = newName
-                  dispatchDocumentsUpdatedEvent()
-                  onDone()
-                }
-              }
-              .setNegativeButton("Cancel", null)
-              .show()
-          }
-          1 -> {
-            AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-              .setTitle("Delete Folder")
-              .setMessage("Delete folder \"${folder.name}\"? Contained documents will be moved to root.")
-              .setPositiveButton("Delete") { _, _ ->
-                for (doc in workspaceDocumentEntries) {
-                  if (doc.folderId == folder.id) {
-                    doc.folderId = folder.parentId
-                  }
-                }
-                for (sub in workspaceFolders) {
-                  if (sub.parentId == folder.id) {
-                    sub.parentId = folder.parentId
-                  }
-                }
-                workspaceFolders.removeAll { it.id == folder.id }
-                expandedFolderIds.remove(folder.id)
-                dispatchDocumentsUpdatedEvent()
-                onDone()
-              }
-              .setNegativeButton("Cancel", null)
-              .show()
-          }
-        }
-      }
-      .show()
-  }
-
-  private fun promptDocumentActions(activity: Activity, doc: WorkspaceDocumentEntry, onDone: () -> Unit) {
-    val options = arrayOf("Rename", "Add to New Folder", "Move to Folder…", "Delete")
-    AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-      .setTitle("Document: ${doc.title}")
-      .setItems(options) { _, which ->
-        when (which) {
-          0 -> {
-            val d = density
-            val input = EditText(activity).apply {
-              setText(doc.title)
-              setSelection(text.length)
-              setTextColor(Color.WHITE)
-              setBackgroundColor(Color.parseColor("#1E293B"))
-              setPadding((16f * d).toInt(), (12f * d).toInt(), (16f * d).toInt(), (12f * d).toInt())
-              setSingleLine(true)
-            }
-            val container = FrameLayout(activity).apply {
-              setPadding((18f * d).toInt(), (10f * d).toInt(), (18f * d).toInt(), (6f * d).toInt())
-              addView(input)
-            }
-            AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-              .setTitle("Rename Document")
-              .setView(container)
-              .setPositiveButton("Save") { _, _ ->
-                val newTitle = input.text.toString().trim()
-                if (newTitle.isNotEmpty()) {
-                  doc.title = newTitle
-                  invalidate()
-                  dispatchDocumentsUpdatedEvent()
-                  onDone()
-                }
-              }
-              .setNegativeButton("Cancel", null)
-              .show()
-          }
-          1 -> {
-            val d = density
-            val input = EditText(activity).apply {
-              hint = "Enter name for new folder"
-              setHintTextColor(Color.parseColor("#64748B"))
-              setTextColor(Color.WHITE)
-              setBackgroundColor(Color.parseColor("#1E293B"))
-              setPadding((16f * d).toInt(), (12f * d).toInt(), (16f * d).toInt(), (12f * d).toInt())
-              setSingleLine(true)
-            }
-            val container = FrameLayout(activity).apply {
-              setPadding((18f * d).toInt(), (10f * d).toInt(), (18f * d).toInt(), (6f * d).toInt())
-              addView(input)
-            }
-            AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-              .setTitle("New Folder")
-              .setView(container)
-              .setPositiveButton("Okay") { _, _ ->
-                val folderName = input.text.toString().trim().ifEmpty { "New Folder" }
-                val newFolder = WorkspaceFolder(
-                  id = UUID.randomUUID().toString(),
-                  name = folderName,
-                  parentId = doc.folderId
-                )
-                workspaceFolders.add(newFolder)
-                doc.folderId = newFolder.id
-                expandedFolderIds.add(newFolder.id)
-                dispatchDocumentsUpdatedEvent()
-                onDone()
-              }
-              .setNegativeButton("Cancel", null)
-              .show()
-          }
-          2 -> {
-            val destinationList = mutableListOf<Pair<String?, String>>()
-            if (!doc.folderId.isNullOrEmpty()) {
-              destinationList.add(null to "Root Level (Remove from folder)")
-            }
-            for (f in workspaceFolders) {
-              if (f.id != doc.folderId) {
-                destinationList.add(f.id to "📁  " + f.name)
-              }
-            }
-            if (destinationList.isEmpty()) {
-              hudToast.show("No other folders available")
-              return@setItems
-            }
-            val labels = destinationList.map { it.second }.toTypedArray()
-            AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-              .setTitle("Move \"${doc.title}\"")
-              .setItems(labels) { _, destIdx ->
-                val chosenFolderId = destinationList[destIdx].first
-                doc.folderId = chosenFolderId
-                if (chosenFolderId != null) {
-                  expandedFolderIds.add(chosenFolderId)
-                }
-                dispatchDocumentsUpdatedEvent()
-                onDone()
-              }
-              .setNegativeButton("Cancel", null)
-              .show()
-          }
-          3 -> {
-            AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-              .setTitle("Delete Document")
-              .setMessage("Remove \"${doc.title}\" from the workspace?")
-              .setPositiveButton("Remove") { _, _ ->
-                workspaceDocumentEntries.removeAll { it.id == doc.id }
-                if (activeDocumentId == doc.id) {
-                  val nextDoc = workspaceDocumentEntries.firstOrNull()
-                  if (nextDoc != null) {
-                    switchToDocument(nextDoc.id)
-                    dispatchDocumentChangeEvent(nextDoc)
-                  }
-                }
-                dispatchDocumentsUpdatedEvent()
-                invalidate()
-                onDone()
-              }
-              .setNegativeButton("Cancel", null)
-              .show()
-          }
-        }
-      }
-      .show()
-  }
-
-  fun dispatchDocumentChangeEvent(entry: WorkspaceDocumentEntry) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("documentId", entry.id)
-      putString("title", entry.title)
-      putString("uri", entry.uri)
-      putInt("pageCount", entry.pageCount)
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topDocumentChange", data))
-  }
-
-  fun dispatchDocumentsUpdatedEvent() {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val docsArr = JSONArray()
-    for (d in workspaceDocumentEntries) {
-      docsArr.put(JSONObject().apply {
-        put("id", d.id)
-        put("title", d.title)
-        put("pageCount", d.pageCount)
-        put("uri", d.uri)
-        put("colorAccent", d.colorAccent)
-        put("folderId", d.folderId ?: "")
-      })
-    }
-    val foldersArr = JSONArray()
-    for (f in workspaceFolders) {
-      foldersArr.put(JSONObject().apply {
-        put("id", f.id)
-        put("name", f.name)
-        put("parentId", f.parentId ?: "")
-        put("createdAt", f.createdAt)
-      })
-    }
-    val data = Arguments.createMap().apply {
-      putString("documentsJson", docsArr.toString())
-      putString("foldersJson", foldersArr.toString())
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topDocumentsUpdated", data))
-  }
-
-  fun dispatchRequestAddDocumentEvent() {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap()
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topRequestAddDocument", data))
-  }
 
   // ---------------------------------------------------------------------------
   // React Native Fabric Event Dispatchers
   // ---------------------------------------------------------------------------
   // ---------------------------------------------------------------------------
-  // Notebook Page \u2014 Rendering
+  // Notebook Page — Rendering, API, Persistence & Events
+  // Extracted to ThinkspaceViewNotebook.kt as extension functions
   // ---------------------------------------------------------------------------
-  /**
-   * Draws all notebook pages on the canvas (called inside the world-transform save/restore block).
-   * Pages are drawn in list order (first = bottom), with the selected page always highlighted.
-   */
-  private fun drawNotebookPages(canvas: Canvas) {
-    nbPageDeleteRects.clear()
-    nbPageStyleBtnRects.clear()
-    nbPageResizeRects.clear()
-
-    for (page in notebookPages) {
-      val isSelected = page.id == selectedNotebookPageId
-      val r = RectF(page.x, page.y, page.x + page.width, page.y + page.height)
-
-      // 1. Drop shadow
-      val shadowR = RectF(r.left + 5f, r.top + 5f, r.right + 5f, r.bottom + 5f)
-      canvas.drawRoundRect(shadowR, 10f, 10f, nbPageShadowPaint)
-
-      // 2. Paper background
-      val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = page.backgroundColor; style = Paint.Style.FILL
-      }
-      canvas.drawRoundRect(r, 10f, 10f, bgPaint)
-
-      // 3. Paper pattern (clipped inside page bounds)
-      canvas.save()
-      canvas.clipRect(r)
-      drawNotebookPagePattern(canvas, page, r)
-      canvas.restore()
-
-      // 4. Title (only when there is one and page is large enough)
-      if (page.title.isNotEmpty() && page.height > 60f) {
-        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#374151")
-          textSize = (page.height * 0.055f).coerceIn(14f, 22f)
-          typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
-        }
-        canvas.drawText(page.title, r.left + 18f, r.top + 28f, titlePaint)
-      }
-
-      // 5. Page border
-      canvas.drawRoundRect(r, 10f, 10f,
-        if (isSelected) nbPageSelectedBorderPaint else nbPageNormalBorderPaint)
-
-      // 6. Toolbar + controls when selected
-      if (isSelected) {
-        val tbH = 28f
-        val tbW = page.width.coerceAtMost(260f)
-        val tbLeft = r.left + (page.width - tbW) / 2f
-        val tbTop = r.top - tbH - 6f
-        val tbRect = RectF(tbLeft, tbTop, tbLeft + tbW, tbTop + tbH)
-
-        // Toolbar shadow
-        val toolShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#30000000"); style = Paint.Style.FILL
-        }
-        canvas.drawRoundRect(RectF(tbLeft, tbTop + 2f, tbLeft + tbW, tbTop + tbH + 2f),
-          12f, 12f, toolShadow)
-        // Toolbar bg + border
-        canvas.drawRoundRect(tbRect, 12f, 12f, nbPageToolbarBgPaint)
-        canvas.drawRoundRect(tbRect, 12f, 12f, nbPageToolbarBorderPaint)
-
-        val iconPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#CBD5E1"); textSize = 11.5f
-        }
-
-        val btnW = tbW / 4f
-        val midY = tbRect.centerY() + 4f
-
-        // [✥ Move] btn (visual header drag indicator)
-        val moveRect = RectF(tbLeft, tbTop, tbLeft + btnW, tbTop + tbH)
-        val moveLabel = "✥ Move"
-        canvas.drawText(moveLabel, moveRect.centerX() - iconPaint.measureText(moveLabel) / 2f, midY, iconPaint)
-
-        // [≡ Style] btn
-        val styleRect = RectF(tbLeft + btnW, tbTop, tbLeft + btnW * 2f, tbTop + tbH)
-        nbPageStyleBtnRects[page.id] = styleRect
-        val styleLabel = when (page.pageStyle) {
-          "blank" -> "Blank"
-          "ruled" -> "Ruled"
-          "grid"  -> "Grid"
-          "dotted"-> "Dots"
-          "sketch"-> "Sketch"
-          "cornell"-> "Cornell"
-          "squared"-> "Squared"
-          else    -> "Custom"
-        }
-        val styleFull = "≡ $styleLabel"
-        canvas.drawText(styleFull, styleRect.centerX() - iconPaint.measureText(styleFull) / 2f, midY, iconPaint)
-
-        // [⧉ Copy] btn
-        val dupRect = RectF(tbLeft + btnW * 2f, tbTop, tbLeft + btnW * 3f, tbTop + tbH)
-        nbPageDuplicateRects[page.id] = dupRect
-        val dupLabel = "⧉ Copy"
-        canvas.drawText(dupLabel, dupRect.centerX() - iconPaint.measureText(dupLabel) / 2f, midY, iconPaint)
-
-        // [🗑 Delete] btn
-        val deleteRect = RectF(tbLeft + btnW * 3f, tbTop, tbLeft + tbW, tbTop + tbH)
-        nbPageDeleteRects[page.id] = deleteRect
-        val delPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#FCA5A5"); textSize = 11.5f
-        }
-        val delLabel = "🗑 Delete"
-        canvas.drawText(delLabel, deleteRect.centerX() - delPaint.measureText(delLabel) / 2f, midY, delPaint)
-
-        // Dividers
-        val divPaint = Paint().apply { color = Color.parseColor("#334155"); strokeWidth = 1f }
-        canvas.drawLine(tbLeft + btnW, tbTop + 5f, tbLeft + btnW, tbTop + tbH - 5f, divPaint)
-        canvas.drawLine(tbLeft + btnW * 2f, tbTop + 5f, tbLeft + btnW * 2f, tbTop + tbH - 5f, divPaint)
-        canvas.drawLine(tbLeft + btnW * 3f, tbTop + 5f, tbLeft + btnW * 3f, tbTop + tbH - 5f, divPaint)
-
-        // 7. Four circular selection handles on corners (matching design reference)
-        val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#3B82F6"); style = Paint.Style.FILL
-        }
-        val cornerStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 1.5f
-        }
-        val corners = listOf(
-          Pair(r.left, r.top),
-          Pair(r.right, r.top),
-          Pair(r.left, r.bottom),
-          Pair(r.right, r.bottom)
-        )
-        for (pt in corners) {
-          canvas.drawCircle(pt.first, pt.second, 5.5f, cornerPaint)
-          canvas.drawCircle(pt.first, pt.second, 5.5f, cornerStroke)
-        }
-
-        // Bottom-right corner resize hit area
-        val handleSz = 22f
-        val handleRect = RectF(r.right - handleSz, r.bottom - handleSz, r.right, r.bottom)
-        nbPageResizeRects[page.id] = handleRect
-
-        // 8. Style picker overlay (if open for this page)
-        if (isNotebookStylePickerOpen && stylePickerForPageId == page.id) {
-          val styles = listOf(
-            "blank" to "Blank",
-            "ruled" to "Ruled",
-            "grid" to "Grid",
-            "dotted" to "Dotted",
-            "sketch" to "Sketch",
-            "cornell" to "Cornell",
-            "squared" to "Squared",
-            "custom" to "Custom"
-          )
-          val rowH = 34f
-          val popW = 125f
-          val popLeft = (nbPageStyleBtnRects[page.id]?.left ?: r.left)
-          val popTop = tbTop + tbH + 4f
-          val popRect = RectF(popLeft, popTop, popLeft + popW, popTop + styles.size * rowH)
-          nbPageStylePickerRect.set(popRect)
-
-          // Picker shadow + bg
-          canvas.drawRoundRect(RectF(popLeft, popTop + 2f, popLeft + popW, popTop + styles.size * rowH + 2f),
-            8f, 8f, toolShadow)
-          val popBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0F172A"); style = Paint.Style.FILL
-          }
-          canvas.drawRoundRect(popRect, 8f, 8f, popBg)
-          canvas.drawRoundRect(popRect, 8f, 8f, nbPageToolbarBorderPaint)
-
-          val rowPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            textSize = 12f
-          }
-          for (i in styles.indices) {
-            val (styleKey, styleLabel2) = styles[i]
-            val rowTop = popTop + i * rowH
-            val isActive = page.pageStyle == styleKey
-            if (isActive) {
-              val activeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#1E3A5F"); style = Paint.Style.FILL
-              }
-              canvas.drawRect(popLeft, rowTop, popLeft + popW, rowTop + rowH, activeBg)
-            }
-            rowPaint.color = if (isActive) Color.parseColor("#3B82F6") else Color.parseColor("#CBD5E1")
-            canvas.drawText(styleLabel2, popLeft + 12f, rowTop + rowH * 0.65f, rowPaint)
-          }
-        }
-      }
-    }
-  }
-
-  /** Draws the paper texture/pattern lines inside the notebook page's clipped region. */
-  private fun drawNotebookPagePattern(canvas: Canvas, page: NativeNotebookPage, r: RectF) {
-    val contentTop = r.top + 40f  // leave room for title
-    when (page.pageStyle) {
-      "ruled" -> {
-        val lineSpacing = (page.height * 0.065f).coerceIn(22f, 36f)
-        var y = contentTop + lineSpacing
-        while (y < r.bottom - 10f) {
-          canvas.drawLine(r.left + 10f, y, r.right - 10f, y, nbPageRuledLinePaint)
-          y += lineSpacing
-        }
-        // Pink margin line ~15% from left
-        val marginX = r.left + page.width * 0.15f
-        canvas.drawLine(marginX, contentTop, marginX, r.bottom - 10f, nbPageMarginLinePaint)
-      }
-      "grid" -> {
-        val step = (page.width * 0.08f).coerceIn(20f, 40f)
-        var x = r.left + step
-        while (x < r.right - 5f) {
-          canvas.drawLine(x, contentTop, x, r.bottom - 5f, nbPageGridLinePaint)
-          x += step
-        }
-        var y = contentTop + step
-        while (y < r.bottom - 5f) {
-          canvas.drawLine(r.left + 5f, y, r.right - 5f, y, nbPageGridLinePaint)
-          y += step
-        }
-      }
-      "dotted" -> {
-        val stepX = (page.width * 0.1f).coerceIn(20f, 38f)
-        val stepY = (page.height * 0.065f).coerceIn(20f, 36f)
-        var x = r.left + stepX
-        while (x < r.right - 5f) {
-          var y = contentTop + stepY
-          while (y < r.bottom - 5f) {
-            canvas.drawCircle(x, y, 1.8f, nbPageDotPaint)
-            y += stepY
-          }
-          x += stepX
-        }
-      }
-      "sketch" -> {
-        val step = (page.width * 0.12f).coerceIn(24f, 46f)
-        val sketchPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#D8D5BE"); strokeWidth = 0.6f; style = Paint.Style.STROKE
-        }
-        var startX = r.left - page.height
-        while (startX < r.right + page.height) {
-          canvas.drawLine(startX, contentTop, startX + page.height, r.bottom, sketchPaint)
-          startX += step
-        }
-      }
-      "cornell" -> {
-        val cueX = r.left + page.width * 0.28f
-        val summaryY = r.bottom - page.height * 0.22f
-        val cornellSepPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#EF4444"); strokeWidth = 1.2f
-        }
-        // Vertical cue column
-        canvas.drawLine(cueX, contentTop, cueX, summaryY, cornellSepPaint)
-        // Horizontal summary line
-        canvas.drawLine(r.left + 10f, summaryY, r.right - 10f, summaryY, cornellSepPaint)
-        // Ruled lines in main notes section
-        val lineSpacing = (page.height * 0.065f).coerceIn(22f, 36f)
-        var y = contentTop + lineSpacing
-        while (y < summaryY - 8f) {
-          canvas.drawLine(cueX + 4f, y, r.right - 10f, y, nbPageRuledLinePaint)
-          y += lineSpacing
-        }
-      }
-      "squared" -> {
-        val step = (page.width * 0.05f).coerceIn(14f, 26f)
-        val sqMajorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#94A3B8"); strokeWidth = 0.8f
-        }
-        val sqMinorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#CBD5E1"); strokeWidth = 0.4f
-        }
-        var count = 0
-        var x = r.left + step
-        while (x < r.right - 5f) {
-          canvas.drawLine(x, contentTop, x, r.bottom - 5f, if (count % 5 == 0) sqMajorPaint else sqMinorPaint)
-          x += step
-          count++
-        }
-        count = 0
-        var y = contentTop + step
-        while (y < r.bottom - 5f) {
-          canvas.drawLine(r.left + 5f, y, r.right - 5f, y, if (count % 5 == 0) sqMajorPaint else sqMinorPaint)
-          y += step
-          count++
-        }
-      }
-      "custom" -> {
-        val lineSpacing = (page.height * 0.07f).coerceIn(24f, 38f)
-        val customLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-          color = Color.parseColor("#E0E7FF"); strokeWidth = 0.8f
-        }
-        var y = contentTop + lineSpacing
-        while (y < r.bottom - 10f) {
-          canvas.drawLine(r.left + 15f, y, r.right - 15f, y, customLinePaint)
-          y += lineSpacing
-        }
-      }
-      // "blank" -> clean paper background without guide lines
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Notebook Page — Public API & Persistence
-  // ---------------------------------------------------------------------------
-  /**
-   * Creates a new notebook page centered in the current viewport and adds it to the canvas.
-   * Called from React Native via the 'addNotebookPage' command, or directly from Kotlin.
-   */
-  fun addNotebookPage(style: String = "ruled", title: String = "") {
-    val viewW = width.toFloat()
-    val viewH = height.toFloat()
-    val hasDoc = activePdfDoc != null || activeDocument != null
-    val splitY = if (hasDoc) viewH * effectiveSplitRatio else 0f
-    val canvasTopY = if (hasDoc && effectiveSplitRatio > 0f) splitY + 14f else 0f
-
-    // Center in the visible canvas viewport
-    val centerScreenX = viewW / 2f
-    val centerScreenY = (canvasTopY + viewH) / 2f
-    val (centerWx, centerWy) = canvasScreenToWorld(centerScreenX, centerScreenY, canvasTopY)
-
-    val pageW = (280f / scaleFactor).coerceIn(200f, 600f)
-    val pageH = (380f / scaleFactor).coerceIn(260f, 800f)
-
-    val newPage = NativeNotebookPage(
-      id = "nbpage-${System.currentTimeMillis()}",
-      x = centerWx - pageW / 2f,
-      y = centerWy - pageH / 2f,
-      width = pageW,
-      height = pageH,
-      pageStyle = style,
-      title = if (title.isEmpty()) "Notebook Page" else title
-    )
-
-    notebookPages.add(newPage)
-    selectedNotebookPageId = newPage.id
-
-    undoRedoManager.record(CreateNotebookPageAction(
-      page = newPage,
-      pagesList = notebookPages,
-      onUndoDispatched = { invalidate() },
-      onRedoDispatched = { invalidate() }
-    ))
-
-    dispatchNotebookPageAddedEvent(newPage)
-    persistNotebookPagesLocally()
-    hudToast.show("📄 Notebook page added — drag header to move")
-    performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-    invalidate()
-  }
-
-  /**
-   * Duplicates an existing notebook page, offsetting it slightly and adding it to the canvas.
-   */
-  fun duplicateNotebookPage(pageId: String) {
-    val orig = notebookPages.find { it.id == pageId } ?: return
-    val copy = NativeNotebookPage(
-      id = "nbpage-${System.currentTimeMillis()}",
-      x = orig.x + 30f,
-      y = orig.y + 30f,
-      width = orig.width,
-      height = orig.height,
-      pageStyle = orig.pageStyle,
-      title = if (orig.title.endsWith("(Copy)")) orig.title else "${orig.title} (Copy)",
-      backgroundColor = orig.backgroundColor
-    )
-    notebookPages.add(copy)
-    selectedNotebookPageId = copy.id
-    undoRedoManager.record(CreateNotebookPageAction(
-      page = copy,
-      pagesList = notebookPages,
-      onUndoDispatched = { invalidate() },
-      onRedoDispatched = { invalidate() }
-    ))
-    dispatchNotebookPageAddedEvent(copy)
-    persistNotebookPagesLocally()
-    hudToast.show("📋 Page duplicated")
-    performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-    invalidate()
-  }
-
-  /**
-   * Persists the notebook pages to a local app-private JSON file so they survive restarts.
-   */
-  fun persistNotebookPagesLocally() {
-    try {
-      val file = java.io.File(context.filesDir, "thinkspace_notebook_pages.json")
-      val arr = org.json.JSONArray()
-      for (page in notebookPages) {
-        val obj = org.json.JSONObject().apply {
-          put("id", page.id)
-          put("x", page.x.toDouble())
-          put("y", page.y.toDouble())
-          put("width", page.width.toDouble())
-          put("height", page.height.toDouble())
-          put("pageStyle", page.pageStyle)
-          put("title", page.title)
-          put("backgroundColor", String.format("#%06X", 0xFFFFFF and page.backgroundColor))
-        }
-        arr.put(obj)
-      }
-      file.writeText(arr.toString())
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-  }
-
-  /**
-   * Restores notebook pages from the local app-private JSON file if currently empty.
-   */
-  fun loadPersistedNotebookPages() {
-    try {
-      val file = java.io.File(context.filesDir, "thinkspace_notebook_pages.json")
-      if (file.exists() && notebookPages.isEmpty()) {
-        val json = file.readText()
-        setNotebookPagesFromJson(json)
-      }
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-  }
-
-  /**
-   * Loads notebook pages from a JSON array string (used by the 'notebookPagesJson' ReactProp).
-   */
-  fun setNotebookPagesFromJson(json: String?) {
-    if (json.isNullOrBlank()) return
-    try {
-      val arr = org.json.JSONArray(json)
-      notebookPages.clear()
-      for (i in 0 until arr.length()) {
-        val obj = arr.getJSONObject(i)
-        notebookPages.add(NativeNotebookPage(
-          id = obj.optString("id", "nbpage-$i"),
-          x = obj.optDouble("x", 0.0).toFloat(),
-          y = obj.optDouble("y", 0.0).toFloat(),
-          width = obj.optDouble("width", 280.0).toFloat(),
-          height = obj.optDouble("height", 380.0).toFloat(),
-          pageStyle = obj.optString("pageStyle", "ruled"),
-          title = obj.optString("title", "Notebook Page"),
-          backgroundColor = Color.parseColor(obj.optString("backgroundColor", "#FFFEF0")
-            .let { if (it.startsWith("#")) it else "#FFFEF0" })
-        ))
-      }
-      persistNotebookPagesLocally()
-      invalidate()
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Notebook Page \u2014 React Native Event Dispatchers
-  // ---------------------------------------------------------------------------
-  private fun getEventDispatcher(): EventDispatcher? {
-    val reactContext = UIManagerHelper.getReactContext(this) ?: return null
-    return UIManagerHelper.getEventDispatcherForReactTag(reactContext, id)
-  }
-
-  private fun dispatchNotebookPageAddedEvent(page: NativeNotebookPage) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("id", page.id)
-      putDouble("x", page.x.toDouble())
-      putDouble("y", page.y.toDouble())
-      putDouble("width", page.width.toDouble())
-      putDouble("height", page.height.toDouble())
-      putString("pageStyle", page.pageStyle)
-      putString("title", page.title)
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topNotebookPageAdded", data))
-  }
-
-  private fun dispatchNotebookPageMovedEvent(pageId: String, x: Float, y: Float) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("id", pageId)
-      putDouble("x", x.toDouble())
-      putDouble("y", y.toDouble())
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topNotebookPageMoved", data))
-  }
-
-  private fun dispatchNotebookPageDeletedEvent(pageId: String) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply { putString("id", pageId) }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topNotebookPageDeleted", data))
-  }
-
-
-  private fun dispatchTransformEvent() {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putDouble("panX", panX.toDouble())
-      putDouble("panY", panY.toDouble())
-      putDouble("scale", scaleFactor.toDouble())
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topTransformChange", data))
-  }
-
-  private fun dispatchSplitRatioEvent(ratio: Float) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putDouble("ratio", ratio.toDouble())
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topSplitRatioChange", data))
-  }
-
-  private fun dispatchToggleSqueezeEvent(squeezed: Boolean) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putBoolean("isSqueezed", squeezed)
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topToggleSqueeze", data))
-  }
-
-  private fun dispatchExtractExcerptEvent(
-    text: String,
-    pageNumber: Int,
-    color: Int,
-    isImg: Boolean,
-    imageUrl: String? = null,
-    x: Float = 0f,
-    y: Float = 0f,
-    cardId: String? = null,
-    sourceRects: List<RectF> = emptyList(),
-    documentId: String = activeDocumentId
-  ) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("text", text)
-      putDouble("pageNumber", pageNumber.toDouble())
-      putString("color", String.format("#%06X", 0xFFFFFF and color))
-      putBoolean("isTable", false)
-      putBoolean("isImage", isImg)
-      if (!imageUrl.isNullOrEmpty()) {
-        putString("imageUrl", imageUrl)
-      }
-      if (!cardId.isNullOrEmpty()) {
-        putString("id", cardId)
-      }
-      putDouble("x", x.toDouble())
-      putDouble("y", y.toDouble())
-      // Multi-document: always include the source document ID
-      putString("documentId", documentId)
-      if (sourceRects.isNotEmpty()) {
-        val arr = Arguments.createArray()
-        for (r in sourceRects) {
-          val m = Arguments.createMap().apply {
-            putDouble("left", r.left.toDouble())
-            putDouble("top", r.top.toDouble())
-            putDouble("right", r.right.toDouble())
-            putDouble("bottom", r.bottom.toDouble())
-          }
-          arr.pushMap(m)
-        }
-        putArray("sourceRects", arr)
-      }
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topExtractExcerpt", data))
-  }
-
-  private fun dispatchExcerptPressEvent(cardId: String) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("id", cardId)
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topExcerptPress", data))
-  }
-
-  private fun dispatchExcerptMoveEndEvent(cardId: String, x: Float, y: Float) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("id", cardId)
-      putDouble("x", x.toDouble())
-      putDouble("y", y.toDouble())
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topExcerptMoveEnd", data))
-  }
-
-  private fun dispatchAddStrokeEvent(stroke: NativeStroke) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val json = JSONObject().apply {
-      put("id", stroke.id)
-      put("color", String.format("#%06X", 0xFFFFFF and stroke.color))
-      put("strokeWidth", stroke.strokeWidth.toDouble())
-      put("isHighlighter", stroke.isHighlighter)
-      val ptsArr = JSONArray()
-      for (p in stroke.points) {
-        ptsArr.put(JSONObject().apply {
-          put("x", p.x.toDouble())
-          put("y", p.y.toDouble())
-        })
-      }
-      put("points", ptsArr)
-    }
-    val data = Arguments.createMap().apply {
-      putString("strokeJson", json.toString())
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topAddStroke", data))
-  }
-
-  private fun dispatchEraseStrokeEvent(strokeId: String) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("id", strokeId)
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topEraseStroke", data))
-  }
-
-  fun zoomToFitCards() {
-    if (width <= 0 || height <= 0) {
-      post { zoomToFitCards() }
-      return
-    }
-
-    val viewW = width.toFloat()
-    val viewH = height.toFloat()
-    val hasDoc = activePdfDoc != null || activeDocument != null
-    val splitY = if (hasDoc) viewH * effectiveSplitRatio else 0f
-    val canvasTopY = if (hasDoc && effectiveSplitRatio > 0f) splitY + 14f else 0f
-    val viewportH = (viewH - canvasTopY).coerceAtLeast(100f)
-    val viewportW = viewW.coerceAtLeast(100f)
-
-    var minX = Float.MAX_VALUE
-    var maxX = -Float.MAX_VALUE
-    var minY = Float.MAX_VALUE
-    var maxY = -Float.MAX_VALUE
-    var hasContent = false
-
-    for (c in cards) {
-      minX = minOf(minX, c.x)
-      maxX = maxOf(maxX, c.x + c.width)
-      minY = minOf(minY, c.y)
-      maxY = maxOf(maxY, c.y + c.getHeight())
-      hasContent = true
-    }
-
-    for (s in strokes) {
-      for (p in s.points) {
-        minX = minOf(minX, p.x)
-        maxX = maxOf(maxX, p.x)
-        minY = minOf(minY, p.y)
-        maxY = maxOf(maxY, p.y)
-        hasContent = true
-      }
-    }
-
-    for (pg in notebookPages) {
-      minX = minOf(minX, pg.x)
-      maxX = maxOf(maxX, pg.x + pg.width)
-      minY = minOf(minY, pg.y)
-      maxY = maxOf(maxY, pg.y + pg.height)
-      hasContent = true
-    }
-
-    val targetPanX: Float
-    val targetPanY: Float
-    val targetScale: Float
-
-    if (!hasContent) {
-      targetPanX = 0f
-      targetPanY = 0f
-      targetScale = 1.0f
-    } else {
-      val contentW = (maxX - minX).coerceAtLeast(80f)
-      val contentH = (maxY - minY).coerceAtLeast(80f)
-      val contentCenterX = (minX + maxX) / 2f
-      val contentCenterY = (minY + maxY) / 2f
-
-      val padding = 56f * density
-      val availW = (viewportW - 2 * padding).coerceAtLeast(80f)
-      val availH = (viewportH - 2 * padding).coerceAtLeast(80f)
-
-      val fitScale = minOf(availW / contentW, availH / contentH)
-      targetScale = fitScale.coerceIn(camera.minScale, 1.05f)
-
-      targetPanX = (viewportW / 2f) - (contentCenterX * targetScale)
-      targetPanY = (viewportH / 2f) - (contentCenterY * targetScale)
-    }
-
-    val startPanX = panX
-    val startPanY = panY
-    val startScale = scaleFactor
-
-    canvasAnimator?.cancel()
-    val anim = ValueAnimator.ofFloat(0f, 1f).apply {
-      duration = 380
-      interpolator = DecelerateInterpolator()
-      addUpdateListener { animator ->
-        val fraction = animator.animatedFraction
-        panX = startPanX + (targetPanX - startPanX) * fraction
-        panY = startPanY + (targetPanY - startPanY) * fraction
-        scaleFactor = startScale + (targetScale - startScale) * fraction
-        dispatchTransformEvent()
-        invalidate()
-      }
-    }
-    canvasAnimator = anim
-    anim.start()
-
-    performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-    if (hasContent) {
-      hudToast.show("Zoomed to Cards")
-    } else {
-      hudToast.show("Workspace Centered")
-    }
-  }
-
-  fun undo(): Boolean {
-    val action = undoRedoManager.undo()
-    if (action != null) {
-      hudToast.show("↩ Undone: ${action.description}")
-      performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-      invalidate()
-      return true
-    } else {
-      hudToast.show("Nothing to undo")
-      return false
-    }
-  }
-
-  fun redo(): Boolean {
-    val action = undoRedoManager.redo()
-    if (action != null) {
-      hudToast.show("↪ Redone: ${action.description}")
-      performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-      invalidate()
-      return true
-    } else {
-      hudToast.show("Nothing to redo")
-      return false
-    }
-  }
-
-  fun canUndo(): Boolean = undoRedoManager.canUndo
-  fun canRedo(): Boolean = undoRedoManager.canRedo
-
-  private fun dispatchUndoStateChangeEvent(canUndo: Boolean, canRedo: Boolean) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putBoolean("canUndo", canUndo)
-      putBoolean("canRedo", canRedo)
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topUndoStateChange", data))
-  }
-
-  private fun dispatchCardDeleteEvent(cardId: String) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("id", cardId)
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topCardDelete", data))
-  }
-
-  private fun dispatchChangeCardColorEvent(cardId: String, color: Int) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("id", cardId)
-      putString("color", String.format("#%06X", 0xFFFFFF and color))
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topChangeCardColor", data))
-  }
-
-  fun clearSelection() {
-    activeCropSelection = null
-    activePdfSelection = null
-    activeSelection = null
-    invalidate()
-  }
-
-  fun deleteCard(cardId: String) {
-    val card = cards.find { it.id == cardId } ?: return
-    cards.remove(card)
-    semanticInkLinks.removeAll { it.targetCardId == cardId }
-    dispatchCardDeleteEvent(cardId)
-    persistSemanticInkLinksLocally()
-    invalidate()
-  }
-
-  fun deleteInkLink(linkId: String) {
-    val link = semanticInkLinks.find { it.id == linkId } ?: return
-    semanticInkLinks.remove(link)
-    dispatchInkLinkDeleteEvent(linkId)
-    persistSemanticInkLinksLocally()
-    invalidate()
-  }
-
-  fun clearAllCards() {
-    cards.clear()
-    semanticInkLinks.clear()
-    persistSemanticInkLinksLocally()
-    invalidate()
-  }
-
-  fun clearAllStrokes() {
-    strokes.clear()
-    invalidate()
-  }
-
-  fun setViewport(x: Float, y: Float, scale: Float) {
-    panX = x
-    panY = y
-    scaleFactor = scale.coerceIn(camera.minScale, camera.maxScale)
-    dispatchTransformEvent()
-    invalidate()
-  }
-
-  fun setSplitRatioProgrammatic(ratio: Float) {
-    val clamped = ratio.coerceIn(0.1f, 0.9f)
-    splitRatio = clamped
-    dispatchSplitRatioEvent(clamped)
-    invalidate()
-  }
-
-  fun toggleSqueezeMode() {
-    isSqueezed = !isSqueezed
-    dispatchToggleSqueezeEvent(isSqueezed)
-    invalidate()
-  }
 
   // ---------------------------------------------------------------------------
   // Immersive / Distraction-Free Content Mode API & Event
@@ -10700,7 +5602,7 @@ class ThinkspaceView : View {
     }
   }
 
-  private fun dispatchToggleImmersiveEvent(enabled: Boolean) {
+  internal fun dispatchToggleImmersiveEvent(enabled: Boolean) {
     val surfaceId = UIManagerHelper.getSurfaceId(this)
     val eventDispatcher = getEventDispatcher()
     val data = Arguments.createMap().apply {
@@ -10711,304 +5613,6 @@ class ThinkspaceView : View {
 
   // ---------------------------------------------------------------------------
   // LiquidText Real Pen & Semantic Inking System API & Events
+  // Extracted to ThinkspaceViewInking.kt as extension functions
   // ---------------------------------------------------------------------------
-  fun setPenFavoritesFromJson(json: String?) {
-    if (json.isNullOrEmpty()) return
-    try {
-      val arr = JSONArray(json)
-      val list = mutableListOf<String>()
-      for (i in 0 until arr.length()) {
-        list.add(arr.getString(i))
-      }
-      if (list.isNotEmpty()) {
-        penFavoriteColors.clear()
-        penFavoriteColors.addAll(list)
-        persistPenSettingsLocally()
-        dispatchPenStateChangeEvent()
-      }
-    } catch (_: Exception) {}
-  }
-
-  fun setSemanticInkLinksFromJson(json: String?) {
-    if (json.isNullOrEmpty()) return
-    try {
-      val arr = JSONArray(json)
-      val parsedLinks = mutableListOf<NativeInkLink>()
-      for (i in 0 until arr.length()) {
-        val obj = arr.getJSONObject(i)
-        val id = obj.optString("id", "inklink-${System.currentTimeMillis()}-$i")
-        val srcEnd = obj.optJSONObject("sourceEndpoint")
-        val tgtEnd = obj.optJSONObject("targetEndpoint")
-
-        val srcDoc = if (obj.has("sourceDocId") && obj.optString("sourceDocId").isNotEmpty()) {
-          obj.optString("sourceDocId")
-        } else {
-          srcEnd?.optString("documentId", activeDocumentId.ifEmpty { "default-doc" }) ?: activeDocumentId.ifEmpty { "default-doc" }
-        }
-
-        val srcPage = if (obj.has("sourcePageIndex")) {
-          obj.optInt("sourcePageIndex", 0)
-        } else {
-          srcEnd?.optInt("pageIndex", 0) ?: 0
-        }
-
-        val rectObj = obj.optJSONObject("sourcePdfRect") ?: srcEnd?.optJSONObject("sourceRect")
-        val rect = if (rectObj != null) {
-          RectF(
-            rectObj.optDouble("left", 0.0).toFloat(),
-            rectObj.optDouble("top", 0.0).toFloat(),
-            rectObj.optDouble("right", 0.0).toFloat(),
-            rectObj.optDouble("bottom", 0.0).toFloat()
-          )
-        } else RectF(0f, 0f, 100f, 20f)
-
-        val ptObj = obj.optJSONObject("sourcePdfPoint") ?: srcEnd?.optJSONObject("anchorPoint")
-        val pt = if (ptObj != null) {
-          NativePoint(ptObj.optDouble("x", 0.0).toFloat(), ptObj.optDouble("y", 0.0).toFloat())
-        } else NativePoint(rect.centerX(), rect.centerY())
-
-        val targetCard = if (obj.has("targetCardId") && obj.optString("targetCardId").isNotEmpty()) {
-          obj.optString("targetCardId")
-        } else {
-          tgtEnd?.optString("cardId", "") ?: ""
-        }
-        if (targetCard.isEmpty()) continue
-
-        val anchorX = if (obj.has("cardAnchorX")) {
-          obj.optDouble("cardAnchorX", 0.5).toFloat()
-        } else if (tgtEnd != null && tgtEnd.has("cardAnchorX")) {
-          tgtEnd.optDouble("cardAnchorX", 0.5).toFloat()
-        } else if (tgtEnd?.optJSONObject("anchorPoint") != null) {
-          tgtEnd.optJSONObject("anchorPoint")?.optDouble("x", 0.5)?.toFloat() ?: 0.5f
-        } else 0.5f
-
-        val anchorY = if (obj.has("cardAnchorY")) {
-          obj.optDouble("cardAnchorY", 0.5).toFloat()
-        } else if (tgtEnd != null && tgtEnd.has("cardAnchorY")) {
-          tgtEnd.optDouble("cardAnchorY", 0.5).toFloat()
-        } else if (tgtEnd?.optJSONObject("anchorPoint") != null) {
-          tgtEnd.optJSONObject("anchorPoint")?.optDouble("y", 0.5)?.toFloat() ?: 0.5f
-        } else 0.5f
-
-        val targetCardPtObj = obj.optJSONObject("targetCardPoint") ?: tgtEnd?.optJSONObject("anchorPoint")
-        val targetCardPt = if (targetCardPtObj != null) {
-          NativePoint(targetCardPtObj.optDouble("x", 0.0).toFloat(), targetCardPtObj.optDouble("y", 0.0).toFloat())
-        } else null
-
-        val color = try {
-          val colStr = obj.optString("color", "")
-          if (colStr.isNotEmpty()) Color.parseColor(colStr) else penColor
-        } catch (_: Exception) {
-          penColor
-        }
-
-        val strokeW = obj.optDouble("strokeWidth", obj.optDouble("thickness", 3.5)).toFloat()
-        val style = obj.optString("style", "straight")
-        val createdAt = obj.optLong("createdAt", System.currentTimeMillis())
-
-        parsedLinks.add(NativeInkLink(
-          id = id,
-          sourceDocId = srcDoc,
-          sourcePageIndex = srcPage,
-          sourcePdfRect = rect,
-          sourcePdfPoint = pt,
-          targetCardId = targetCard,
-          targetCardPoint = targetCardPt,
-          color = color,
-          strokeWidth = strokeW,
-          style = style,
-          createdAt = createdAt,
-          cardAnchorX = anchorX,
-          cardAnchorY = anchorY
-        ))
-      }
-
-      if (parsedLinks.isNotEmpty() || arr.length() == 0) {
-        semanticInkLinks.clear()
-        semanticInkLinks.addAll(parsedLinks)
-        invalidate()
-      }
-    } catch (_: Exception) {}
-  }
-
-  fun togglePenSettings() {
-    isPenSettingsOpen = !isPenSettingsOpen
-    dispatchPenStateChangeEvent()
-    invalidate()
-  }
-
-  fun persistPenSettingsLocally() {
-    try {
-      val file = File(context.filesDir, "thinkspace_pen_settings.json")
-      val obj = JSONObject().apply {
-        put("mode", penDrawingMode)
-        put("color", String.format("#%06X", (0xFFFFFF and penColor)))
-        put("thickness", penThickness.toDouble())
-        val arr = JSONArray()
-        for (c in penFavoriteColors) arr.put(c)
-        put("favorites", arr)
-      }
-      file.writeText(obj.toString())
-    } catch (_: Exception) {}
-  }
-
-  fun loadPersistedPenSettings() {
-    try {
-      val file = File(context.filesDir, "thinkspace_pen_settings.json")
-      if (file.exists()) {
-        val obj = JSONObject(file.readText())
-        if (obj.has("mode")) penDrawingMode = obj.getString("mode")
-        if (obj.has("color")) {
-          try {
-            penColor = Color.parseColor(obj.getString("color"))
-            selectedColor = penColor
-          } catch (_: Exception) {}
-        }
-        if (obj.has("thickness")) penThickness = obj.getDouble("thickness").toFloat()
-        if (obj.has("favorites")) {
-          val arr = obj.getJSONArray("favorites")
-          penFavoriteColors.clear()
-          for (i in 0 until arr.length()) {
-            penFavoriteColors.add(arr.getString(i))
-          }
-        }
-      }
-    } catch (_: Exception) {}
-  }
-
-  fun persistSemanticInkLinksLocally() {
-    try {
-      val file = File(context.filesDir, "thinkspace_ink_links.json")
-      val arr = JSONArray()
-      for (link in semanticInkLinks) {
-        val obj = JSONObject().apply {
-          put("id", link.id)
-          put("sourceDocId", link.sourceDocId)
-          put("sourcePageIndex", link.sourcePageIndex)
-          put("sourcePdfRect", JSONObject().apply {
-            put("left", link.sourcePdfRect.left.toDouble())
-            put("top", link.sourcePdfRect.top.toDouble())
-            put("right", link.sourcePdfRect.right.toDouble())
-            put("bottom", link.sourcePdfRect.bottom.toDouble())
-          })
-          put("sourcePdfPoint", JSONObject().apply {
-            put("x", link.sourcePdfPoint.x.toDouble())
-            put("y", link.sourcePdfPoint.y.toDouble())
-          })
-          put("targetCardId", link.targetCardId)
-          put("cardAnchorX", link.cardAnchorX.toDouble())
-          put("cardAnchorY", link.cardAnchorY.toDouble())
-          if (link.targetCardPoint != null) {
-            put("targetCardPoint", JSONObject().apply {
-              put("x", link.targetCardPoint.x.toDouble())
-              put("y", link.targetCardPoint.y.toDouble())
-            })
-          }
-          put("color", String.format("#%06X", (0xFFFFFF and link.color)))
-          put("strokeWidth", link.strokeWidth.toDouble())
-          put("style", link.style)
-          put("createdAt", link.createdAt)
-        }
-        arr.put(obj)
-      }
-      file.writeText(arr.toString())
-    } catch (_: Exception) {}
-  }
-
-  fun loadPersistedSemanticInkLinks() {
-    try {
-      val file = File(context.filesDir, "thinkspace_ink_links.json")
-      if (file.exists() && semanticInkLinks.isEmpty()) {
-        setSemanticInkLinksFromJson(file.readText())
-      }
-    } catch (_: Exception) {}
-  }
-
-  private fun dispatchPenStateChangeEvent() {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val hexColor = String.format("#%06X", (0xFFFFFF and penColor))
-    val data = Arguments.createMap().apply {
-      putString("mode", penDrawingMode)
-      putString("color", hexColor)
-      putDouble("thickness", penThickness.toDouble())
-      putBoolean("isSettingsOpen", isPenSettingsOpen)
-      val favs = Arguments.createArray()
-      for (f in penFavoriteColors) {
-        favs.pushString(f)
-      }
-      putArray("favoriteColors", favs)
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topPenStateChange", data))
-  }
-
-  private fun dispatchInkLinkCreateEvent(link: NativeInkLink) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val hexColor = String.format("#%06X", (0xFFFFFF and link.color))
-
-    val fullJson = JSONObject().apply {
-      put("id", link.id)
-      put("sourceDocId", link.sourceDocId)
-      put("sourcePageIndex", link.sourcePageIndex)
-      put("targetCardId", link.targetCardId)
-      put("cardAnchorX", link.cardAnchorX.toDouble())
-      put("cardAnchorY", link.cardAnchorY.toDouble())
-      put("sourceEndpoint", JSONObject().apply {
-        put("type", "pdf")
-        put("documentId", link.sourceDocId)
-        put("pageIndex", link.sourcePageIndex)
-        put("sourceRect", JSONObject().apply {
-          put("left", link.sourcePdfRect.left.toDouble())
-          put("top", link.sourcePdfRect.top.toDouble())
-          put("right", link.sourcePdfRect.right.toDouble())
-          put("bottom", link.sourcePdfRect.bottom.toDouble())
-        })
-        put("anchorPoint", JSONObject().apply {
-          put("x", link.sourcePdfPoint.x.toDouble())
-          put("y", link.sourcePdfPoint.y.toDouble())
-        })
-      })
-      put("targetEndpoint", JSONObject().apply {
-        put("type", "card")
-        put("cardId", link.targetCardId)
-        put("cardAnchorX", link.cardAnchorX.toDouble())
-        put("cardAnchorY", link.cardAnchorY.toDouble())
-        put("anchorPoint", JSONObject().apply {
-          put("x", link.cardAnchorX.toDouble())
-          put("y", link.cardAnchorY.toDouble())
-        })
-      })
-      put("color", hexColor)
-      put("thickness", link.strokeWidth.toDouble())
-      put("style", link.style)
-      put("createdAt", link.createdAt.toString())
-    }.toString()
-
-    val data = Arguments.createMap().apply {
-      putString("linkJson", fullJson)
-      putString("id", link.id)
-      putString("sourceDocId", link.sourceDocId)
-      putInt("sourcePageIndex", link.sourcePageIndex)
-      putDouble("sourceX", link.sourcePdfPoint.x.toDouble())
-      putDouble("sourceY", link.sourcePdfPoint.y.toDouble())
-      putString("targetCardId", link.targetCardId)
-      putDouble("cardAnchorX", link.cardAnchorX.toDouble())
-      putDouble("cardAnchorY", link.cardAnchorY.toDouble())
-      putString("color", hexColor)
-      putDouble("strokeWidth", link.strokeWidth.toDouble())
-      putString("style", link.style)
-      putDouble("createdAt", link.createdAt.toDouble())
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topInkLinkCreate", data))
-  }
-
-  private fun dispatchInkLinkDeleteEvent(linkId: String) {
-    val surfaceId = UIManagerHelper.getSurfaceId(this)
-    val eventDispatcher = getEventDispatcher()
-    val data = Arguments.createMap().apply {
-      putString("id", linkId)
-    }
-    eventDispatcher?.dispatchEvent(ThinkspaceEvent(surfaceId, id, "topInkLinkDelete", data))
-  }
 }

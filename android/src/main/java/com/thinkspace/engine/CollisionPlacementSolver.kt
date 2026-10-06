@@ -2,7 +2,7 @@ package com.thinkspace.engine
 
 import android.graphics.PointF
 import android.graphics.RectF
-import com.thinkspace.NativeCard
+import com.thinkspace.engine.models.*
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max

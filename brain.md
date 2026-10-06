@@ -76,4 +76,39 @@
   - Callbacks: `onDocumentChange({ documentId, title, uri, pageCount })`, `onDocumentsUpdated(documents, folders)`, `onRequestAddDocument()`.
   - Ref Methods: `openDocumentsSheet()`, `closeDocumentsSheet()`.
 
+## LiquidText-Style Area & Figure Crop Selection Architecture
+- **Problem & Video Analysis (photoextractio.mp4)**:
+  - Previously, long-press initialized a microscopic 32×24px dot, and when touched again, `crop.screenRect.contains(x, y)` immediately lifted it as an image excerpt card without ever letting the user see, frame, or resize a proper selection box.
+- **Solution & Native Architecture**:
+  - **No Auto-Lift on Long Press**: Touching/holding on an active selection keeps the selection active for repositioning or handle manipulation. It only lifts into an excerpt when the user explicitly taps `[ AutoExcerpt ]` on the floating toolbar or drags the selection box across the split divider.
+  - **Handsome, Visible Selection Box**: On long-press, creates a generous, clearly visible `220dp × 150dp` selection box with ample room between handles and the floating toolbar (`AutoExcerpt`, `Comment`, Color Palette, `Tags`, `•••`).
+  - **4 Drag-Resizable Corner Handles**: All 4 corners (Top-Left, Top-Right, Bottom-Left, Bottom-Right) rendered with circular accent fills and white borders, with an expanded 38dp touch target radius for effortless grab on mobile screens.
+  - **Full 4-Way Handle Dynamics**:
+    - Top-Left: Adjusts `left` and `top`.
+    - Top-Right: Adjusts `right` and `top`.
+    - Bottom-Left: Adjusts `left` and `bottom`.
+    - Bottom-Right: Adjusts `right` and `bottom`.
+    - Automatically enforces min-bounds constraints (`36dp` width, `28dp` height) and bounds clamping within page layout.
+  - **Preserved Custom Selections**: Custom user-dragged rectangles are strictly preserved on release.
+  - **Reposition & Workspace Extraction**: Dragging inside the selection body repositions the box; dragging across the split divider smoothly converts the framed region into a floating photo card excerpt on the infinite workspace canvas.
+
+## Multi-Touch Gesture Arbitration: PDF Zoom In/Out & Pinch-to-Compare (Squeeze)
+- **Root Cause of Previous Conflicts**:
+  - `shouldRouteToScaleDetector` checked `pdfScaleFactor > 1.25f`, which completely blocked `ScaleGestureDetector` from receiving events at default 1.0x zoom.
+  - `ACTION_POINTER_DOWN` immediately started `compressionEngine.onManualPinchBegin(...)` on touch-down, blocking zoom detection before fingers moved.
+- **Unified Multi-Touch Architecture**:
+  - **All 2+ finger gestures routed to `ScaleGestureDetector`**: Provides unified focal point, span tracking, and scaling.
+  - **Natural State-Aware Gesture Resolution**:
+    1. Spreading fingers (`scaleFactor > 1.0f`):
+       - If document is currently squeezed (`compressionEngine.isAnyPageCompressed()`), expands squeezed pages back to normal.
+       - If document is normal, smoothly zooms into PDF (1.0x to 5.0x).
+    2. Pinching fingers inward (`scaleFactor < 1.0f`):
+       - If zoomed in (`pdfScaleFactor > 1.02f`), smoothly zooms out toward 1.0x.
+       - If at base 1.0x zoom, vertical pinch inward collapses unannotated pages to compare distant sections (LiquidText squeeze).
+    3. Two-finger sliding while zoomed in pans `docScrollX` and `docScrollY` smoothly.
+    4. One-tap squeeze toggle via `≈` tab on right edge remains fully functional.
+  - **Tightened Word Hit Testing**: Direct bounding box testing (`px in b.left..b.right && py in b.top..b.bottom`) ensures long-pressing on images/whitespace triggers area crop framing without selecting words 48pt away.
+
+
+
 
