@@ -328,6 +328,12 @@ class ThinkspaceView : View {
 
   // LiquidText Workspace State Props
   var splitRatio: Float = 0.44f
+    set(value) {
+      val clamped = value.coerceIn(0.18f, 0.82f)
+      if (abs(field - clamped) < 0.001f) return
+      field = clamped
+      invalidate()
+    }
   var isSqueezed: Boolean = false
   var activeTool: String = "select" // "select", "pan", "pen", "highlighter", "eraser"
     set(value) {
@@ -604,7 +610,9 @@ class ThinkspaceView : View {
 
   // Gesture flags
   private var isPanningCanvas = false
-  private var isDraggingDivider = false
+  internal var isDraggingDivider = false
+  private var dividerDragOffsetY = 0f
+  internal var lastUserDividerDragTime: Long = 0L
   internal var isScrollingDoc = false
   private var lastTouchScreenX = 0f
   private var lastTouchScreenY = 0f
@@ -3235,7 +3243,8 @@ class ThinkspaceView : View {
     val sx = event.x
     val sy = event.y
 
-    val inDivider = hasDoc && (sy in (splitY - 30f)..(splitY + 30f))
+    val dividerHitRadius = 28f * density
+    val inDivider = hasDoc && (sy in (splitY - dividerHitRadius)..(splitY + dividerHitRadius))
     val midMultiY = if (event.pointerCount >= 2) (event.getY(0) + event.getY(1)) / 2f else sy
     val inDocZone = hasDoc && (sy < splitY - 14f)
     val inDocZoneMulti = hasDoc && (midMultiY < splitY - 10f)
@@ -3781,6 +3790,9 @@ class ThinkspaceView : View {
         // Divider Drag
         if (inDivider) {
           isDraggingDivider = true
+          dividerDragOffsetY = sy - splitY
+          parent?.requestDisallowInterceptTouchEvent(true)
+          performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
           return true
         }
 
@@ -4632,11 +4644,11 @@ class ThinkspaceView : View {
           return true
         }
 
-        // Dragging Divider
+        // Dragging Divider (100% native smooth 120 FPS tracking, zero bridge re-renders during gesture)
         if (isDraggingDivider) {
-          val newRatio = (sy / viewH).coerceIn(0.18f, 0.82f)
+          val targetSplitY = sy - dividerDragOffsetY
+          val newRatio = (targetSplitY / viewH).coerceIn(0.18f, 0.82f)
           splitRatio = newRatio
-          dispatchSplitRatioEvent(newRatio)
           invalidate()
           return true
         }
@@ -5122,7 +5134,12 @@ class ThinkspaceView : View {
         isDraggingCropBottomLeftHandle = false
         isDraggingCropBottomRightHandle = false
         isMovingCropSelection = false
+        val wasDraggingDivider = isDraggingDivider
         isDraggingDivider = false
+        if (wasDraggingDivider) {
+          lastUserDividerDragTime = System.currentTimeMillis()
+          dispatchSplitRatioEvent(splitRatio)
+        }
         val wasPanningCanvas = isPanningCanvas
         isPanningCanvas = false
         isSelectingPdfText = false

@@ -23,6 +23,7 @@ import com.thinkspace.engine.models.NativeStroke
 import com.thinkspace.engine.models.ThinkspaceEvent
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.abs
 
 // ---------------------------------------------------------------------------
 // Notebook Page \u2014 Rendering
@@ -837,10 +838,13 @@ fun ThinkspaceView.setViewport(x: Float, y: Float, scale: Float) {
   invalidate()
 }
 
-fun ThinkspaceView.setSplitRatioProgrammatic(ratio: Float) {
-  val clamped = ratio.coerceIn(0.1f, 0.9f)
+fun ThinkspaceView.setSplitRatioProgrammatic(ratio: Float, dispatch: Boolean = true) {
+  val clamped = ratio.coerceIn(0.18f, 0.82f)
+  if (abs(splitRatio - clamped) < 0.001f) return
   splitRatio = clamped
-  dispatchSplitRatioEvent(clamped)
+  if (dispatch) {
+    dispatchSplitRatioEvent(clamped)
+  }
   invalidate()
 }
 

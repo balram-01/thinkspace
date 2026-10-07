@@ -1,6 +1,7 @@
 package com.thinkspace
 
 import android.graphics.Color
+import kotlin.math.abs
 import com.facebook.react.module.annotations.ReactModule
 import com.facebook.react.uimanager.SimpleViewManager
 import com.facebook.react.uimanager.ThemedReactContext
@@ -49,8 +50,12 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
   @ReactProp(name = "splitRatio")
   override fun setSplitRatio(view: ThinkspaceView?, value: Float) {
     if (view == null || value <= 0f) return
-    view.splitRatio = value
-    view.invalidate()
+    // Prevent React Native asynchronous bridge echoes from fighting active user drag
+    if (view.isDraggingDivider || (System.currentTimeMillis() - view.lastUserDividerDragTime < 600L)) {
+      return
+    }
+    if (abs(view.splitRatio - value) < 0.001f) return
+    view.splitRatio = value.coerceIn(0.18f, 0.82f)
   }
 
   @ReactProp(name = "activeTool")
@@ -161,6 +166,10 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
   @ReactProp(name = "panX")
   override fun setPanX(view: ThinkspaceView?, value: Float) {
     if (view == null) return
+    if (view.isDraggingDivider || (System.currentTimeMillis() - view.lastUserDividerDragTime < 600L)) {
+      return
+    }
+    if (value == 0f && view.panX != 0f) return
     view.panX = value
     view.invalidate()
   }
@@ -168,6 +177,10 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
   @ReactProp(name = "panY")
   override fun setPanY(view: ThinkspaceView?, value: Float) {
     if (view == null) return
+    if (view.isDraggingDivider || (System.currentTimeMillis() - view.lastUserDividerDragTime < 600L)) {
+      return
+    }
+    if (value == 0f && view.panY != 0f) return
     view.panY = value
     view.invalidate()
   }
@@ -175,6 +188,10 @@ class ThinkspaceViewManager : SimpleViewManager<ThinkspaceView>(),
   @ReactProp(name = "scale")
   override fun setScale(view: ThinkspaceView?, value: Float) {
     if (view == null || value <= 0f) return
+    if (view.isDraggingDivider || (System.currentTimeMillis() - view.lastUserDividerDragTime < 600L)) {
+      return
+    }
+    if (value == 1f && view.scaleFactor != 1f) return
     view.scaleFactor = value
     view.invalidate()
   }

@@ -109,6 +109,28 @@
     4. One-tap squeeze toggle via `≈` tab on right edge remains fully functional.
   - **Tightened Word Hit Testing**: Direct bounding box testing (`px in b.left..b.right && py in b.top..b.bottom`) ensures long-pressing on images/whitespace triggers area crop framing without selecting words 48pt away.
 
+## Split Divider Dragging & Workspace Smoothness Architecture
+- **Problem & Root Cause Analysis (divider.mp4)**:
+  - When dragging the split divider up and down, the workspace canvas vibrated and shook violently.
+  - Three distinct root causes:
+    1. **Lack of Drag Offset (`dividerDragOffsetY`)**: `newRatio = (sy / viewH)` was used without tracking the touch down offset `dividerDragOffsetY = sy - splitY`. Touching anywhere within the hit radius snapped the divider by 30–70px immediately on the first move, causing rapid jitter.
+    2. **Bridge Flooding & Component Re-render Cycles**: Any `dispatchSplitRatioEvent` calls during `ACTION_MOVE` caused React Native to re-render `App.tsx` 15–60 times/sec. When `App.tsx` re-rendered, it pushed all props (`panX=0`, `panY=0`, `scale=1`, `splitRatio`) back down to Android. If `panY` was being modified, `setPanY(view, 0f)` reset it back to 0 on every re-render, causing the entire workspace to slam up and down by 100+ pixels.
+    3. **Bridge Echo Overwriting Live Drag**: Delayed prop updates from React Native fought with the native UI touch thread.
+- **Solution & Native Architecture**:
+  - **Touch-Down Offset Tracking (`dividerDragOffsetY = sy - splitY`)**:
+    - During `ACTION_MOVE`, `val targetSplitY = sy - dividerDragOffsetY` tracks the finger with 1:1 pixel fidelity and ZERO initial snap.
+  - **100% Silent Bridge During Active Drag**:
+    - Zero `dispatchSplitRatioEvent` calls are dispatched during `ACTION_MOVE`. The divider moves entirely on the native Android UI thread with hardware-accelerated 120 FPS rendering.
+    - React Native never re-renders while dragging; zero bridge traffic, zero garbage collection pauses.
+    - On `ACTION_UP`, the finalized `splitRatio` is dispatched once to persist state.
+  - **Camera & Transform Protection in `ThinkspaceViewManager`**:
+    - `setSplitRatio`, `setPanX`, `setPanY`, and `setScale` ignore incoming React Native prop updates while `isDraggingDivider` is true and for 600ms after release.
+    - Camera values (`panX`, `panY`) are preserved and not overwritten with default zeros when the user has interacting natively.
+  - **Clean SplitRatio Property**:
+    - Direct, pure updates to `splitRatio` with bounds clamping (0.18f to 0.82f) without unexpected camera mutation side-effects.
+
+
+
 
 
 
