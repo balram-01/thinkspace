@@ -110,13 +110,22 @@ import UIKit
 
         // Gestures
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleCardTap))
+        tapGesture.cancelsTouchesInView = false
+        tapGesture.delaysTouchesBegan = false
+        tapGesture.delegate = self
         addGestureRecognizer(tapGesture)
 
         let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        panGesture.cancelsTouchesInView = false
+        panGesture.delaysTouchesBegan = false
+        panGesture.delegate = self
         addGestureRecognizer(panGesture)
 
         let doubleTapGesture = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
         doubleTapGesture.numberOfTapsRequired = 2
+        doubleTapGesture.cancelsTouchesInView = false
+        doubleTapGesture.delaysTouchesBegan = false
+        doubleTapGesture.delegate = self
         addGestureRecognizer(doubleTapGesture)
         tapGesture.require(toFail: doubleTapGesture)
     }
@@ -264,7 +273,7 @@ import UIKit
             haptic.prepare()
             haptic.impactOccurred()
             elevateCard(true)
-            superview.bringSubviewToFront(self)
+            layer.zPosition = 100
         case .changed:
             let translation = gesture.translation(in: superview)
             let scale = camera?.scale ?? 1.0
@@ -285,6 +294,7 @@ import UIKit
         case .ended, .cancelled:
             isElevated = false
             elevateCard(false)
+            layer.zPosition = 0
             if let cam = camera {
                 let screenOrigin = cam.worldToScreen(CGPoint(x: model.x, y: model.y))
                 frame.origin = screenOrigin
@@ -309,5 +319,11 @@ import UIKit
                 self.layer.shadowOffset = CGSize(width: 0, height: 3)
             }
         }
+    }
+}
+
+extension ExcerptCardView: UIGestureRecognizerDelegate {
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return true
     }
 }

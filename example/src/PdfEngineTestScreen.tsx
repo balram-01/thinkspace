@@ -23,7 +23,22 @@ import {
   StyleSheet,
   StatusBar,
   Platform,
+  Dimensions,
 } from 'react-native';
+
+const isIOS = Platform.OS === 'ios';
+const isPad = isIOS && (Platform as any).isPad === true;
+const windowDims = Dimensions.get('window');
+const isIPhoneWithNotch =
+  isIOS && !isPad && (windowDims.height >= 800 || windowDims.width >= 800);
+
+const TOP_SAFE_INSET = isIOS
+  ? isIPhoneWithNotch
+    ? 50
+    : 24
+  : (StatusBar.currentHeight ?? 0);
+
+const BOTTOM_SAFE_INSET = isIOS ? (isIPhoneWithNotch ? 34 : isPad ? 20 : 0) : 0;
 import { PdfEngine } from 'thinkspace';
 import type {
   PdfDocumentInfo,
@@ -687,7 +702,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#050E1A',
-    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 0,
+    paddingTop: TOP_SAFE_INSET,
   },
 
   // Header
@@ -1057,7 +1072,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#020912',
     paddingHorizontal: 16,
     paddingVertical: 5,
-    paddingBottom: Platform.OS === 'android' ? 20 : 8,
+    paddingBottom: Math.max(8, BOTTOM_SAFE_INSET),
     borderTopWidth: 1,
     borderTopColor: '#0A1929',
   },

@@ -70,9 +70,15 @@ import CoreGraphics
         // 2-Finger Pan & Pinch for canvas navigation (1-finger moves cards/draws)
         panGesture = UIPanGestureRecognizer(target: self, action: #selector(handleCanvasPan(_:)))
         panGesture.minimumNumberOfTouches = 2
+        panGesture.cancelsTouchesInView = false
+        panGesture.delaysTouchesBegan = false
+        panGesture.delegate = self
         addGestureRecognizer(panGesture)
 
         pinchGesture = UIPinchGestureRecognizer(target: self, action: #selector(handleCanvasPinch(_:)))
+        pinchGesture.cancelsTouchesInView = false
+        pinchGesture.delaysTouchesBegan = false
+        pinchGesture.delegate = self
         addGestureRecognizer(pinchGesture)
     }
 
@@ -350,4 +356,10 @@ import CoreGraphics
         notebookViewMap.removeValue(forKey: page.id)
     }
     public func notebookPageDidDuplicate(page: NotebookPageModel) {}
+}
+
+extension InfiniteCanvasView: UIGestureRecognizerDelegate {
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return true
+    }
 }

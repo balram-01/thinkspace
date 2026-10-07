@@ -127,10 +127,19 @@
     - `setSplitRatio`, `setPanX`, `setPanY`, and `setScale` ignore incoming React Native prop updates while `isDraggingDivider` is true and for 600ms after release.
     - Camera values (`panX`, `panY`) are preserved and not overwritten with default zeros when the user has interacting natively.
   - **Clean SplitRatio Property**:
-    - Direct, pure updates to `splitRatio` with bounds clamping (0.18f to 0.82f) without unexpected camera mutation side-effects.
-
-
-
-
-
-
+## iOS Architecture & Touch / Gesture Registry Fixes
+- **Touch Registry & Fabric Inconsistency**:
+  - `cancelsTouchesInView = false` and `delaysTouchesBegan = false` configured on all custom gesture recognizers in `ExcerptCardView`, `NotebookPageView`, `InfiniteCanvasView`, `InkLinkRenderer`, `ThinkspaceContainerView`, and `PDFDocumentEngine`.
+  - Conformed all views to `UIGestureRecognizerDelegate` with `shouldRecognizeSimultaneouslyWith` returning `true`.
+  - Replaced `superview.bringSubviewToFront` with non-destructive visual elevation (`layer.zPosition = 100`) to prevent modifying the UIKit view hierarchy while React Native's `RCTTouchHandler` is tracking active touches.
+- **Safe Area Inset & Notch Architecture**:
+  - Dynamically detects iOS notch / Dynamic Island (`TOP_SAFE_INSET` = 50pt) and home indicator (`BOTTOM_SAFE_INSET` = 34pt).
+  - Positions top bar, bottom navigation, and modal sheets cleanly outside hardware cutouts and rounded screen corners.
+- **120 FPS iOS Split Divider Dragging**:
+  - Eliminated per-frame bridge dispatch during divider pan in `ThinkspaceContainerView.swift`.
+  - Renders divider pan at 120 FPS on the native UI thread; dispatches `onSplitRatioChange` only on gesture completion (`.ended`).
+  - Added `lastUserDividerDragTime` cooldown (600ms) to prevent React Native props from echoing back and interrupting active drags.
+- **Drag & Drop Excerpt Selection onto Canvas**:
+  - Added interactive pan/drag gesture to `PDFDocumentEngine` on active text selection and the "Extract Excerpt" pill button.
+  - Lifts a floating ghost preview card (`dragGhostView`) with spring scale animation and haptic feedback.
+  - Smoothly tracks finger across split divider and drops `ExcerptModel` into the infinite canvas at the exact world coordinates with an automatic `InkLink` tether.

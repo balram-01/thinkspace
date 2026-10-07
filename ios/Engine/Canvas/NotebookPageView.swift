@@ -59,12 +59,21 @@ import CoreGraphics
         addSubview(resizeHandle)
 
         let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        panGesture.cancelsTouchesInView = false
+        panGesture.delaysTouchesBegan = false
+        panGesture.delegate = self
         addGestureRecognizer(panGesture)
 
         let resizeGesture = UIPanGestureRecognizer(target: self, action: #selector(handleResize(_:)))
+        resizeGesture.cancelsTouchesInView = false
+        resizeGesture.delaysTouchesBegan = false
+        resizeGesture.delegate = self
         resizeHandle.addGestureRecognizer(resizeGesture)
 
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        tapGesture.cancelsTouchesInView = false
+        tapGesture.delaysTouchesBegan = false
+        tapGesture.delegate = self
         addGestureRecognizer(tapGesture)
     }
 
@@ -153,7 +162,7 @@ import CoreGraphics
         case .began:
             haptic.prepare()
             haptic.impactOccurred()
-            superview.bringSubviewToFront(self)
+            layer.zPosition = 50
         case .changed:
             let translation = gesture.translation(in: superview)
             let scale = camera?.scale ?? 1.0
@@ -172,6 +181,7 @@ import CoreGraphics
             gesture.setTranslation(.zero, in: superview)
             delegate?.notebookPageDidMove(page: model)
         case .ended, .cancelled:
+            layer.zPosition = 0
             if let cam = camera {
                 let screenOrigin = cam.worldToScreen(CGPoint(x: model.x, y: model.y))
                 frame.origin = screenOrigin
@@ -204,5 +214,11 @@ import CoreGraphics
         default:
             break
         }
+    }
+}
+
+extension NotebookPageView: UIGestureRecognizerDelegate {
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return true
     }
 }

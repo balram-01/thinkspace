@@ -9,7 +9,28 @@ import {
   Modal,
   Animated,
   Easing,
+  Platform,
+  Dimensions,
 } from 'react-native';
+
+const isIOS = Platform.OS === 'ios';
+const isPad = isIOS && (Platform as any).isPad === true;
+const windowDims = Dimensions.get('window');
+const isIPhoneWithNotch =
+  isIOS && !isPad && (windowDims.height >= 800 || windowDims.width >= 800);
+
+const TOP_SAFE_INSET = isIOS
+  ? isIPhoneWithNotch
+    ? 50
+    : 24
+  : (StatusBar.currentHeight ?? 0);
+
+const BOTTOM_SAFE_INSET = isIOS ? (isIPhoneWithNotch ? 34 : isPad ? 20 : 0) : 0;
+
+const TOP_BAR_HEIGHT = 48 + TOP_SAFE_INSET;
+const BOTTOM_NAV_HEIGHT = 54 + BOTTOM_SAFE_INSET;
+const SECONDARY_TOOLBAR_HEIGHT = 58;
+const BOTTOM_CHROME_HEIGHT = SECONDARY_TOOLBAR_HEIGHT + BOTTOM_NAV_HEIGHT;
 import {
   ThinkspaceView,
   PdfEngine,
@@ -85,9 +106,8 @@ export default function App() {
     }).start();
   }, [isImmersive, immersiveAnim]);
 
-  const statusBarH = StatusBar.currentHeight ?? 24;
-  const topBarH = 48 + statusBarH;
-  const bottomChromeH = 112;
+  const topBarH = TOP_BAR_HEIGHT;
+  const bottomChromeH = BOTTOM_CHROME_HEIGHT;
 
   const topTranslateY = immersiveAnim.interpolate({
     inputRange: [0, 1],
@@ -1471,13 +1491,13 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    paddingTop: StatusBar.currentHeight ?? 24,
-    height: 48 + (StatusBar.currentHeight ?? 24),
+    paddingTop: TOP_SAFE_INSET,
+    height: TOP_BAR_HEIGHT,
     backgroundColor: '#0F172A',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
     borderBottomWidth: 1,
     borderBottomColor: '#1E293B',
     zIndex: 100, // Make sure it sits above the workspace
@@ -1670,12 +1690,14 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   bottomNav: {
-    height: 54,
+    height: BOTTOM_NAV_HEIGHT,
     backgroundColor: '#080E1A',
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-around',
     paddingHorizontal: 14,
+    paddingTop: 8,
+    paddingBottom: BOTTOM_SAFE_INSET,
     borderTopWidth: 1,
     borderTopColor: '#161F30',
   },
@@ -1713,7 +1735,7 @@ const styles = StyleSheet.create({
   },
   backBtn: {
     position: 'absolute',
-    top: 50,
+    top: TOP_SAFE_INSET + 10,
     left: 16,
     backgroundColor: 'rgba(15, 23, 42, 0.95)',
     borderWidth: 1,

@@ -36,6 +36,8 @@ import CoreGraphics
 
     private func setupGesture() {
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        tap.cancelsTouchesInView = false
+        tap.delaysTouchesBegan = false
         addGestureRecognizer(tap)
     }
 

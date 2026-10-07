@@ -6,6 +6,9 @@ import PDFKit
     func pdfEngineDidSelectText(selection: PDFSelection, excerpt: ExcerptModel)
     func pdfEngineDidExtractCrop(imagePath: String, pageNumber: Int, rect: CGRect)
     func pdfEnginePageDidChange(pageNumber: Int, totalPages: Int)
+    @objc optional func pdfEngineDidBeginDraggingSelection(selection: PDFSelection, locationInContainer: CGPoint)
+    @objc optional func pdfEngineDidUpdateDraggingSelection(locationInContainer: CGPoint)
+    @objc optional func pdfEngineDidEndDraggingSelection(selection: PDFSelection, locationInContainer: CGPoint)
 }
 
 /**
@@ -71,6 +74,12 @@ import PDFKit
             name: .PDFViewSelectionChanged,
             object: pdfView
         )
+
+        let selectionDragPan = UIPanGestureRecognizer(target: self, action: #selector(handlePdfSelectionDragPan(_:)))
+        selectionDragPan.cancelsTouchesInView = false
+        selectionDragPan.delaysTouchesBegan = false
+        selectionDragPan.delegate = self
+        pdfView.addGestureRecognizer(selectionDragPan)
     }
 
     private func setupCalloutUI() {
@@ -93,6 +102,10 @@ import PDFKit
         extractBtn.layer.cornerRadius = 8.0
         extractBtn.contentEdgeInsets = UIEdgeInsets(top: 4, left: 10, bottom: 4, right: 10)
         extractBtn.addTarget(self, action: #selector(handleExtractTap), for: .touchUpInside)
+        let extractBtnPan = UIPanGestureRecognizer(target: self, action: #selector(handlePdfSelectionDragPan(_:)))
+        extractBtnPan.cancelsTouchesInView = false
+        extractBtnPan.delaysTouchesBegan = false
+        extractBtn.addGestureRecognizer(extractBtnPan)
         calloutView.addSubview(extractBtn)
 
         copyBtn.setTitle("Copy", for: .normal)
@@ -340,6 +353,25 @@ import PDFKit
         }
     }
 
+    // ── Drag & Drop Excerpt Gesture Handling ────────────────────────────────────
+    @objc private func handlePdfSelectionDragPan(_ gesture: UIPanGestureRecognizer) {
+        guard let sel = activeSelection, let container = self.superview else { return }
+        let location = gesture.location(in: container)
+
+        switch gesture.state {
+        case .began:
+            delegate?.pdfEngineDidBeginDraggingSelection?(selection: sel, locationInContainer: location)
+        case .changed:
+            delegate?.pdfEngineDidUpdateDraggingSelection?(locationInContainer: location)
+        case .ended, .cancelled:
+            delegate?.pdfEngineDidEndDraggingSelection?(selection: sel, locationInContainer: location)
+            hideCallout()
+            pdfView.clearSelection()
+        default:
+            break
+        }
+    }
+
     // ── Instant Text Search ────────────────────────────────────────────────────
     @objc public func search(query: String) {
         searchResults.removeAll()
@@ -386,5 +418,23 @@ import PDFKit
     public override func layoutSubviews() {
         super.layoutSubviews()
         pdfView.frame = bounds
+    }
+}
+
+extension PDFDocumentEngine: UIGestureRecognizerDelegate {
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return true
+    }
+
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if let sel = activeSelection, let page = sel.pages.first {
+            let pointInPdf = touch.location(in: pdfView)
+            let pagePoint = pdfView.convert(pointInPdf, to: page)
+            let bounds = sel.bounds(for: page)
+            if bounds.insetBy(dx: -15, dy: -15).contains(pagePoint) {
+                return true
+            }
+        }
+        return true
     }
 }

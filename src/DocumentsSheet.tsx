@@ -10,6 +10,7 @@ import {
   Alert,
   Animated,
   Easing,
+  Platform,
 } from 'react-native';
 import type { WorkspaceDocumentEntry, WorkspaceFolder } from './types';
 
@@ -925,7 +926,8 @@ const styles = StyleSheet.create({
   },
   sheetCard: {
     flex: 1,
-    marginTop: 46, // Starts right below iOS/Android status bar
+    marginTop: Platform.OS === 'ios' ? 54 : 46, // Starts right below iOS Dynamic Island / notch and Android status bar
+    paddingBottom: Platform.OS === 'ios' ? 28 : 12,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     backgroundColor: 'rgba(142, 158, 175, 0.98)', // Slate-blue matching LiquidText video

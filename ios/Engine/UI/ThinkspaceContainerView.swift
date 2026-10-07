@@ -21,6 +21,11 @@ import PDFKit
     private let dividerHandle = UIView()
     @objc public let toastView = HudToastView()
 
+    // Drag & Drop Floating Ghost Preview
+    private let dragGhostView = UIView()
+    private let dragGhostLabel = UILabel()
+    private let dragGhostBar = UIView()
+
     // ── Native Sub-Engines ─────────────────────────────────────────────────────
     @objc public let pdfEngine = PDFDocumentEngine()
     @objc public let infiniteCanvas = InfiniteCanvasView()
@@ -73,6 +78,7 @@ import PDFKit
     private let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
     private var isDraggingDivider = false
     private var dividerPanStartRatio: CGFloat = 0.45
+    private var lastUserDividerDragTime: TimeInterval = 0
 
     // ── Initializers ───────────────────────────────────────────────────────────
     @objc public override init(frame: CGRect) {
@@ -121,7 +127,36 @@ import PDFKit
         splitDivider.addSubview(dividerHandle)
 
         let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handleDividerPan(_:)))
+        panGesture.cancelsTouchesInView = false
+        panGesture.delaysTouchesBegan = false
         splitDivider.addGestureRecognizer(panGesture)
+
+        // 4. Drag & Drop Floating Ghost Setup
+        dragGhostView.backgroundColor = UIColor(red: 0.12, green: 0.16, blue: 0.24, alpha: 0.95)
+        dragGhostView.layer.cornerRadius = 12.0
+        dragGhostView.layer.borderWidth = 1.5
+        dragGhostView.layer.borderColor = UIColor(red: 0.0, green: 0.68, blue: 0.71, alpha: 1.0).cgColor
+        dragGhostView.layer.shadowColor = UIColor.black.cgColor
+        dragGhostView.layer.shadowRadius = 14.0
+        dragGhostView.layer.shadowOpacity = 0.40
+        dragGhostView.layer.shadowOffset = CGSize(width: 0, height: 8)
+        dragGhostView.frame = CGRect(x: 0, y: 0, width: 220, height: 90)
+        dragGhostView.isHidden = true
+        dragGhostView.alpha = 0.0
+        dragGhostView.layer.zPosition = 999
+        dragGhostView.clipsToBounds = true
+
+        dragGhostBar.backgroundColor = UIColor(red: 0.0, green: 0.68, blue: 0.71, alpha: 1.0)
+        dragGhostBar.frame = CGRect(x: 0, y: 0, width: 4.0, height: 90)
+        dragGhostView.addSubview(dragGhostBar)
+
+        dragGhostLabel.textColor = .white
+        dragGhostLabel.font = UIFont.systemFont(ofSize: 12.0, weight: .medium)
+        dragGhostLabel.numberOfLines = 4
+        dragGhostLabel.frame = CGRect(x: 14, y: 8, width: 194, height: 74)
+        dragGhostView.addSubview(dragGhostLabel)
+
+        addSubview(dragGhostView)
 
         updateActiveToolMode()
     }
@@ -174,8 +209,10 @@ import PDFKit
         case .began:
             isDraggingDivider = true
             dividerPanStartRatio = splitRatio
+            lastUserDividerDragTime = Date().timeIntervalSince1970
             impactFeedback.prepare()
         case .changed:
+            lastUserDividerDragTime = Date().timeIntervalSince1970
             let deltaRatio = translation.y / totalHeight
             var targetRatio = dividerPanStartRatio + deltaRatio
             targetRatio = min(0.85, max(0.15, targetRatio))
@@ -191,10 +228,15 @@ import PDFKit
                 }
             }
 
-            splitRatio = targetRatio
-            ThinkspaceBridgeEmitter.shared.sendSplitRatioChange(ratio: targetRatio)
+            if abs(splitRatio - targetRatio) > 0.001 {
+                splitRatio = targetRatio
+                setNeedsLayout()
+                layoutIfNeeded()
+            }
         case .ended, .cancelled:
             isDraggingDivider = false
+            lastUserDividerDragTime = Date().timeIntervalSince1970
+            ThinkspaceBridgeEmitter.shared.sendSplitRatioChange(ratio: splitRatio)
         default:
             break
         }
@@ -202,8 +244,12 @@ import PDFKit
 
     // ── Props Update Pipeline ──────────────────────────────────────────────────
     @objc public func updateSplitRatio(_ ratio: CGFloat) {
-        if !isDraggingDivider && abs(splitRatio - ratio) > 0.001 {
-            splitRatio = ratio
+        if isDraggingDivider || (Date().timeIntervalSince1970 - lastUserDividerDragTime < 0.6) {
+            return
+        }
+        if abs(splitRatio - ratio) > 0.001 {
+            splitRatio = min(0.85, max(0.15, ratio))
+            setNeedsLayout()
         }
     }
 
@@ -343,6 +389,84 @@ import PDFKit
 
         // Record Undo action
         undoRedoManager.recordAction(.addCard(excerpt))
+    }
+
+    public func pdfEngineDidBeginDraggingSelection(selection: PDFSelection, locationInContainer: CGPoint) {
+        let text = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        dragGhostLabel.text = text.isEmpty ? "Excerpt" : text
+        dragGhostView.center = locationInContainer
+        dragGhostView.isHidden = false
+        dragGhostView.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+        dragGhostView.alpha = 0.0
+        bringSubviewToFront(dragGhostView)
+
+        UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut]) {
+            self.dragGhostView.transform = CGAffineTransform(scaleX: 1.05, y: 1.05)
+            self.dragGhostView.alpha = 0.95
+        }
+        impactFeedback.prepare()
+        impactFeedback.impactOccurred()
+    }
+
+    public func pdfEngineDidUpdateDraggingSelection(locationInContainer: CGPoint) {
+        dragGhostView.center = locationInContainer
+        let isOverCanvas = locationInContainer.y > splitDivider.frame.minY
+        if isOverCanvas {
+            dragGhostView.layer.borderColor = UIColor(red: 0.0, green: 0.85, blue: 0.80, alpha: 1.0).cgColor
+        } else {
+            dragGhostView.layer.borderColor = UIColor(red: 0.0, green: 0.68, blue: 0.71, alpha: 0.8).cgColor
+        }
+    }
+
+    public func pdfEngineDidEndDraggingSelection(selection: PDFSelection, locationInContainer: CGPoint) {
+        let isOverCanvas = locationInContainer.y > splitDivider.frame.minY
+
+        if isOverCanvas {
+            guard let excerpt = PDFSelectionEngine.createExcerpt(from: selection, documentId: activeDocumentId, color: selectedColor) else {
+                UIView.animate(withDuration: 0.2) { self.dragGhostView.alpha = 0.0 } completion: { _ in self.dragGhostView.isHidden = true }
+                return
+            }
+
+            let canvasPoint = canvasContainer.convert(locationInContainer, from: self)
+            let worldX = camera.screenToWorldX(canvasPoint.x - excerpt.width / 2.0)
+            let worldY = camera.screenToWorldY(max(20.0, canvasPoint.y - 45.0))
+            excerpt.x = worldX
+            excerpt.y = worldY
+
+            cards.append(excerpt)
+            infiniteCanvas.addCard(excerpt)
+            ThinkspaceBridgeEmitter.shared.sendExtractExcerpt(card: excerpt)
+
+            let newLink = InkLink(
+                id: UUID().uuidString,
+                sourceExcerptId: excerpt.id,
+                targetDocumentId: activeDocumentId ?? "",
+                targetPageNumber: excerpt.pageNumber,
+                targetRelativeY: 0.5,
+                color: excerpt.color
+            )
+            inkLinks.append(newLink)
+            infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+            ThinkspaceBridgeEmitter.shared.sendInkLinkCreate(newLink)
+
+            impactFeedback.prepare()
+            impactFeedback.impactOccurred()
+            toastView.showToast(message: "Dropped excerpt onto workspace canvas!", in: self)
+            undoRedoManager.recordAction(.addCard(excerpt))
+
+            UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut]) {
+                self.dragGhostView.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+                self.dragGhostView.alpha = 0.0
+            } completion: { _ in
+                self.dragGhostView.isHidden = true
+            }
+        } else {
+            UIView.animate(withDuration: 0.2) {
+                self.dragGhostView.alpha = 0.0
+            } completion: { _ in
+                self.dragGhostView.isHidden = true
+            }
+        }
     }
 
     public func pdfEngineDidExtractCrop(imagePath: String, pageNumber: Int, rect: CGRect) {
