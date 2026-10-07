@@ -24,6 +24,7 @@ import PDFKit
     // Drag & Drop Floating Ghost Preview
     private let dragGhostView = UIView()
     private let dragGhostLabel = UILabel()
+    private let dragGhostImageView = UIImageView()
     private let dragGhostBar = UIView()
 
     // ── Native Sub-Engines ─────────────────────────────────────────────────────
@@ -155,6 +156,13 @@ import PDFKit
         dragGhostLabel.numberOfLines = 4
         dragGhostLabel.frame = CGRect(x: 14, y: 8, width: 194, height: 74)
         dragGhostView.addSubview(dragGhostLabel)
+
+        dragGhostImageView.contentMode = .scaleAspectFill
+        dragGhostImageView.clipsToBounds = true
+        dragGhostImageView.layer.cornerRadius = 6.0
+        dragGhostImageView.frame = CGRect(x: 14, y: 8, width: 194, height: 74)
+        dragGhostImageView.isHidden = true
+        dragGhostView.addSubview(dragGhostImageView)
 
         addSubview(dragGhostView)
 
@@ -392,6 +400,8 @@ import PDFKit
     }
 
     public func pdfEngineDidBeginDraggingSelection(selection: PDFSelection, locationInContainer: CGPoint) {
+        dragGhostImageView.isHidden = true
+        dragGhostLabel.isHidden = false
         let text = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         dragGhostLabel.text = text.isEmpty ? "Excerpt" : text
         dragGhostView.center = locationInContainer
@@ -469,6 +479,98 @@ import PDFKit
         }
     }
 
+    // ── Crop Extraction & Dragging ──────────────────────────────────────────────
+    public func pdfEngineDidBeginDraggingCrop(imagePath: String, previewImage: UIImage?, locationInContainer: CGPoint) {
+        dragGhostLabel.isHidden = true
+        dragGhostImageView.isHidden = false
+        if let img = previewImage {
+            dragGhostImageView.image = img
+        } else if let localImg = UIImage(contentsOfFile: imagePath) {
+            dragGhostImageView.image = localImg
+        }
+        dragGhostView.center = locationInContainer
+        dragGhostView.isHidden = false
+        dragGhostView.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+        dragGhostView.alpha = 0.0
+        bringSubviewToFront(dragGhostView)
+
+        UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut]) {
+            self.dragGhostView.transform = CGAffineTransform(scaleX: 1.05, y: 1.05)
+            self.dragGhostView.alpha = 0.95
+        }
+        impactFeedback.prepare()
+        impactFeedback.impactOccurred()
+    }
+
+    public func pdfEngineDidUpdateDraggingCrop(locationInContainer: CGPoint) {
+        dragGhostView.center = locationInContainer
+        let isOverCanvas = locationInContainer.y > splitDivider.frame.minY
+        if isOverCanvas {
+            dragGhostView.layer.borderColor = UIColor(red: 0.0, green: 0.85, blue: 0.80, alpha: 1.0).cgColor
+        } else {
+            dragGhostView.layer.borderColor = UIColor(red: 0.0, green: 0.68, blue: 0.71, alpha: 0.8).cgColor
+        }
+    }
+
+    public func pdfEngineDidEndDraggingCrop(imagePath: String, pageNumber: Int, rect: CGRect, color: String, locationInContainer: CGPoint) {
+        let isOverCanvas = locationInContainer.y > splitDivider.frame.minY
+
+        if isOverCanvas {
+            let canvasPoint = canvasContainer.convert(locationInContainer, from: self)
+            let cardW: CGFloat = 220.0
+            let cardH: CGFloat = 160.0
+            let worldX = camera.screenToWorldX(canvasPoint.x - cardW / 2.0)
+            let worldY = camera.screenToWorldY(max(20.0, canvasPoint.y - cardH / 2.0))
+
+            let cropExcerpt = ExcerptModel(
+                id: UUID().uuidString,
+                documentId: activeDocumentId,
+                pageNumber: pageNumber,
+                text: "Figure • p. \(pageNumber)",
+                color: color,
+                x: worldX,
+                y: worldY,
+                width: cardW,
+                imageUrl: imagePath,
+                isImage: true
+            )
+
+            cards.append(cropExcerpt)
+            infiniteCanvas.addCard(cropExcerpt)
+            ThinkspaceBridgeEmitter.shared.sendExtractExcerpt(card: cropExcerpt)
+
+            let newLink = InkLink(
+                id: UUID().uuidString,
+                sourceExcerptId: cropExcerpt.id,
+                targetDocumentId: activeDocumentId ?? "",
+                targetPageNumber: pageNumber,
+                targetRelativeY: 0.5,
+                color: color
+            )
+            inkLinks.append(newLink)
+            infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+            ThinkspaceBridgeEmitter.shared.sendInkLinkCreate(newLink)
+
+            impactFeedback.prepare()
+            impactFeedback.impactOccurred()
+            toastView.showToast(message: "Dropped figure excerpt onto workspace canvas!", in: self)
+            undoRedoManager.recordAction(.addCard(cropExcerpt))
+
+            UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut]) {
+                self.dragGhostView.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+                self.dragGhostView.alpha = 0.0
+            } completion: { _ in
+                self.dragGhostView.isHidden = true
+            }
+        } else {
+            UIView.animate(withDuration: 0.2) {
+                self.dragGhostView.alpha = 0.0
+            } completion: { _ in
+                self.dragGhostView.isHidden = true
+            }
+        }
+    }
+
     public func pdfEngineDidExtractCrop(imagePath: String, pageNumber: Int, rect: CGRect) {
         let desiredWorldX = camera.screenToWorldX(canvasContainer.bounds.width / 2.0 - 100.0)
         let desiredWorldY = camera.screenToWorldY(max(30.0, canvasContainer.bounds.height / 2.0 - 80.0))
@@ -477,8 +579,8 @@ import PDFKit
             id: UUID().uuidString,
             documentId: activeDocumentId,
             pageNumber: pageNumber,
-            text: "Extracted Figure (p. \(pageNumber))",
-            color: "#3B82F6",
+            text: "Figure • p. \(pageNumber)",
+            color: selectedColor,
             x: desiredWorldX,
             y: desiredWorldY,
             width: 220,
@@ -506,7 +608,7 @@ import PDFKit
             targetDocumentId: activeDocumentId ?? "",
             targetPageNumber: pageNumber,
             targetRelativeY: 0.5,
-            color: "#3B82F6"
+            color: selectedColor
         )
         inkLinks.append(newLink)
         infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks

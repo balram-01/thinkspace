@@ -9,25 +9,29 @@ import PDFKit
     @objc optional func pdfEngineDidBeginDraggingSelection(selection: PDFSelection, locationInContainer: CGPoint)
     @objc optional func pdfEngineDidUpdateDraggingSelection(locationInContainer: CGPoint)
     @objc optional func pdfEngineDidEndDraggingSelection(selection: PDFSelection, locationInContainer: CGPoint)
+    @objc optional func pdfEngineDidBeginDraggingCrop(imagePath: String, previewImage: UIImage?, locationInContainer: CGPoint)
+    @objc optional func pdfEngineDidUpdateDraggingCrop(locationInContainer: CGPoint)
+    @objc optional func pdfEngineDidEndDraggingCrop(imagePath: String, pageNumber: Int, rect: CGRect, color: String, locationInContainer: CGPoint)
 }
 
 /**
  * High-performance PDF reader powered by Apple PDFKit.
  * Features vector glyph crispness, sub-millisecond page virtualization, instant text search,
- * in-document selection floating callouts, and 8-point interactive figure cropper.
+ * in-document selection floating callouts, and LiquidText-style 8-point interactive figure cropper.
  */
 @objc public class PDFDocumentEngine: UIView, PDFDocumentDelegate {
 
     @objc public let pdfView = PDFView()
     @objc public weak var delegate: PDFDocumentEngineDelegate?
     @objc public let compressionEngine = DocumentCompressionEngine()
+    @objc public let cropOverlayView = PDFCropOverlayView()
 
     private var currentDocument: PDFDocument?
     private var searchResults: [PDFSelection] = []
     private var currentSearchIndex: Int = -1
     public var documentId: String?
 
-    // Floating Callout Overlay
+    // Floating Callout Overlay for Text Selection
     private let calloutView = UIView()
     private let extractBtn = UIButton(type: .system)
     private let highlightBtn = UIButton(type: .system)
@@ -43,12 +47,14 @@ import PDFKit
         super.init(frame: frame)
         setupPdfView()
         setupCalloutUI()
+        setupCropOverlay()
     }
 
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         setupPdfView()
         setupCalloutUI()
+        setupCropOverlay()
     }
 
     private func setupPdfView() {
@@ -75,11 +81,12 @@ import PDFKit
             object: pdfView
         )
 
-        let selectionDragPan = UIPanGestureRecognizer(target: self, action: #selector(handlePdfSelectionDragPan(_:)))
-        selectionDragPan.cancelsTouchesInView = false
-        selectionDragPan.delaysTouchesBegan = false
-        selectionDragPan.delegate = self
-        pdfView.addGestureRecognizer(selectionDragPan)
+        // Long press on PDF to trigger LiquidText 8-point Figure Crop selection
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handlePdfLongPress(_:)))
+        longPress.minimumPressDuration = 0.45
+        longPress.cancelsTouchesInView = false
+        longPress.delaysTouchesBegan = false
+        pdfView.addGestureRecognizer(longPress)
     }
 
     private func setupCalloutUI() {
@@ -102,6 +109,7 @@ import PDFKit
         extractBtn.layer.cornerRadius = 8.0
         extractBtn.contentEdgeInsets = UIEdgeInsets(top: 4, left: 10, bottom: 4, right: 10)
         extractBtn.addTarget(self, action: #selector(handleExtractTap), for: .touchUpInside)
+
         let extractBtnPan = UIPanGestureRecognizer(target: self, action: #selector(handlePdfSelectionDragPan(_:)))
         extractBtnPan.cancelsTouchesInView = false
         extractBtnPan.delaysTouchesBegan = false
@@ -135,6 +143,12 @@ import PDFKit
             colorStack.addArrangedSubview(colorDot)
         }
         calloutView.addSubview(colorStack)
+    }
+
+    private func setupCropOverlay() {
+        cropOverlayView.delegate = self
+        cropOverlayView.isHidden = true
+        addSubview(cropOverlayView)
     }
 
     deinit {
@@ -270,6 +284,58 @@ import PDFKit
         guard let doc = currentDocument, let currentPage = pdfView.currentPage else { return }
         let pageIndex = doc.index(for: currentPage) + 1
         delegate?.pdfEnginePageDidChange(pageNumber: pageIndex, totalPages: doc.pageCount)
+
+        if !cropOverlayView.isHidden {
+            cropOverlayView.updateLayoutFromPageBounds()
+        }
+    }
+
+    // ── LiquidText Long-Press Figure / Area Cropper ────────────────────────────
+    @objc private func handlePdfLongPress(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        let touchLocation = gesture.location(in: pdfView)
+
+        // Find the page under touch
+        guard let page = pdfView.page(for: touchLocation, nearest: true) else { return }
+        let pagePoint = pdfView.convert(touchLocation, to: page)
+        let pageBounds = page.bounds(for: .cropBox)
+
+        // Default crop size centered on touch
+        let defaultW = min(260.0, pageBounds.width * 0.75)
+        let defaultH = min(180.0, pageBounds.height * 0.35)
+        let originX = max(0, min(pageBounds.width - defaultW, pagePoint.x - defaultW / 2.0))
+        let originY = max(0, min(pageBounds.height - defaultH, pagePoint.y - defaultH / 2.0))
+        let cropRect = CGRect(x: originX, y: originY, width: defaultW, height: defaultH)
+
+        // Clear any text selection and hide text callout
+        pdfView.clearSelection()
+        hideCallout()
+
+        // Present LiquidText 8-point interactive cropper
+        cropOverlayView.currentColor = activeHighlightColor
+        cropOverlayView.presentCrop(on: page, initialPageRect: cropRect, in: pdfView)
+        bringSubviewToFront(cropOverlayView)
+
+        let impact = UIImpactFeedbackGenerator(style: .medium)
+        impact.impactOccurred()
+    }
+
+    // Programmatic crop box creation (e.g. from toolbar)
+    @objc public func triggerCropOnCurrentPage() {
+        guard let currentPage = pdfView.currentPage else { return }
+        let pageBounds = currentPage.bounds(for: .cropBox)
+        let defaultW = min(280.0, pageBounds.width * 0.8)
+        let defaultH = min(200.0, pageBounds.height * 0.4)
+        let originX = (pageBounds.width - defaultW) / 2.0
+        let originY = (pageBounds.height - defaultH) / 2.0
+        let cropRect = CGRect(x: originX, y: originY, width: defaultW, height: defaultH)
+
+        pdfView.clearSelection()
+        hideCallout()
+
+        cropOverlayView.currentColor = activeHighlightColor
+        cropOverlayView.presentCrop(on: currentPage, initialPageRect: cropRect, in: pdfView)
+        bringSubviewToFront(cropOverlayView)
     }
 
     // ── Selection & Floating Callout ───────────────────────────────────────────
@@ -279,6 +345,11 @@ import PDFKit
               let firstPage = sel.pages.first else {
             hideCallout()
             return
+        }
+
+        // Dismiss crop overlay when text is actively selected
+        if !cropOverlayView.isHidden {
+            cropOverlayView.dismiss()
         }
 
         activeSelection = sel
@@ -314,6 +385,7 @@ import PDFKit
     }
 
     private func hideCallout() {
+        guard !calloutView.isHidden else { return }
         UIView.animate(withDuration: 0.15) {
             self.calloutView.alpha = 0.0
         } completion: { _ in
@@ -337,7 +409,6 @@ import PDFKit
     }
 
     @objc private func handleHighlightTap() {
-        // Apply highlight annotation to PDF
         if let sel = activeSelection, let page = sel.pages.first {
             let annot = PDFAnnotation(bounds: sel.bounds(for: page), forType: .highlight, withProperties: nil)
             annot.color = UIColor(hexString: activeHighlightColor) ?? UIColor.yellow
@@ -350,12 +421,14 @@ import PDFKit
     @objc private func handleColorDotTap(_ sender: UIButton) {
         if let hex = sender.accessibilityLabel {
             activeHighlightColor = hex
+            extractBtn.backgroundColor = UIColor(hexString: hex) ?? UIColor(red: 0.0, green: 0.68, blue: 0.71, alpha: 1.0)
+            calloutView.layer.borderColor = (UIColor(hexString: hex) ?? UIColor(red: 0.0, green: 0.68, blue: 0.71, alpha: 1.0)).withAlphaComponent(0.8).cgColor
         }
     }
 
-    // ── Drag & Drop Excerpt Gesture Handling ────────────────────────────────────
+    // ── Drag & Drop Excerpt Gesture Handling (from Callout Button) ──────────────
     @objc private func handlePdfSelectionDragPan(_ gesture: UIPanGestureRecognizer) {
-        guard let sel = activeSelection, let container = self.superview else { return }
+        guard let sel = activeSelection, let container = self.window ?? self.superview else { return }
         let location = gesture.location(in: container)
 
         switch gesture.state {
@@ -418,23 +491,29 @@ import PDFKit
     public override func layoutSubviews() {
         super.layoutSubviews()
         pdfView.frame = bounds
+        if !cropOverlayView.isHidden {
+            cropOverlayView.updateLayoutFromPageBounds()
+        }
     }
 }
 
-extension PDFDocumentEngine: UIGestureRecognizerDelegate {
-    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return true
+// ── PDFCropOverlayDelegate Implementation ──────────────────────────────────────
+extension PDFDocumentEngine: PDFCropOverlayDelegate {
+    public func cropOverlayDidExtract(imagePath: String, pageNumber: Int, rect: CGRect, color: String) {
+        delegate?.pdfEngineDidExtractCrop(imagePath: imagePath, pageNumber: pageNumber, rect: rect)
     }
 
-    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        if let sel = activeSelection, let page = sel.pages.first {
-            let pointInPdf = touch.location(in: pdfView)
-            let pagePoint = pdfView.convert(pointInPdf, to: page)
-            let bounds = sel.bounds(for: page)
-            if bounds.insetBy(dx: -15, dy: -15).contains(pagePoint) {
-                return true
-            }
-        }
-        return true
+    public func cropOverlayDidBeginDragging(imagePath: String, previewImage: UIImage?, locationInContainer: CGPoint) {
+        delegate?.pdfEngineDidBeginDraggingCrop?(imagePath: imagePath, previewImage: previewImage, locationInContainer: locationInContainer)
     }
+
+    public func cropOverlayDidUpdateDragging(locationInContainer: CGPoint) {
+        delegate?.pdfEngineDidUpdateDraggingCrop?(locationInContainer: locationInContainer)
+    }
+
+    public func cropOverlayDidEndDragging(imagePath: String, pageNumber: Int, rect: CGRect, color: String, locationInContainer: CGPoint) {
+        delegate?.pdfEngineDidEndDraggingCrop?(imagePath: imagePath, pageNumber: pageNumber, rect: rect, color: color, locationInContainer: locationInContainer)
+    }
+
+    public func cropOverlayDidDismiss() {}
 }
