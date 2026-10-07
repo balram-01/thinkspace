@@ -47,6 +47,15 @@ import UIKit
     @objc public var groupedItems: [GroupedExcerpt]?
     @objc public var sourceRects: [BoundingBox]
 
+    // Typography styling properties matching Android NativeCard
+    @objc public var fontSize: CGFloat = 13.0
+    @objc public var isBold: Bool = false
+    @objc public var isItalic: Bool = false
+    @objc public var isUnderline: Bool = false
+    @objc public var isStrikethrough: Bool = false
+    @objc public var textColor: String = "#1E293B"
+    @objc public var textStyleName: String = "Default"
+
     @objc public init(
         id: String,
         documentId: String? = nil,
@@ -64,7 +73,14 @@ import UIKit
         isTable: Bool = false,
         isImage: Bool = false,
         groupedItems: [GroupedExcerpt]? = nil,
-        sourceRects: [BoundingBox] = []
+        sourceRects: [BoundingBox] = [],
+        fontSize: CGFloat = 13.0,
+        isBold: Bool = false,
+        isItalic: Bool = false,
+        isUnderline: Bool = false,
+        isStrikethrough: Bool = false,
+        textColor: String = "#1E293B",
+        textStyleName: String = "Default"
     ) {
         self.id = id
         self.documentId = documentId
@@ -83,12 +99,51 @@ import UIKit
         self.isImage = isImage
         self.groupedItems = groupedItems
         self.sourceRects = sourceRects
+        self.fontSize = fontSize
+        self.isBold = isBold
+        self.isItalic = isItalic
+        self.isUnderline = isUnderline
+        self.isStrikethrough = isStrikethrough
+        self.textColor = textColor
+        self.textStyleName = textStyleName
         super.init()
     }
 
     @objc public func estimatedHeight() -> CGFloat {
-        let baseHeight: CGFloat = isImage ? 140 : 80
-        let textPadding: CGFloat = CGFloat(min(text.count / 30, 8)) * 16.0
-        return baseHeight + textPadding
+        if let items = groupedItems, items.count > 1 {
+            let baseH: CGFloat = items.contains(where: { $0.isImage }) ? 175.0 : 140.0
+            return baseH + CGFloat(items.count - 1) * 8.0
+        }
+        if isTable {
+            return 170.0
+        }
+        if isImage {
+            return 160.0
+        }
+
+        // Dynamic text layout calculation matching Android StaticLayout
+        let textW = max(20.0, width - 28.0)
+        var fontDescriptor = UIFont.systemFont(ofSize: max(12.0, fontSize)).fontDescriptor
+        var traits: UIFontDescriptor.SymbolicTraits = []
+        if isBold { traits.insert(.traitBold) }
+        if isItalic { traits.insert(.traitItalic) }
+        if let desc = fontDescriptor.withSymbolicTraits(traits) {
+            fontDescriptor = desc
+        }
+        let font = UIFont(descriptor: fontDescriptor, size: max(12.0, fontSize))
+
+        let textToMeasure = text.isEmpty ? " " : text
+        let attrString = NSAttributedString(
+            string: textToMeasure,
+            attributes: [.font: font]
+        )
+        let constraintRect = CGSize(width: textW, height: .greatestFiniteMagnitude)
+        let boundingBox = attrString.boundingRect(
+            with: constraintRect,
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        )
+
+        return max(105.0, ceil(boundingBox.height) + 56.0)
     }
 }

@@ -340,4 +340,62 @@ using namespace facebook::react;
     }
 }
 
+- (void)emitNotebookPageMovedWithId:(NSString *)id x:(CGFloat)x y:(CGFloat)y
+{
+    if (_eventEmitter) {
+        std::static_pointer_cast<const ThinkspaceViewEventEmitter>(_eventEmitter)
+            ->onNotebookPageMoved({
+                .id = [id UTF8String] ?: "",
+                .x = static_cast<Float>(x),
+                .y = static_cast<Float>(y)
+            });
+    }
+}
+
+- (void)emitNotebookPageDeletedWithId:(NSString *)id
+{
+    if (_eventEmitter) {
+        std::static_pointer_cast<const ThinkspaceViewEventEmitter>(_eventEmitter)
+            ->onNotebookPageDeleted({
+                .id = [id UTF8String] ?: ""
+            });
+    }
+}
+
+- (void)emitDocumentChangeWithDocumentId:(NSString *)documentId
+                                   title:(NSString *)title
+                                     uri:(NSString *)uri
+                               pageCount:(NSInteger)pageCount
+{
+    if (_eventEmitter) {
+        std::static_pointer_cast<const ThinkspaceViewEventEmitter>(_eventEmitter)
+            ->onDocumentChange({
+                .documentId = [documentId UTF8String] ?: "",
+                .title = [title UTF8String] ?: "",
+                .uri = [uri UTF8String] ?: "",
+                .pageCount = static_cast<Float>(pageCount)
+            });
+    }
+}
+
+- (void)emitDocumentsUpdatedWithDocumentsJson:(NSString *)documentsJson
+                                  foldersJson:(NSString *)foldersJson
+{
+    if (_eventEmitter) {
+        std::static_pointer_cast<const ThinkspaceViewEventEmitter>(_eventEmitter)
+            ->onDocumentsUpdated({
+                .documentsJson = [documentsJson UTF8String] ?: "[]",
+                .foldersJson = [foldersJson UTF8String] ?: "[]"
+            });
+    }
+}
+
+- (void)emitRequestAddDocument
+{
+    if (_eventEmitter) {
+        std::static_pointer_cast<const ThinkspaceViewEventEmitter>(_eventEmitter)
+            ->onRequestAddDocument({});
+    }
+}
+
 @end

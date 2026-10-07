@@ -1,13 +1,22 @@
 import Foundation
+import CoreGraphics
 
 public enum WorkspaceAction {
     case addCard(ExcerptModel)
     case removeCard(ExcerptModel)
     case moveCard(id: String, oldX: CGFloat, oldY: CGFloat, newX: CGFloat, newY: CGFloat)
+    case stackCard(targetId: String, stackedItem: GroupedExcerpt, originalCard: ExcerptModel, previousLink: InkLink?)
+    case changeCardColor(id: String, oldColor: String, newColor: String)
+    case editCardText(id: String, oldText: String, newText: String)
     case addStroke(InkStroke)
     case removeStroke(InkStroke)
     case addInkLink(InkLink)
     case removeInkLink(InkLink)
+    case addNotebookPage(NotebookPageModel)
+    case removeNotebookPage(NotebookPageModel)
+    case moveNotebookPage(id: String, oldX: CGFloat, oldY: CGFloat, newX: CGFloat, newY: CGFloat)
+    case resizeNotebookPage(id: String, oldW: CGFloat, oldH: CGFloat, newW: CGFloat, newH: CGFloat)
+    case compound([WorkspaceAction])
 }
 
 @objc public protocol UndoRedoDelegate: AnyObject {

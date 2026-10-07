@@ -6,23 +6,35 @@ import UIKit
     func excerptCardMoveDidEnd(card: ExcerptModel)
     func excerptCardDidTap(card: ExcerptModel)
     func excerptCardDidDelete(card: ExcerptModel)
+    func excerptCardDidChangeColor(card: ExcerptModel, newColor: String)
+    func excerptCardDidUpdateText(card: ExcerptModel, newText: String)
+    func excerptCardDidTapSource(card: ExcerptModel)
 }
 
 /**
- * High-performance UIKit excerpt card view with 3D elevation, dynamic shadow, and spring physics.
+ * High-performance UIKit excerpt card view with 3D elevation, dynamic shadow,
+ * in-place typography editing, color switcher, source-jump badge, and stack clustering.
  */
-@objc public class ExcerptCardView: UIView {
+@objc public class ExcerptCardView: UIView, UITextFieldDelegate, UITextViewDelegate {
 
     @objc public let model: ExcerptModel
     @objc public weak var delegate: ExcerptCardViewDelegate?
+    public weak var camera: CameraTransform?
 
+    // UI Components
     private let colorBar = UIView()
-    private let textLabel = UILabel()
-    private let pageBadge = UILabel()
+    private let textView = UITextView()
+    private let pageBadge = UIButton(type: .system)
     private let stackBadge = UILabel()
-    private let haptic = UIImpactFeedbackGenerator(style: .light)
+    private let docBadge = UILabel()
+    private let imageView = UIImageView()
+    private let deleteBtn = UIButton(type: .system)
+    private let editBtn = UIButton(type: .system)
+    private let actionBar = UIView()
+    private let haptic = UIImpactFeedbackGenerator(style: .medium)
 
-    private var initialDragLocation: CGPoint = .zero
+    // Editing State
+    private var isEditingText = false
     private var isElevated = false
 
     @objc public init(model: ExcerptModel) {
@@ -40,7 +52,7 @@ import UIKit
         backgroundColor = .white
         layer.cornerRadius = 10.0
         layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.12
+        layer.shadowOpacity = 0.14
         layer.shadowRadius = 6.0
         layer.shadowOffset = CGSize(width: 0, height: 3)
 
@@ -49,17 +61,37 @@ import UIKit
         addSubview(colorBar)
 
         // Text Content
-        textLabel.numberOfLines = 0
-        textLabel.font = UIFont.systemFont(ofSize: 13.0, weight: .regular)
-        textLabel.textColor = UIColor(white: 0.15, alpha: 1.0)
-        addSubview(textLabel)
+        textView.isScrollEnabled = false
+        textView.backgroundColor = .clear
+        textView.delegate = self
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.isEditable = false
+        addSubview(textView)
 
-        // Page Badge
-        pageBadge.font = UIFont.systemFont(ofSize: 10.0, weight: .semibold)
-        pageBadge.textColor = UIColor(white: 0.45, alpha: 1.0)
+        // Image View (for Figure Cropping)
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        imageView.layer.cornerRadius = 6.0
+        imageView.isHidden = true
+        addSubview(imageView)
+
+        // Page / Source Badge (clickable to jump to source PDF passage)
+        pageBadge.titleLabel?.font = UIFont.systemFont(ofSize: 10.0, weight: .bold)
+        pageBadge.setTitleColor(UIColor(red: 0.0, green: 0.55, blue: 0.65, alpha: 1.0), for: .normal)
+        pageBadge.backgroundColor = UIColor(red: 0.0, green: 0.68, blue: 0.71, alpha: 0.12)
+        pageBadge.layer.cornerRadius = 4.0
+        pageBadge.contentEdgeInsets = UIEdgeInsets(top: 2, left: 6, bottom: 2, right: 6)
+        pageBadge.addTarget(self, action: #selector(handleSourceTap), for: .touchUpInside)
         addSubview(pageBadge)
 
-        // Stack Badge
+        // Document ID Badge (for multi-document workspaces)
+        docBadge.font = UIFont.systemFont(ofSize: 9.0, weight: .bold)
+        docBadge.textColor = UIColor(white: 0.5, alpha: 1.0)
+        docBadge.isHidden = true
+        addSubview(docBadge)
+
+        // Stack Count Badge
         stackBadge.font = UIFont.systemFont(ofSize: 10.0, weight: .bold)
         stackBadge.textColor = .white
         stackBadge.backgroundColor = UIColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 1.0)
@@ -69,19 +101,74 @@ import UIKit
         stackBadge.isHidden = true
         addSubview(stackBadge)
 
+        // Delete Button
+        deleteBtn.setTitle("✕", for: .normal)
+        deleteBtn.setTitleColor(UIColor(white: 0.6, alpha: 1.0), for: .normal)
+        deleteBtn.titleLabel?.font = UIFont.systemFont(ofSize: 11.0, weight: .bold)
+        deleteBtn.addTarget(self, action: #selector(handleDeleteTap), for: .touchUpInside)
+        addSubview(deleteBtn)
+
         // Gestures
-        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleCardTap))
         addGestureRecognizer(tapGesture)
 
         let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         addGestureRecognizer(panGesture)
+
+        let doubleTapGesture = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
+        doubleTapGesture.numberOfTapsRequired = 2
+        addGestureRecognizer(doubleTapGesture)
+        tapGesture.require(toFail: doubleTapGesture)
     }
 
     @objc public func updateContent() {
-        textLabel.text = model.text
-        pageBadge.text = MagneticStackingEngine.formatStackedPages(card: model)
+        // Typography styling matching Android NativeCard
+        var fontDescriptor = UIFont.systemFont(ofSize: max(12.0, model.fontSize)).fontDescriptor
+        var traits: UIFontDescriptor.SymbolicTraits = []
+        if model.isBold { traits.insert(.traitBold) }
+        if model.isItalic { traits.insert(.traitItalic) }
+        if let desc = fontDescriptor.withSymbolicTraits(traits) {
+            fontDescriptor = desc
+        }
+        let font = UIFont(descriptor: fontDescriptor, size: max(12.0, model.fontSize))
 
-        let hexColor = UIColor(hexString: model.color) ?? UIColor.systemYellow
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: UIColor(hexString: model.textColor) ?? UIColor(red: 0.12, green: 0.16, blue: 0.23, alpha: 1.0)
+        ]
+        if model.isUnderline {
+            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        }
+        if model.isStrikethrough {
+            attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+        }
+
+        textView.attributedText = NSAttributedString(string: model.text, attributes: attributes)
+
+        // Image crop
+        if model.isImage, let imgUrl = model.imageUrl {
+            imageView.isHidden = false
+            if let localImg = UIImage(contentsOfFile: imgUrl.replacingOccurrences(of: "file://", with: "")) {
+                imageView.image = localImg
+            } else if let url = URL(string: imgUrl), let data = try? Data(contentsOf: url) {
+                imageView.image = UIImage(data: data)
+            }
+        } else {
+            imageView.isHidden = true
+        }
+
+        // Badges
+        let pageStr = MagneticStackingEngine.formatStackedPages(card: model)
+        pageBadge.setTitle(pageStr, for: .normal)
+
+        if let docId = model.documentId, !docId.isEmpty {
+            docBadge.isHidden = false
+            docBadge.text = docId
+        } else {
+            docBadge.isHidden = true
+        }
+
+        let hexColor = UIColor(hexString: model.color) ?? UIColor(red: 1.0, green: 0.85, blue: 0.0, alpha: 1.0)
         colorBar.backgroundColor = hexColor
 
         if model.stackCount > 1 {
@@ -102,39 +189,72 @@ import UIKit
         colorBar.frame = CGRect(x: pad, y: pad, width: barWidth, height: bounds.height - pad * 2)
 
         let contentX = colorBar.frame.maxX + 8.0
-        let availableWidth = bounds.width - contentX - pad
+        let contentW = bounds.width - contentX - pad
 
-        let pageBadgeHeight: CGFloat = 16.0
-        pageBadge.frame = CGRect(
-            x: contentX,
-            y: bounds.height - pad - pageBadgeHeight,
-            width: 100,
-            height: pageBadgeHeight
-        )
+        deleteBtn.frame = CGRect(x: bounds.width - 24.0, y: 6.0, width: 18.0, height: 18.0)
 
-        if !stackBadge.isHidden {
-            stackBadge.frame = CGRect(
-                x: bounds.width - pad - 30,
-                y: bounds.height - pad - pageBadgeHeight,
-                width: 30,
-                height: 16
-            )
+        var topY: CGFloat = pad
+        if !imageView.isHidden {
+            let imgHeight: CGFloat = 100.0
+            imageView.frame = CGRect(x: contentX, y: topY, width: contentW - 16.0, height: imgHeight)
+            topY += imgHeight + 8.0
         }
 
-        textLabel.frame = CGRect(
-            x: contentX,
-            y: pad,
-            width: availableWidth,
-            height: bounds.height - pad * 2 - pageBadgeHeight
-        )
+        let bottomBadgeH: CGFloat = 20.0
+        let textH = max(24.0, bounds.height - topY - bottomBadgeH - pad - 6.0)
+        textView.frame = CGRect(x: contentX, y: topY, width: contentW - 16.0, height: textH)
+
+        let badgeY = bounds.height - bottomBadgeH - pad
+        pageBadge.sizeToFit()
+        pageBadge.frame = CGRect(x: contentX, y: badgeY, width: pageBadge.bounds.width + 12.0, height: bottomBadgeH)
+
+        if !docBadge.isHidden {
+            docBadge.sizeToFit()
+            docBadge.frame = CGRect(x: pageBadge.frame.maxX + 8.0, y: badgeY + 2.0, width: docBadge.bounds.width, height: bottomBadgeH - 4.0)
+        }
+
+        if !stackBadge.isHidden {
+            stackBadge.frame = CGRect(x: bounds.width - pad - 32.0, y: badgeY, width: 30.0, height: bottomBadgeH)
+        }
     }
 
-    public weak var camera: CameraTransform?
-
-    @objc private func handleTap() {
+    @objc private func handleCardTap() {
+        if isEditingText {
+            endEditing(true)
+        }
         delegate?.excerptCardDidTap(card: model)
     }
 
+    @objc private func handleDoubleTap() {
+        // Toggle inline editing on double tap
+        isEditingText = true
+        textView.isEditable = true
+        textView.becomeFirstResponder()
+        haptic.prepare()
+        haptic.impactOccurred()
+    }
+
+    @objc private func handleSourceTap() {
+        haptic.prepare()
+        haptic.impactOccurred()
+        delegate?.excerptCardDidTapSource(card: model)
+    }
+
+    @objc private func handleDeleteTap() {
+        haptic.prepare()
+        haptic.impactOccurred()
+        delegate?.excerptCardDidDelete(card: model)
+    }
+
+    // ── UITextViewDelegate ─────────────────────────────────────────────────────
+    public func textViewDidEndEditing(_ textView: UITextView) {
+        isEditingText = false
+        textView.isEditable = false
+        model.text = textView.text ?? ""
+        delegate?.excerptCardDidUpdateText(card: model, newText: model.text)
+    }
+
+    // ── Pan Gesture ────────────────────────────────────────────────────────────
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
         guard let superview = superview else { return }
 
@@ -185,25 +305,9 @@ import UIKit
             } else {
                 self.transform = .identity
                 self.layer.shadowRadius = 6.0
-                self.layer.shadowOpacity = 0.12
+                self.layer.shadowOpacity = 0.14
                 self.layer.shadowOffset = CGSize(width: 0, height: 3)
             }
         }
-    }
-}
-
-// ── Color Utilities ────────────────────────────────────────────────────────────
-extension UIColor {
-    convenience init?(hexString: String) {
-        var hexSanitized = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
-        hexSanitized = hexSanitized.replacingOccurrences(of: "#", with: "")
-
-        var rgb: UInt64 = 0
-        guard Scanner(string: hexSanitized).scanHexInt64(&rgb) else { return nil }
-
-        let r = CGFloat((rgb & 0xFF0000) >> 16) / 255.0
-        let g = CGFloat((rgb & 0x00FF00) >> 8) / 255.0
-        let b = CGFloat(rgb & 0x0000FF) / 255.0
-        self.init(red: r, green: g, blue: b, alpha: 1.0)
     }
 }

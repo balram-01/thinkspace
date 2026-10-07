@@ -6,14 +6,20 @@ import CoreGraphics
     func canvasDidTransform(panX: CGFloat, panY: CGFloat, scale: CGFloat)
     func canvasExcerptDidMove(card: ExcerptModel)
     func canvasExcerptDidTap(card: ExcerptModel)
+    func canvasExcerptDidDelete(card: ExcerptModel)
+    func canvasExcerptDidChangeColor(card: ExcerptModel, color: String)
+    func canvasExcerptDidUpdateText(card: ExcerptModel, text: String)
+    func canvasExcerptDidTapSource(card: ExcerptModel)
     func canvasInkLinkDidTap(link: InkLink)
+    func canvasNotebookPageDidMove(page: NotebookPageModel)
+    func canvasNotebookPageDidResize(page: NotebookPageModel)
 }
 
 /**
  * High-performance 2D infinite workspace canvas with focal zoom, pan momentum, grid backgrounds,
- * card stacking, and GPU-accelerated InkLink tethers.
+ * card stacking, notebook pages, and GPU-accelerated InkLink tethers.
  */
-@objc public class InfiniteCanvasView: UIView, ExcerptCardViewDelegate, InkLinkRendererDelegate {
+@objc public class InfiniteCanvasView: UIView, ExcerptCardViewDelegate, NotebookPageViewDelegate, InkLinkRendererDelegate {
 
     @objc public let camera = CameraTransform()
     @objc public weak var delegate: InfiniteCanvasViewDelegate?
@@ -22,10 +28,12 @@ import CoreGraphics
         didSet { setNeedsDisplay() }
     }
 
-    // Subviews
+    // Subviews & Layers
+    private let notebookLayer = UIView()
     private let contentLayer = UIView()
     @objc public let inkLinkOverlay = InkLinkRenderer()
     private var cardViewMap: [String: ExcerptCardView] = [:]
+    private var notebookViewMap: [String: NotebookPageView] = [:]
 
     // Gestures
     private var panGesture: UIPanGestureRecognizer!
@@ -44,6 +52,10 @@ import CoreGraphics
     private func setupCanvas() {
         backgroundColor = UIColor(white: 0.95, alpha: 1.0)
         clipsToBounds = true
+
+        notebookLayer.frame = bounds
+        notebookLayer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(notebookLayer)
 
         contentLayer.frame = bounds
         contentLayer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -104,7 +116,6 @@ import CoreGraphics
             }
             context.strokePath()
         } else if pattern == "looseleaf" {
-            // Horizontal lined notebook rules with subtle margin line
             context.setStrokeColor(UIColor(red: 0.82, green: 0.88, blue: 0.94, alpha: 0.75).cgColor)
             context.setLineWidth(0.8)
             var y = offsetY
@@ -137,19 +148,18 @@ import CoreGraphics
     private func applyTransform() {
         setNeedsDisplay()
         repositionAllCards()
+        repositionAllNotebookPages()
         inkLinkOverlay.setNeedsDisplay()
     }
 
     // ── Card Management ────────────────────────────────────────────────────────
     @objc public func syncCards(_ cards: [ExcerptModel]) {
-        // Remove old views that are no longer in models
         let currentIds = Set(cards.map { $0.id })
         for (id, view) in cardViewMap where !currentIds.contains(id) {
             view.removeFromSuperview()
             cardViewMap.removeValue(forKey: id)
         }
 
-        // Add or update views
         for model in cards {
             if let existing = cardViewMap[model.id] {
                 existing.updateContent()
@@ -176,6 +186,7 @@ import CoreGraphics
         inkLinkOverlay.cardViews = cardViewMap
         repositionCard(cardView)
         inkLinkOverlay.setNeedsDisplay()
+        triggerPlacementShockwave(at: cardView.center)
     }
 
     private func repositionCard(_ cardView: ExcerptCardView) {
@@ -191,20 +202,79 @@ import CoreGraphics
         }
     }
 
+    // ── Notebook Pages Management ──────────────────────────────────────────────
+    @objc public func syncNotebookPages(_ pages: [NotebookPageModel]) {
+        let currentIds = Set(pages.map { $0.id })
+        for (id, view) in notebookViewMap where !currentIds.contains(id) {
+            view.removeFromSuperview()
+            notebookViewMap.removeValue(forKey: id)
+        }
+
+        for page in pages {
+            if let existing = notebookViewMap[page.id] {
+                existing.setNeedsDisplay()
+            } else {
+                let pageView = NotebookPageView(model: page)
+                pageView.delegate = self
+                pageView.camera = camera
+                notebookViewMap[page.id] = pageView
+                notebookLayer.addSubview(pageView)
+            }
+        }
+        repositionAllNotebookPages()
+    }
+
+    @objc public func addNotebookPage(_ page: NotebookPageModel) {
+        let pageView = NotebookPageView(model: page)
+        pageView.delegate = self
+        pageView.camera = camera
+        notebookViewMap[page.id] = pageView
+        notebookLayer.addSubview(pageView)
+        repositionNotebookPage(pageView)
+    }
+
+    private func repositionNotebookPage(_ pageView: NotebookPageView) {
+        let screenOrigin = camera.worldToScreen(CGPoint(x: pageView.model.x, y: pageView.model.y))
+        let width = pageView.model.width * camera.scale
+        let height = pageView.model.height * camera.scale
+        pageView.frame = CGRect(x: screenOrigin.x, y: screenOrigin.y, width: width, height: height)
+    }
+
+    private func repositionAllNotebookPages() {
+        for (_, view) in notebookViewMap {
+            repositionNotebookPage(view)
+        }
+    }
+
+    // ── Visual Shockwave Animation ─────────────────────────────────────────────
+    @objc public func triggerPlacementShockwave(at center: CGPoint, color: UIColor = UIColor(red: 0.0, green: 0.68, blue: 0.71, alpha: 0.8)) {
+        let pulseRing = UIView(frame: CGRect(x: center.x - 20, y: center.y - 20, width: 40, height: 40))
+        pulseRing.layer.cornerRadius = 20.0
+        pulseRing.layer.borderWidth = 2.5
+        pulseRing.layer.borderColor = color.cgColor
+        pulseRing.backgroundColor = color.withAlphaComponent(0.2)
+        addSubview(pulseRing)
+
+        UIView.animate(withDuration: 0.45, delay: 0, options: [.curveEaseOut]) {
+            pulseRing.transform = CGAffineTransform(scaleX: 3.5, y: 3.5)
+            pulseRing.alpha = 0.0
+        } completion: { _ in
+            pulseRing.removeFromSuperview()
+        }
+    }
+
     // ── ExcerptCardViewDelegate ────────────────────────────────────────────────
     public func excerptCardDidMove(card: ExcerptModel, worldX: CGFloat, worldY: CGFloat) {
         inkLinkOverlay.setNeedsDisplay()
     }
 
     public func excerptCardMoveDidEnd(card: ExcerptModel) {
-        // Check magnetic snap target
         let otherCards = cardViewMap.values.map { $0.model }.filter { $0.id != card.id }
         if let target = MagneticStackingEngine.findSnapTarget(
             dragWorldX: card.x,
             dragWorldY: card.y,
             existingCards: otherCards
         ) {
-            // Stack into target card
             let grouped = GroupedExcerpt(
                 id: card.id,
                 text: card.text,
@@ -217,9 +287,9 @@ import CoreGraphics
 
             if let targetView = cardViewMap[target.id] {
                 targetView.updateContent()
+                triggerPlacementShockwave(at: targetView.center)
             }
 
-            // Remove dragged card from canvas
             if let draggedView = cardViewMap[card.id] {
                 draggedView.removeFromSuperview()
                 cardViewMap.removeValue(forKey: card.id)
@@ -242,10 +312,42 @@ import CoreGraphics
             cardViewMap.removeValue(forKey: card.id)
             inkLinkOverlay.cardViews = cardViewMap
             inkLinkOverlay.setNeedsDisplay()
+            delegate?.canvasExcerptDidDelete(card: card)
         }
+    }
+
+    public func excerptCardDidChangeColor(card: ExcerptModel, newColor: String) {
+        card.color = newColor
+        cardViewMap[card.id]?.updateContent()
+        delegate?.canvasExcerptDidChangeColor(card: card, color: newColor)
+    }
+
+    public func excerptCardDidUpdateText(card: ExcerptModel, newText: String) {
+        card.text = newText
+        delegate?.canvasExcerptDidUpdateText(card: card, text: newText)
+    }
+
+    public func excerptCardDidTapSource(card: ExcerptModel) {
+        delegate?.canvasExcerptDidTapSource(card: card)
     }
 
     public func inkLinkDidTap(link: InkLink) {
         delegate?.canvasInkLinkDidTap(link: link)
     }
+
+    // ── NotebookPageViewDelegate ───────────────────────────────────────────────
+    public func notebookPageDidMove(page: NotebookPageModel) {
+        delegate?.canvasNotebookPageDidMove(page: page)
+    }
+
+    public func notebookPageDidResize(page: NotebookPageModel) {
+        delegate?.canvasNotebookPageDidResize(page: page)
+    }
+
+    public func notebookPageDidTap(page: NotebookPageModel) {}
+    public func notebookPageDidDelete(page: NotebookPageModel) {
+        notebookViewMap[page.id]?.removeFromSuperview()
+        notebookViewMap.removeValue(forKey: page.id)
+    }
+    public func notebookPageDidDuplicate(page: NotebookPageModel) {}
 }

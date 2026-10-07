@@ -31,6 +31,11 @@ import CoreGraphics
     func emitInkLinkDelete(id: String)
     func emitPenStateChange(mode: String, color: String, thickness: CGFloat, favoritesJson: String)
     func emitNotebookPageAdded(id: String, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, pageStyle: String, title: String)
+    func emitNotebookPageMoved(id: String, x: CGFloat, y: CGFloat)
+    func emitNotebookPageDeleted(id: String)
+    func emitDocumentChange(documentId: String, title: String, uri: String, pageCount: Int)
+    func emitDocumentsUpdated(documentsJson: String, foldersJson: String)
+    func emitRequestAddDocument()
 }
 
 @objc public class ThinkspaceBridgeEmitter: NSObject {
@@ -147,5 +152,25 @@ import CoreGraphics
             pageStyle: page.pageStyle,
             title: page.title
         )
+    }
+
+    @objc public func sendNotebookPageMoved(id: String, x: CGFloat, y: CGFloat) {
+        delegate?.emitNotebookPageMoved(id: id, x: x, y: y)
+    }
+
+    @objc public func sendNotebookPageDeleted(id: String) {
+        delegate?.emitNotebookPageDeleted(id: id)
+    }
+
+    @objc public func sendDocumentChange(documentId: String, title: String, uri: String, pageCount: Int) {
+        delegate?.emitDocumentChange(documentId: documentId, title: title, uri: uri, pageCount: pageCount)
+    }
+
+    @objc public func sendDocumentsUpdated(documentsJson: String, foldersJson: String) {
+        delegate?.emitDocumentsUpdated(documentsJson: documentsJson, foldersJson: foldersJson)
+    }
+
+    @objc public func sendRequestAddDocument() {
+        delegate?.emitRequestAddDocument()
     }
 }

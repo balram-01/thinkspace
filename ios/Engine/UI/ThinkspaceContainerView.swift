@@ -4,7 +4,8 @@ import PDFKit
 
 /**
  * ThinkspaceContainerView: The master UIKit container view coordinating the PDF document reader,
- * the infinite 2D canvas, the interactive split divider, Apple Pencil inking, and Fabric bridge.
+ * the infinite 2D canvas, the interactive split divider, Apple Pencil inking, notebook pages,
+ * HUD toast notifications, and Fabric bridge.
  */
 @objc public class ThinkspaceContainerView: UIView,
     ThinkspaceCommandHandler,
@@ -18,6 +19,7 @@ import PDFKit
     @objc public let canvasContainer = UIView()
     @objc public let splitDivider = UIView()
     private let dividerHandle = UIView()
+    @objc public let toastView = HudToastView()
 
     // ── Native Sub-Engines ─────────────────────────────────────────────────────
     @objc public let pdfEngine = PDFDocumentEngine()
@@ -208,6 +210,15 @@ import PDFKit
     @objc public func updateIsSqueezed(_ squeezed: Bool) {
         if isSqueezed != squeezed {
             isSqueezed = squeezed
+            if squeezed {
+                pdfEngine.compressionEngine.collapseUnhighlightedPages(annotatedPageIndices: []) { [weak self] in
+                    self?.setNeedsLayout()
+                }
+            } else {
+                pdfEngine.compressionEngine.resetAllToNormal { [weak self] in
+                    self?.setNeedsLayout()
+                }
+            }
             setNeedsLayout()
         }
     }
@@ -255,6 +266,7 @@ import PDFKit
         guard let data = json.data(using: .utf8),
               let list = try? JSONDecoder().decode([NotebookPageModel].self, from: data) else { return }
         self.notebookPages = list
+        infiniteCanvas.syncNotebookPages(list)
     }
 
     @objc public func updateWorkspaceDocumentsJson(_ json: String) {
@@ -293,9 +305,20 @@ import PDFKit
 
     // ── PDFDocumentEngineDelegate ──────────────────────────────────────────────
     public func pdfEngineDidSelectText(selection: PDFSelection, excerpt: ExcerptModel) {
-        // Position newly extracted card onto visible canvas center
-        excerpt.x = camera.screenToWorldX(canvasContainer.bounds.width / 2.0 - excerpt.width / 2.0)
-        excerpt.y = camera.screenToWorldY(canvasContainer.bounds.height / 2.0 - 50.0)
+        // Smart non-overlapping placement using CollisionSolver (§9 of Spec)
+        let desiredWorldX = camera.screenToWorldX(canvasContainer.bounds.width / 2.0 - excerpt.width / 2.0)
+        let desiredWorldY = camera.screenToWorldY(max(30.0, canvasContainer.bounds.height / 2.0 - 60.0))
+
+        let optimalPosition = CollisionSolver.findNonOverlappingPosition(
+            desiredX: desiredWorldX,
+            desiredY: desiredWorldY,
+            cardWidth: excerpt.width,
+            cardHeight: excerpt.estimatedHeight(),
+            existingCards: cards
+        )
+
+        excerpt.x = optimalPosition.x
+        excerpt.y = optimalPosition.y
 
         // Register card
         cards.append(excerpt)
@@ -315,13 +338,61 @@ import PDFKit
         infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
         ThinkspaceBridgeEmitter.shared.sendInkLinkCreate(newLink)
 
+        // Floating Toast Notification
+        toastView.showToast(message: "Excerpt placed without overlap with live Ink-Link!", in: self)
+
         // Record Undo action
         undoRedoManager.recordAction(.addCard(excerpt))
     }
 
-    public func pdfEnginePageDidChange(pageNumber: Int, totalPages: Int) {
-        // Dispatched if page changes
+    public func pdfEngineDidExtractCrop(imagePath: String, pageNumber: Int, rect: CGRect) {
+        let desiredWorldX = camera.screenToWorldX(canvasContainer.bounds.width / 2.0 - 100.0)
+        let desiredWorldY = camera.screenToWorldY(max(30.0, canvasContainer.bounds.height / 2.0 - 80.0))
+
+        let cropExcerpt = ExcerptModel(
+            id: UUID().uuidString,
+            documentId: activeDocumentId,
+            pageNumber: pageNumber,
+            text: "Extracted Figure (p. \(pageNumber))",
+            color: "#3B82F6",
+            x: desiredWorldX,
+            y: desiredWorldY,
+            width: 220,
+            imageUrl: imagePath,
+            isImage: true
+        )
+
+        let optimalPosition = CollisionSolver.findNonOverlappingPosition(
+            desiredX: desiredWorldX,
+            desiredY: desiredWorldY,
+            cardWidth: cropExcerpt.width,
+            cardHeight: cropExcerpt.estimatedHeight(),
+            existingCards: cards
+        )
+        cropExcerpt.x = optimalPosition.x
+        cropExcerpt.y = optimalPosition.y
+
+        cards.append(cropExcerpt)
+        infiniteCanvas.addCard(cropExcerpt)
+        ThinkspaceBridgeEmitter.shared.sendExtractExcerpt(card: cropExcerpt)
+
+        let newLink = InkLink(
+            id: UUID().uuidString,
+            sourceExcerptId: cropExcerpt.id,
+            targetDocumentId: activeDocumentId ?? "",
+            targetPageNumber: pageNumber,
+            targetRelativeY: 0.5,
+            color: "#3B82F6"
+        )
+        inkLinks.append(newLink)
+        infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+        ThinkspaceBridgeEmitter.shared.sendInkLinkCreate(newLink)
+
+        toastView.showToast(message: "Extracted figure placed neatly with live Ink-Link!", in: self)
+        undoRedoManager.recordAction(.addCard(cropExcerpt))
     }
+
+    public func pdfEnginePageDidChange(pageNumber: Int, totalPages: Int) {}
 
     // ── InfiniteCanvasViewDelegate ─────────────────────────────────────────────
     public func canvasDidTransform(panX: CGFloat, panY: CGFloat, scale: CGFloat) {
@@ -336,17 +407,54 @@ import PDFKit
         ThinkspaceBridgeEmitter.shared.sendExcerptPress(id: card.id)
     }
 
-    public func canvasInkLinkDidTap(link: InkLink) {
-        // Smoothly scroll PDF engine to target document and page
-        if let docId = link.targetDocumentId as String?, !docId.isEmpty, docId != activeDocumentId {
+    public func canvasExcerptDidDelete(card: ExcerptModel) {
+        cards.removeAll { $0.id == card.id }
+        inkLinks.removeAll { $0.sourceExcerptId == card.id }
+        infiniteCanvas.syncCards(cards)
+        infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+        undoRedoManager.recordAction(.removeCard(card))
+        ThinkspaceBridgeEmitter.shared.sendCardDelete(id: card.id)
+    }
+
+    public func canvasExcerptDidChangeColor(card: ExcerptModel, color: String) {
+        ThinkspaceBridgeEmitter.shared.sendChangeCardColor(id: card.id, color: color)
+    }
+
+    public func canvasExcerptDidUpdateText(card: ExcerptModel, text: String) {
+        ThinkspaceBridgeEmitter.shared.sendUpdateCardComment(id: card.id, comment: text)
+    }
+
+    public func canvasExcerptDidTapSource(card: ExcerptModel) {
+        // Multi-document source navigation with shockwave pulse!
+        if let docId = card.documentId, !docId.isEmpty, docId != activeDocumentId {
             updateActiveDocumentId(docId)
+            ThinkspaceBridgeEmitter.shared.sendRequestDocumentSwitch(documentId: docId, pageNumber: card.pageNumber, cardId: card.id)
         }
-        if link.targetPageNumber > 0 {
-            pdfEngine.scrollToPage(link.targetPageNumber)
+        if card.pageNumber > 0 {
+            pdfEngine.scrollToPage(card.pageNumber, sourceRects: card.sourceRects)
         }
         impactFeedback.prepare()
         impactFeedback.impactOccurred()
     }
+
+    public func canvasInkLinkDidTap(link: InkLink) {
+        if let docId = link.targetDocumentId as String?, !docId.isEmpty, docId != activeDocumentId {
+            updateActiveDocumentId(docId)
+            ThinkspaceBridgeEmitter.shared.sendRequestDocumentSwitch(documentId: docId, pageNumber: link.targetPageNumber, cardId: link.sourceExcerptId)
+        }
+        if link.targetPageNumber > 0 {
+            let matchedCard = cards.first(where: { $0.id == link.sourceExcerptId })
+            pdfEngine.scrollToPage(link.targetPageNumber, sourceRects: matchedCard?.sourceRects ?? [])
+        }
+        impactFeedback.prepare()
+        impactFeedback.impactOccurred()
+    }
+
+    public func canvasNotebookPageDidMove(page: NotebookPageModel) {
+        // Find attached cards/strokes if any
+    }
+
+    public func canvasNotebookPageDidResize(page: NotebookPageModel) {}
 
     // ── ApplePencilEngineDelegate ──────────────────────────────────────────────
     public func pencilEngineDidAddStroke(stroke: InkStroke) {
@@ -398,6 +506,36 @@ import PDFKit
                 infiniteCanvas.syncCards(cards)
                 ThinkspaceBridgeEmitter.shared.sendExcerptMoveEnd(card: card)
             }
+        case .stackCard(let targetId, let item, let origCard, let prevLink):
+            if isUndo {
+                if let target = cards.first(where: { $0.id == targetId }) {
+                    target.groupedItems?.removeAll { $0.id == item.id }
+                }
+                cards.append(origCard)
+                infiniteCanvas.syncCards(cards)
+                if let l = prevLink {
+                    inkLinks.append(l)
+                    infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+                }
+            } else {
+                if let target = cards.first(where: { $0.id == targetId }) {
+                    MagneticStackingEngine.stackIntoCard(targetCard: target, newExcerpt: item)
+                }
+                cards.removeAll { $0.id == origCard.id }
+                infiniteCanvas.syncCards(cards)
+            }
+        case .changeCardColor(let id, let oldColor, let newColor):
+            if let card = cards.first(where: { $0.id == id }) {
+                card.color = isUndo ? oldColor : newColor
+                infiniteCanvas.syncCards(cards)
+                ThinkspaceBridgeEmitter.shared.sendChangeCardColor(id: id, color: card.color)
+            }
+        case .editCardText(let id, let oldText, let newText):
+            if let card = cards.first(where: { $0.id == id }) {
+                card.text = isUndo ? oldText : newText
+                infiniteCanvas.syncCards(cards)
+                ThinkspaceBridgeEmitter.shared.sendUpdateCardComment(id: id, comment: card.text)
+            }
         case .addStroke(let stroke):
             if isUndo {
                 strokes.removeAll { $0.id == stroke.id }
@@ -433,6 +571,44 @@ import PDFKit
                 inkLinks.removeAll { $0.id == link.id }
                 infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
                 ThinkspaceBridgeEmitter.shared.sendInkLinkDelete(id: link.id)
+            }
+        case .addNotebookPage(let page):
+            if isUndo {
+                notebookPages.removeAll { $0.id == page.id }
+                infiniteCanvas.syncNotebookPages(notebookPages)
+            } else {
+                notebookPages.append(page)
+                infiniteCanvas.addNotebookPage(page)
+            }
+        case .removeNotebookPage(let page):
+            if isUndo {
+                notebookPages.append(page)
+                infiniteCanvas.addNotebookPage(page)
+            } else {
+                notebookPages.removeAll { $0.id == page.id }
+                infiniteCanvas.syncNotebookPages(notebookPages)
+            }
+        case .moveNotebookPage(let id, let oldX, let oldY, let newX, let newY):
+            if let p = notebookPages.first(where: { $0.id == id }) {
+                p.x = isUndo ? oldX : newX
+                p.y = isUndo ? oldY : newY
+                infiniteCanvas.syncNotebookPages(notebookPages)
+            }
+        case .resizeNotebookPage(let id, let oldW, let oldH, let newW, let newH):
+            if let p = notebookPages.first(where: { $0.id == id }) {
+                p.width = isUndo ? oldW : newW
+                p.height = isUndo ? oldH : newH
+                infiniteCanvas.syncNotebookPages(notebookPages)
+            }
+        case .compound(let actions):
+            if isUndo {
+                for act in actions.reversed() {
+                    applyAction(act, isUndo: true)
+                }
+            } else {
+                for act in actions {
+                    applyAction(act, isUndo: false)
+                }
             }
         }
     }
@@ -487,8 +663,8 @@ import PDFKit
 
     public func handleToggleSqueezeMode() {
         isSqueezed.toggle()
+        updateIsSqueezed(isSqueezed)
         ThinkspaceBridgeEmitter.shared.sendToggleSqueeze(isSqueezed: isSqueezed)
-        setNeedsLayout()
     }
 
     public func handleSetActiveTool(tool: String) {
@@ -508,7 +684,10 @@ import PDFKit
             title: title
         )
         notebookPages.append(newPage)
+        infiniteCanvas.addNotebookPage(newPage)
+        undoRedoManager.recordAction(.addNotebookPage(newPage))
         ThinkspaceBridgeEmitter.shared.sendNotebookPageAdded(page: newPage)
+        toastView.showToast(message: "Added '\(title)' notebook page to canvas", in: self)
     }
 
     public func handleToggleImmersiveMode() {
@@ -553,17 +732,23 @@ import PDFKit
     }
 
     public func handleDeleteCard(cardId: String) {
-        cards.removeAll { $0.id == cardId }
-        inkLinks.removeAll { $0.sourceExcerptId == cardId }
-        infiniteCanvas.syncCards(cards)
-        infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
-        ThinkspaceBridgeEmitter.shared.sendCardDelete(id: cardId)
+        if let card = cards.first(where: { $0.id == cardId }) {
+            cards.removeAll { $0.id == cardId }
+            inkLinks.removeAll { $0.sourceExcerptId == cardId }
+            infiniteCanvas.syncCards(cards)
+            infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+            undoRedoManager.recordAction(.removeCard(card))
+            ThinkspaceBridgeEmitter.shared.sendCardDelete(id: cardId)
+        }
     }
 
     public func handleDeleteInkLink(linkId: String) {
-        inkLinks.removeAll { $0.id == linkId }
-        infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
-        ThinkspaceBridgeEmitter.shared.sendInkLinkDelete(id: linkId)
+        if let link = inkLinks.first(where: { $0.id == linkId }) {
+            inkLinks.removeAll { $0.id == linkId }
+            infiniteCanvas.inkLinkOverlay.inkLinks = inkLinks
+            undoRedoManager.recordAction(.removeInkLink(link))
+            ThinkspaceBridgeEmitter.shared.sendInkLinkDelete(id: linkId)
+        }
     }
 
     public func handleClearAllCards() {
